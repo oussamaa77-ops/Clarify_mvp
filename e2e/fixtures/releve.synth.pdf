@@ -1,0 +1,60 @@
+%PDF-1.4
+1 0 obj
+<</Type /Catalog /Pages 2 0 R>>
+endobj
+2 0 obj
+<</Type /Pages /Kids [3 0 R] /Count 1>>
+endobj
+3 0 obj
+<</Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources <</Font <</F1 5 0 R>>>> /Contents 4 0 R>>
+endobj
+4 0 obj
+<</Length 948>>
+stream
+BT
+/F1 11 Tf
+1 0 0 1 50 800 Tm
+(BANQUE POPULAIRE - RELEVE DE COMPTE) Tj
+1 0 0 1 50 782 Tm
+(RIB: 190 780 2111114470020003 85) Tj
+1 0 0 1 50 764 Tm
+(Periode: 01/05/2026 au 31/05/2026) Tj
+1 0 0 1 50 746 Tm
+(SOLDE DEPART .................. 12 500,00) Tj
+1 0 0 1 50 728 Tm
+() Tj
+1 0 0 1 50 710 Tm
+(Date       Libelle                         Debit      Credit     Solde) Tj
+1 0 0 1 50 692 Tm
+(03/05/2026 VIR RECU CLIENT ALPHA                       6000,00   18500,00) Tj
+1 0 0 1 50 674 Tm
+(07/05/2026 PAIEMENT FOURNISSEUR BETA        2400,00               16100,00) Tj
+1 0 0 1 50 656 Tm
+(12/05/2026 PRLV ONEE ELECTRICITE             850,50               15249,50) Tj
+1 0 0 1 50 638 Tm
+(19/05/2026 VIR EMIS SALAIRES                4500,00               10749,50) Tj
+1 0 0 1 50 620 Tm
+(26/05/2026 FRAIS BANCAIRES                    45,00               10704,50) Tj
+1 0 0 1 50 602 Tm
+() Tj
+1 0 0 1 50 584 Tm
+(SOLDE FINAL ................... 10 704,50) Tj
+ET
+endstream
+endobj
+5 0 obj
+<</Type /Font /Subtype /Type1 /BaseFont /Helvetica>>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000056 00000 n 
+0000000111 00000 n 
+0000000231 00000 n 
+0000001228 00000 n 
+trailer
+<</Size 6 /Root 1 0 R>>
+startxref
+1296
+%%EOF

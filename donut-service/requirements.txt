@@ -1,0 +1,14 @@
+# Service Donut — OCR relevés bancaires (option locale).
+# Installez torch séparément si vous voulez une build GPU (voir README).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+transformers>=4.38
+torch>=2.1
+torchvision>=0.16
+timm>=0.9
+sentencepiece>=0.1.99
+protobuf>=4.25
+pillow>=10.0
+pydantic>=2.5
+# Fait confiance au magasin de certificats de l'OS (proxy SSL d'entreprise).
+truststore>=0.9

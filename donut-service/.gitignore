@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+# cache des poids HuggingFace si HF_HOME pointe ici
+.cache/
+models--*/
