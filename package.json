@@ -2,13 +2,16 @@
   "name": "hisabpro",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "dotenv -e .env -- vite dev",
     "worker": "tsx src/queue/document-worker.ts",
     "cron:tva": "dotenv -e .env -- tsx scripts/cron-rappel-tva.ts",
     "redis:up": "docker compose up -d redis",
     "build": "vite build",
-    "start": "node .output/server/index.mjs",
+    "start": "node server.mjs",
     "lint": "eslint .",
     "gen:types": "node scripts/gen-supabase-types.mjs",
     "test": "vitest run",

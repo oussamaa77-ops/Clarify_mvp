@@ -23,8 +23,9 @@ import { reconcilierPaiements } from "@/lib/paiements";
 import { BankLogo } from "@/components/BankLogo";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
-// @ts-ignore
-import * as pdfjsLib from 'pdfjs-dist';
+// NB : pdfjs-dist n'est PAS importé statiquement — il tire `canvas` (binaire natif)
+// qui polluerait le bundle SERVEUR (SSR) et casserait le déploiement serverless.
+// On le charge donc UNIQUEMENT côté client, à la demande, via import() dynamique.
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/banque")({
   component: BanquePage,
@@ -933,6 +934,7 @@ function BanquePage() {
         // ── SECOURS : rendu page→moitiés + Vision Groq (si Mistral indispo) ──
         if(vision.txs.length===0){
           toast.info(`Conversion des ${pdf.numPages} page(s) en images…`);
+          const pdfjsLib=await import("pdfjs-dist");   // client-only (cf. note en tête de fichier)
           const images:{base64:string;mime_type:string}[]=[];
           for(let p=1;p<=pdf.numPages;p++){
             const halves=await pdfPageToHalves(pdfjsLib,ab,p);
