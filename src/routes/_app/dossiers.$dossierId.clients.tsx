@@ -9,10 +9,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, Pencil, Trash2, Users, X, FileText, Download, Wand2, BarChart2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Users, X, FileText, Download, Wand2, BarChart2, Scale } from "lucide-react";
 import { toast } from "sonner";
+import { logAudit } from "@/lib/audit";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
 import { TiersReporting } from "@/components/TiersReporting";
+import { BalanceAgee } from "@/components/BalanceAgee";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -50,6 +52,7 @@ const CATEG_PCM_LBL: Record<string, string> = {
   paiement_fournisseur: "Achat fourn.", acompte_fournisseur: "Acompte BC",
   encaissement_client: "Encaiss. client", loyers: "Loyer", gasoil: "Carburant",
   frais_representation: "Restaurant", transport: "Transport", tva_import: "TVA import",
+  charges_sociales: "Charges Sociales",
 };
 
 function statutLabel(f: Facture): { label: string; cls: string } {
@@ -61,14 +64,16 @@ function statutLabel(f: Facture): { label: string; cls: string } {
 
 function ClientsPage() {
   const { dossierId } = Route.useParams();
+  const navigate = Route.useNavigate();
   const [items, setItems] = useState<Tiers[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Tiers | null>(null);
   const [form, setForm] = useState(EMPTY);
   const [search, setSearch] = useState("");
-  const [view, setView] = useState<"annuaire" | "reporting">("annuaire");
+  const [view, setView] = useState<"annuaire" | "balance" | "reporting">("annuaire");
   const [selectedClient, setSelectedClient] = useState<Tiers | null>(null);
+  const [detailTab, setDetailTab] = useState<"kpis" | "factures" | "justificatifs">("kpis");
   const [factures, setFactures] = useState<Facture[]>([]);
   const [facturesLoading, setFacturesLoading] = useState(false);
   const [justificatifsVente, setJustificatifsVente] = useState<any[]>([]);
@@ -231,6 +236,7 @@ function ClientsPage() {
       ? await supabase.from("clients").update(payload).eq("id", editing.id)
       : await supabase.from("clients").insert({ dossier_id: dossierId, ...payload });
     if (error) return toast.error(error.message);
+    logAudit({ dossierId, action: editing ? "modification_client" : "creation_client", ressourceType: "client", ressourceId: editing?.id, details: { nom: form.nom } });
     toast.success(editing ? "Client mis à jour" : "Client créé");
     setOpen(false);
     load();
@@ -301,9 +307,10 @@ function ClientsPage() {
         )}
       </div>
 
-      <Tabs value={view} onValueChange={(v) => setView(v as "annuaire" | "reporting")}>
+      <Tabs value={view} onValueChange={(v) => setView(v as "annuaire" | "balance" | "reporting")}>
         <TabsList className="mb-4">
           <TabsTrigger value="annuaire"><Users className="h-3 w-3 mr-1" />Annuaire ({items.length})</TabsTrigger>
+          <TabsTrigger value="balance"><Scale className="h-3 w-3 mr-1" />Balance âgée</TabsTrigger>
           <TabsTrigger value="reporting"><BarChart2 className="h-3 w-3 mr-1" />Reporting</TabsTrigger>
         </TabsList>
 
@@ -372,7 +379,7 @@ function ClientsPage() {
             {facturesLoading
               ? <div className="text-center py-12 text-muted-foreground text-sm">Chargement des données…</div>
               : (
-              <Tabs defaultValue="kpis">
+              <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v as "kpis" | "factures" | "justificatifs")}>
                 <TabsList className="mb-4">
                   <TabsTrigger value="kpis">KPIs &amp; Charts</TabsTrigger>
                   <TabsTrigger value="factures">Factures ({kpis.total})</TabsTrigger>
@@ -613,6 +620,27 @@ function ClientsPage() {
           </div>
         )}
       </div>
+        </TabsContent>
+
+        {/* ── Balance âgée : reste à payer des créances, ventilé par ancienneté ── */}
+        <TabsContent value="balance">
+          <BalanceAgee
+            dossierId={dossierId}
+            sens="client"
+            onVoirFactures={(l) => {
+              const c = (l.tiers_id ? items.find(t => t.id === l.tiers_id) : null)
+                ?? items.find(t => t.nom === l.tiers_nom);
+              if (!c) { toast.info("Fiche client introuvable dans l'annuaire"); return; }
+              setSelectedClient(c);
+              setDetailTab("factures");
+              setView("annuaire");
+            }}
+            onRelancer={(l) => navigate({
+              to: "/dossiers/$dossierId/relances",
+              params: { dossierId },
+              search: { client: l.tiers_nom },
+            })}
+          />
         </TabsContent>
 
         {/* ── Reporting & évolution (clients uniquement) ── */}

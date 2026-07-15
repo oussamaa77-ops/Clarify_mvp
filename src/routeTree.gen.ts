@@ -13,8 +13,10 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppDossiersRouteImport } from './routes/_app/dossiers'
+import { Route as AppAbonnementRouteImport } from './routes/_app/abonnement'
 import { Route as AppDossiersDossierIdIndexRouteImport } from './routes/_app/dossiers.$dossierId.index'
 import { Route as AppDossiersDossierIdRelevescannerRouteImport } from './routes/_app/dossiers.$dossierId.relevescanner'
+import { Route as AppDossiersDossierIdRelancesRouteImport } from './routes/_app/dossiers.$dossierId.relances'
 import { Route as AppDossiersDossierIdPaieRouteImport } from './routes/_app/dossiers.$dossierId.paie'
 import { Route as AppDossiersDossierIdJustificatifsRouteImport } from './routes/_app/dossiers.$dossierId.justificatifs'
 import { Route as AppDossiersDossierIdGedRouteImport } from './routes/_app/dossiers.$dossierId.ged'
@@ -26,6 +28,7 @@ import { Route as AppDossiersDossierIdComptabiliteRouteImport } from './routes/_
 import { Route as AppDossiersDossierIdClientsRouteImport } from './routes/_app/dossiers.$dossierId.clients'
 import { Route as AppDossiersDossierIdBanqueRouteImport } from './routes/_app/dossiers.$dossierId.banque'
 import { Route as AppDossiersDossierIdAuditRouteImport } from './routes/_app/dossiers.$dossierId.audit'
+import { Route as AppDossiersDossierIdAnalyticsRouteImport } from './routes/_app/dossiers.$dossierId.analytics'
 import { Route as AppDossiersDossierIdFournisseursTestRouteImport } from './routes/_app/dossiers.$dossierId.fournisseurs.test'
 import { Route as AppDossiersDossierIdBanqueReleveIdRouteImport } from './routes/_app/dossiers.$dossierId.banque.$releveId'
 
@@ -48,6 +51,11 @@ const AppDossiersRoute = AppDossiersRouteImport.update({
   path: '/dossiers',
   getParentRoute: () => AppRoute,
 } as any)
+const AppAbonnementRoute = AppAbonnementRouteImport.update({
+  id: '/abonnement',
+  path: '/abonnement',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppDossiersDossierIdIndexRoute =
   AppDossiersDossierIdIndexRouteImport.update({
     id: '/$dossierId/',
@@ -58,6 +66,12 @@ const AppDossiersDossierIdRelevescannerRoute =
   AppDossiersDossierIdRelevescannerRouteImport.update({
     id: '/$dossierId/relevescanner',
     path: '/$dossierId/relevescanner',
+    getParentRoute: () => AppDossiersRoute,
+  } as any)
+const AppDossiersDossierIdRelancesRoute =
+  AppDossiersDossierIdRelancesRouteImport.update({
+    id: '/$dossierId/relances',
+    path: '/$dossierId/relances',
     getParentRoute: () => AppDossiersRoute,
   } as any)
 const AppDossiersDossierIdPaieRoute =
@@ -125,6 +139,12 @@ const AppDossiersDossierIdAuditRoute =
     path: '/$dossierId/audit',
     getParentRoute: () => AppDossiersRoute,
   } as any)
+const AppDossiersDossierIdAnalyticsRoute =
+  AppDossiersDossierIdAnalyticsRouteImport.update({
+    id: '/$dossierId/analytics',
+    path: '/$dossierId/analytics',
+    getParentRoute: () => AppDossiersRoute,
+  } as any)
 const AppDossiersDossierIdFournisseursTestRoute =
   AppDossiersDossierIdFournisseursTestRouteImport.update({
     id: '/test',
@@ -141,7 +161,9 @@ const AppDossiersDossierIdBanqueReleveIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
+  '/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
   '/dossiers/$dossierId/clients': typeof AppDossiersDossierIdClientsRoute
@@ -153,6 +175,7 @@ export interface FileRoutesByFullPath {
   '/dossiers/$dossierId/ged': typeof AppDossiersDossierIdGedRoute
   '/dossiers/$dossierId/justificatifs': typeof AppDossiersDossierIdJustificatifsRoute
   '/dossiers/$dossierId/paie': typeof AppDossiersDossierIdPaieRoute
+  '/dossiers/$dossierId/relances': typeof AppDossiersDossierIdRelancesRoute
   '/dossiers/$dossierId/relevescanner': typeof AppDossiersDossierIdRelevescannerRoute
   '/dossiers/$dossierId/': typeof AppDossiersDossierIdIndexRoute
   '/dossiers/$dossierId/banque/$releveId': typeof AppDossiersDossierIdBanqueReleveIdRoute
@@ -161,7 +184,9 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
+  '/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
   '/dossiers/$dossierId/clients': typeof AppDossiersDossierIdClientsRoute
@@ -173,6 +198,7 @@ export interface FileRoutesByTo {
   '/dossiers/$dossierId/ged': typeof AppDossiersDossierIdGedRoute
   '/dossiers/$dossierId/justificatifs': typeof AppDossiersDossierIdJustificatifsRoute
   '/dossiers/$dossierId/paie': typeof AppDossiersDossierIdPaieRoute
+  '/dossiers/$dossierId/relances': typeof AppDossiersDossierIdRelancesRoute
   '/dossiers/$dossierId/relevescanner': typeof AppDossiersDossierIdRelevescannerRoute
   '/dossiers/$dossierId': typeof AppDossiersDossierIdIndexRoute
   '/dossiers/$dossierId/banque/$releveId': typeof AppDossiersDossierIdBanqueReleveIdRoute
@@ -183,7 +209,9 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
   '/auth': typeof AuthRoute
+  '/_app/abonnement': typeof AppAbonnementRoute
   '/_app/dossiers': typeof AppDossiersRouteWithChildren
+  '/_app/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/_app/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/_app/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
   '/_app/dossiers/$dossierId/clients': typeof AppDossiersDossierIdClientsRoute
@@ -195,6 +223,7 @@ export interface FileRoutesById {
   '/_app/dossiers/$dossierId/ged': typeof AppDossiersDossierIdGedRoute
   '/_app/dossiers/$dossierId/justificatifs': typeof AppDossiersDossierIdJustificatifsRoute
   '/_app/dossiers/$dossierId/paie': typeof AppDossiersDossierIdPaieRoute
+  '/_app/dossiers/$dossierId/relances': typeof AppDossiersDossierIdRelancesRoute
   '/_app/dossiers/$dossierId/relevescanner': typeof AppDossiersDossierIdRelevescannerRoute
   '/_app/dossiers/$dossierId/': typeof AppDossiersDossierIdIndexRoute
   '/_app/dossiers/$dossierId/banque/$releveId': typeof AppDossiersDossierIdBanqueReleveIdRoute
@@ -205,7 +234,9 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/auth'
+    | '/abonnement'
     | '/dossiers'
+    | '/dossiers/$dossierId/analytics'
     | '/dossiers/$dossierId/audit'
     | '/dossiers/$dossierId/banque'
     | '/dossiers/$dossierId/clients'
@@ -217,6 +248,7 @@ export interface FileRouteTypes {
     | '/dossiers/$dossierId/ged'
     | '/dossiers/$dossierId/justificatifs'
     | '/dossiers/$dossierId/paie'
+    | '/dossiers/$dossierId/relances'
     | '/dossiers/$dossierId/relevescanner'
     | '/dossiers/$dossierId/'
     | '/dossiers/$dossierId/banque/$releveId'
@@ -225,7 +257,9 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/auth'
+    | '/abonnement'
     | '/dossiers'
+    | '/dossiers/$dossierId/analytics'
     | '/dossiers/$dossierId/audit'
     | '/dossiers/$dossierId/banque'
     | '/dossiers/$dossierId/clients'
@@ -237,6 +271,7 @@ export interface FileRouteTypes {
     | '/dossiers/$dossierId/ged'
     | '/dossiers/$dossierId/justificatifs'
     | '/dossiers/$dossierId/paie'
+    | '/dossiers/$dossierId/relances'
     | '/dossiers/$dossierId/relevescanner'
     | '/dossiers/$dossierId'
     | '/dossiers/$dossierId/banque/$releveId'
@@ -246,7 +281,9 @@ export interface FileRouteTypes {
     | '/'
     | '/_app'
     | '/auth'
+    | '/_app/abonnement'
     | '/_app/dossiers'
+    | '/_app/dossiers/$dossierId/analytics'
     | '/_app/dossiers/$dossierId/audit'
     | '/_app/dossiers/$dossierId/banque'
     | '/_app/dossiers/$dossierId/clients'
@@ -258,6 +295,7 @@ export interface FileRouteTypes {
     | '/_app/dossiers/$dossierId/ged'
     | '/_app/dossiers/$dossierId/justificatifs'
     | '/_app/dossiers/$dossierId/paie'
+    | '/_app/dossiers/$dossierId/relances'
     | '/_app/dossiers/$dossierId/relevescanner'
     | '/_app/dossiers/$dossierId/'
     | '/_app/dossiers/$dossierId/banque/$releveId'
@@ -300,6 +338,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppDossiersRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/abonnement': {
+      id: '/_app/abonnement'
+      path: '/abonnement'
+      fullPath: '/abonnement'
+      preLoaderRoute: typeof AppAbonnementRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/dossiers/$dossierId/': {
       id: '/_app/dossiers/$dossierId/'
       path: '/$dossierId'
@@ -312,6 +357,13 @@ declare module '@tanstack/react-router' {
       path: '/$dossierId/relevescanner'
       fullPath: '/dossiers/$dossierId/relevescanner'
       preLoaderRoute: typeof AppDossiersDossierIdRelevescannerRouteImport
+      parentRoute: typeof AppDossiersRoute
+    }
+    '/_app/dossiers/$dossierId/relances': {
+      id: '/_app/dossiers/$dossierId/relances'
+      path: '/$dossierId/relances'
+      fullPath: '/dossiers/$dossierId/relances'
+      preLoaderRoute: typeof AppDossiersDossierIdRelancesRouteImport
       parentRoute: typeof AppDossiersRoute
     }
     '/_app/dossiers/$dossierId/paie': {
@@ -391,6 +443,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppDossiersDossierIdAuditRouteImport
       parentRoute: typeof AppDossiersRoute
     }
+    '/_app/dossiers/$dossierId/analytics': {
+      id: '/_app/dossiers/$dossierId/analytics'
+      path: '/$dossierId/analytics'
+      fullPath: '/dossiers/$dossierId/analytics'
+      preLoaderRoute: typeof AppDossiersDossierIdAnalyticsRouteImport
+      parentRoute: typeof AppDossiersRoute
+    }
     '/_app/dossiers/$dossierId/fournisseurs/test': {
       id: '/_app/dossiers/$dossierId/fournisseurs/test'
       path: '/test'
@@ -439,6 +498,7 @@ const AppDossiersDossierIdFournisseursRouteWithChildren =
   )
 
 interface AppDossiersRouteChildren {
+  AppDossiersDossierIdAnalyticsRoute: typeof AppDossiersDossierIdAnalyticsRoute
   AppDossiersDossierIdAuditRoute: typeof AppDossiersDossierIdAuditRoute
   AppDossiersDossierIdBanqueRoute: typeof AppDossiersDossierIdBanqueRouteWithChildren
   AppDossiersDossierIdClientsRoute: typeof AppDossiersDossierIdClientsRoute
@@ -450,11 +510,13 @@ interface AppDossiersRouteChildren {
   AppDossiersDossierIdGedRoute: typeof AppDossiersDossierIdGedRoute
   AppDossiersDossierIdJustificatifsRoute: typeof AppDossiersDossierIdJustificatifsRoute
   AppDossiersDossierIdPaieRoute: typeof AppDossiersDossierIdPaieRoute
+  AppDossiersDossierIdRelancesRoute: typeof AppDossiersDossierIdRelancesRoute
   AppDossiersDossierIdRelevescannerRoute: typeof AppDossiersDossierIdRelevescannerRoute
   AppDossiersDossierIdIndexRoute: typeof AppDossiersDossierIdIndexRoute
 }
 
 const AppDossiersRouteChildren: AppDossiersRouteChildren = {
+  AppDossiersDossierIdAnalyticsRoute: AppDossiersDossierIdAnalyticsRoute,
   AppDossiersDossierIdAuditRoute: AppDossiersDossierIdAuditRoute,
   AppDossiersDossierIdBanqueRoute: AppDossiersDossierIdBanqueRouteWithChildren,
   AppDossiersDossierIdClientsRoute: AppDossiersDossierIdClientsRoute,
@@ -468,6 +530,7 @@ const AppDossiersRouteChildren: AppDossiersRouteChildren = {
   AppDossiersDossierIdJustificatifsRoute:
     AppDossiersDossierIdJustificatifsRoute,
   AppDossiersDossierIdPaieRoute: AppDossiersDossierIdPaieRoute,
+  AppDossiersDossierIdRelancesRoute: AppDossiersDossierIdRelancesRoute,
   AppDossiersDossierIdRelevescannerRoute:
     AppDossiersDossierIdRelevescannerRoute,
   AppDossiersDossierIdIndexRoute: AppDossiersDossierIdIndexRoute,
@@ -478,10 +541,12 @@ const AppDossiersRouteWithChildren = AppDossiersRoute._addFileChildren(
 )
 
 interface AppRouteChildren {
+  AppAbonnementRoute: typeof AppAbonnementRoute
   AppDossiersRoute: typeof AppDossiersRouteWithChildren
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppAbonnementRoute: AppAbonnementRoute,
   AppDossiersRoute: AppDossiersRouteWithChildren,
 }
 

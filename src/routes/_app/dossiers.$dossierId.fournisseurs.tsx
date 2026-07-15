@@ -18,19 +18,25 @@ import {
 } from "@/components/ui/select";
 import {
   Plus, Upload, Loader2, CheckCircle, Building2, Inbox, AlertCircle,
-  TrendingDown, Wallet, Sparkles, FileText, X, Trash2, BarChart2, Pencil,
-  Download, Wand2,
+  TrendingDown, Wallet, Sparkles, FileText, X, Trash2, BarChart2, Pencil, Undo2,
+  Download, Wand2, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
 import { useServerFn } from "@tanstack/react-start";
 import { ocrFacture, matcherDocumentAvecTransactions } from "@/server/factures.functions";
+import { memoriserTiers } from "@/server/tiers-memoire.functions";
+import { annulerPaiementFacture } from "@/server/paiements.functions";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { TiersReporting } from "@/components/TiersReporting";
+import { BalanceAgee } from "@/components/BalanceAgee";
 import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/components/EcheancesInput";
+import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
+import { logAudit } from "@/lib/audit";
+import { Scale } from "lucide-react";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/fournisseurs")({
   component: FournisseursPage,
@@ -54,6 +60,9 @@ interface FactureF {
   statut: string;
   statut_paiement: string;
   mode_reglement: string | null;
+  fichier_original_url: string | null;
+  fichier_original_nom: string | null;
+  fichier_original_type: string | null;
 }
 
 interface Fournisseur {
@@ -84,6 +93,7 @@ const CATEG_PCM_LBL: Record<string, string> = {
   paiement_fournisseur: "Achat fourn.", acompte_fournisseur: "Acompte BC",
   encaissement_client: "Encaiss. client", loyers: "Loyer", gasoil: "Carburant",
   frais_representation: "Restaurant", transport: "Transport", tva_import: "TVA import",
+  charges_sociales: "Charges Sociales",
 };
 
 function statutBadge(f: FactureF) {
@@ -101,8 +111,10 @@ function FournisseursPage() {
   const { dossierId } = Route.useParams();
   const ocrFn   = useServerFn(ocrFacture);
   const matchFn = useServerFn(matcherDocumentAvecTransactions);
+  const memoriserFn = useServerFn(memoriserTiers);
+  const annulerPaiementFn = useServerFn(annulerPaiementFacture);
 
-  const [tab, setTab] = useState<"factures" | "saisie" | "tiers" | "documents" | "reporting">("factures");
+  const [tab, setTab] = useState<"factures" | "saisie" | "tiers" | "documents" | "balance" | "reporting">("factures");
   const [justificatifsAchat, setJustificatifsAchat] = useState<any[]>([]);
   const [factures, setFactures] = useState<FactureF[]>([]);
   const [fournisseurs, setFournisseurs] = useState<Fournisseur[]>([]);
@@ -114,6 +126,10 @@ function FournisseursPage() {
   const [ocrLoading, setOcrLoading] = useState(false);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const [previewFileType, setPreviewFileType] = useState<string | null>(null);
+  // Fichier scanné en cours — conservé pour être archivé (bucket) à l'enregistrement,
+  // afin de pouvoir le RE-consulter ensuite (aperçu GED / bouton Voir).
+  const [scanFile, setScanFile] = useState<File | null>(null);
+  const [docView, setDocView] = useState<DocumentViewerSource | null>(null);
   const [pdfPages, setPdfPages] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -139,9 +155,12 @@ function FournisseursPage() {
   // Delete confirmation
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [annulConfirm, setAnnulConfirm] = useState<FactureF | null>(null);
+  const [annulLoading, setAnnulLoading] = useState(false);
 
   // Supplier stats panel
   const [selectedFourn, setSelectedFourn] = useState<Fournisseur | null>(null);
+  const [fournDetailTab, setFournDetailTab] = useState<"kpis" | "factures" | "justificatifs">("kpis");
   const [facturesFourn, setFacturesFourn] = useState<FactureF[]>([]);
   const [facturesFournLoading, setFacturesFournLoading] = useState(false);
 
@@ -321,6 +340,7 @@ function FournisseursPage() {
 
   const handleOcr = async (file: File) => {
     resetForm(true);
+    setScanFile(file);
     setPdfPreviewUrl(URL.createObjectURL(file));
     setPreviewFileType(file.type);
     setTab("saisie");
@@ -382,8 +402,9 @@ function FournisseursPage() {
       }
 
       const { result: r } = await ocrFn({
-        data: { extracted_text, image_base64, mime_type, dossier_id: dossierId },
+        data: { extracted_text, image_base64, mime_type, dossier_id: dossierId, sens_hint: "fournisseur" },
       });
+      logAudit({ dossierId, action: "scan_facture", ressourceType: "facture_fournisseur", details: { numero: r.numero_facture ?? null, fournisseur: r.emetteur_nom ?? null } });
 
       // emNom = émetteur UNIQUEMENT (jamais fallback sur client_nom_extrait
       // qui est le nom du destinataire, pas du fournisseur)
@@ -403,8 +424,18 @@ function FournisseursPage() {
             designation: l.designation,
             quantite: l.quantite,
             prix_unitaire: l.prix_unitaire,
-            taux_tva: l.taux_tva,
+            // POC mémoire : le taux TVA appris du fournisseur fait autorité.
+            taux_tva: r.memoire?.taux_tva != null ? Number(r.memoire.taux_tva) : l.taux_tva,
           })),
+        );
+      }
+
+      // POC mémoire : rappel du fournisseur connu (classification réutilisée).
+      if (r.memoire) {
+        toast.success(
+          r.memoire.llm_court_circuite
+            ? `Fournisseur reconnu en mémoire (${r.memoire.occurrences} usage(s)) — classification rappelée, IA non appelée`
+            : `Fournisseur déjà vu (${r.memoire.occurrences} usage(s)) — TVA/compte rappelés depuis la mémoire`,
         );
       }
 
@@ -440,7 +471,11 @@ function FournisseursPage() {
         }
       }
 
-      const methodLabel = r.method === "ai" ? "IA Groq" : "regex";
+      const methodLabel =
+        r.method === "ai" ? "IA Groq"
+        : r.method === "cache" ? "cache document (LLM évité)"
+        : r.method === "memoire" ? "mémoire tiers (LLM évité)"
+        : "regex";
       const confLabel = r.confidence === "high" ? "haute" : r.confidence === "medium" ? "moyenne" : "faible";
       toast.success(`OCR terminé (${methodLabel} · confiance ${confLabel}) — vérifiez les données`);
     } catch (e: any) {
@@ -516,6 +551,23 @@ function FournisseursPage() {
       const factureId = (newFacture as any).id;
       const ref = numero || nomFourn;
 
+      // Archive le document scanné (pour re-consultation ultérieure : bouton Voir + GED).
+      if (scanFile) {
+        try {
+          const ext = scanFile.name.split(".").pop() || "bin";
+          const path = `${dossierId}/ff_${factureId}.${ext}`;
+          const { error: upErr } = await supabase.storage.from("factures-originales").upload(path, scanFile, { upsert: true });
+          if (!upErr) {
+            const { data: urlData } = supabase.storage.from("factures-originales").getPublicUrl(path);
+            await (supabase.from("factures_fournisseurs") as any).update({
+              fichier_original_url: urlData?.publicUrl ?? null,
+              fichier_original_nom: scanFile.name,
+              fichier_original_type: scanFile.type,
+            }).eq("id", factureId);
+          }
+        } catch { /* archivage best-effort — ne bloque pas l'enregistrement */ }
+      }
+
       // Accounting entries ACH — reference_piece = factureId for clean cascade delete
       await supabase.from("ecritures_comptables").insert([
         {
@@ -554,6 +606,20 @@ function FournisseursPage() {
       ]);
 
       toast.success("Facture fournisseur enregistrée ✅");
+
+      // ── POC MÉMOIRE (point 1) : apprendre la classification de ce fournisseur ──
+      // À CHAQUE validation, on mémorise {ICE/libellé → compte 6141 + taux TVA},
+      // occurrences++. Prochain scan du même fournisseur → rappel avant le LLM.
+      const tauxDominant = Number(lignes[0]?.taux_tva ?? 20);
+      memoriserFn({ data: {
+        dossier_id: dossierId, sens: "fournisseur",
+        ice: fournisseurIce || null, nom: nomFourn,
+        fournisseur_id: fId || null, compte_pcm: "6141",
+        categorie_pcm: null, taux_tva: tauxDominant,
+      }}).then((res) => {
+        if (res.ok) console.log(`[mémoire] ${nomFourn} → ${res.occurrences} usage(s)`);
+      }).catch(() => {});
+
       resetForm();
       load();
       setTab("factures");
@@ -574,24 +640,46 @@ function FournisseursPage() {
 
   // ── Delete invoice ─────────────────────────────────────────────────────────
 
+  // Une facture payée ne se supprime pas : il faut d'abord annuler son paiement,
+  // sinon on laisserait des écritures de règlement et une transaction bancaire
+  // lettrée pointant sur une facture disparue.
+  const estPayee = (f: FactureF) => f.statut_paiement !== "non_payee";
+
   const handleDelete = async () => {
     if (!deleteId) return;
+    // La facture peut venir du tableau global ou du détail d'un fournisseur.
+    const f = factures.find((x) => x.id === deleteId) ?? facturesFourn.find((x) => x.id === deleteId);
+    if (f && estPayee(f)) { toast.error("Annulez d'abord le paiement de cette facture"); return; }
     setDeleteLoading(true);
     try {
-      // 1. Remove accounting entries linked via reference_piece
+      // 1. Écritures rattachées par reference_piece (achat ACH + règlements estampillés).
       await supabase
         .from("ecritures_comptables")
         .delete()
         .eq("dossier_id", dossierId)
         .eq("reference_piece", deleteId);
 
-      // 2. Remove the invoice itself
+      // 2. Écritures ACH HISTORIQUES : créées avant que reference_piece ne soit posé,
+      //    elles resteraient orphelines après la suppression de la facture. On les
+      //    retrouve par date + nom du fournisseur (présent dans le libellé) + montant,
+      //    et on n'en supprime une que si le rapprochement est SANS AMBIGUÏTÉ.
+      const restantes = f ? await supprimerAchHistoriques(f) : 0;
+
+      // 3. Filet de sécurité : une transaction de relevé est un fait bancaire. Si une
+      //    subsistait liée à cette facture, on la DÉLIE — on ne la supprime jamais.
+      await (supabase.from("transactions_bancaires") as any)
+        .update({ facture_id: null, document_type: null, rapproche: false })
+        .eq("facture_id", deleteId);
+
+      // 4. Remove the invoice itself
       const { error } = await (supabase.from("factures_fournisseurs") as any)
         .delete()
         .eq("id", deleteId);
       if (error) throw error;
 
       toast.success("Facture supprimée — écritures comptables effacées");
+      if (restantes > 0)
+        toast.warning(`${restantes} écriture(s) ACH ambiguë(s) conservée(s) — à vérifier en Comptabilité`);
       setDeleteId(null);
       load();
       if (selectedFourn) loadFacturesFourn(selectedFourn.id);
@@ -599,6 +687,61 @@ function FournisseursPage() {
       toast.error(e.message);
     } finally {
       setDeleteLoading(false);
+    }
+  };
+
+  // Supprime les écritures ACH d'une facture qui ne portent pas encore reference_piece
+  // (lignes créées avant l'estampillage). Le rapprochement se fait sur (date du document,
+  // nom du fournisseur repris dans le libellé) — pas sur les montants, qui échouent dès
+  // que la TVA vaut 0 (la ligne de TVA a alors un débit nul, comme la ligne de dette).
+  //
+  // Si une AUTRE facture du même fournisseur porte la même date, le rapprochement est
+  // ambigu : on ne supprime rien et on le signale. Mieux vaut une écriture à vérifier
+  // qu'une écriture d'une autre facture détruite par erreur. La migration de rattrapage
+  // (20260709120000) supprime ce cas à la racine en posant reference_piece.
+  const supprimerAchHistoriques = async (f: FactureF): Promise<number> => {
+    if (!f.date_facture || !f.fournisseur_nom) return 0;
+    const { data: cand } = await supabase
+      .from("ecritures_comptables")
+      .select("id,libelle")
+      .eq("dossier_id", dossierId)
+      .eq("journal_code", "ACH")
+      .eq("date_ecriture", f.date_facture)
+      .is("reference_piece", null);
+
+    const nom = f.fournisseur_nom.toUpperCase();
+    const cibles = (cand ?? []).filter((e: any) => String(e.libelle ?? "").toUpperCase().includes(nom));
+    if (!cibles.length) return 0;
+
+    const homonymes = factures.filter(
+      (x) => x.id !== f.id && x.date_facture === f.date_facture && x.fournisseur_nom === f.fournisseur_nom,
+    );
+    if (homonymes.length) return cibles.length;   // ambigu → on ne touche à rien
+
+    await supabase.from("ecritures_comptables").delete().in("id", cibles.map((e: any) => e.id));
+    return 0;
+  };
+
+  const handleAnnulerPaiement = async (f: FactureF) => {
+    setAnnulLoading(true);
+    try {
+      const r = await annulerPaiementFn({ data: { facture_id: f.id, type: "fournisseur" } });
+      if (r.dejaImpayee) toast.info("Cette facture est déjà impayée");
+      else {
+        const parts = [
+          r.txDeliees && `${r.txDeliees} ligne${r.txDeliees > 1 ? "s" : ""} de relevé remise${r.txDeliees > 1 ? "s" : ""} « à lettrer »`,
+          r.encaissementsSupprimes && `${r.encaissementsSupprimes} décaissement${r.encaissementsSupprimes > 1 ? "s" : ""} supprimé${r.encaissementsSupprimes > 1 ? "s" : ""}`,
+          r.ecrituresSupprimees && `${r.ecrituresSupprimees} écriture${r.ecrituresSupprimees > 1 ? "s" : ""} de règlement supprimée${r.ecrituresSupprimees > 1 ? "s" : ""}`,
+        ].filter(Boolean);
+        toast.success(`Paiement annulé — facture impayée${parts.length ? ` (${parts.join(", ")})` : ""}`);
+      }
+      setAnnulConfirm(null);
+      load();
+      if (selectedFourn) loadFacturesFourn(selectedFourn.id);
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setAnnulLoading(false);
     }
   };
 
@@ -709,6 +852,10 @@ function FournisseursPage() {
             <FileText className="h-3 w-3 mr-1" />
             Documents associés ({justificatifsAchat.length})
           </TabsTrigger>
+          <TabsTrigger value="balance">
+            <Scale className="h-3 w-3 mr-1" />
+            Balance âgée
+          </TabsTrigger>
           <TabsTrigger value="reporting">
             <BarChart2 className="h-3 w-3 mr-1" />
             Reporting
@@ -775,15 +922,42 @@ function FournisseursPage() {
                             </span>
                           </TableCell>
                           <TableCell>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-7 w-7 text-destructive hover:bg-destructive/10"
-                              onClick={() => setDeleteId(f.id)}
-                              title="Supprimer la facture"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
+                            <div className="flex gap-1">
+                              {/* Voir le document original scanné (panneau latéral). */}
+                              {f.fichier_original_url && (
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-7 w-7"
+                                  onClick={() => setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })}
+                                  title="Voir le document"
+                                >
+                                  <Eye className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
+                              {/* Annuler le paiement : actif seulement si la facture est payée. */}
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                disabled={!estPayee(f)}
+                                className="h-7 w-7 text-amber-600 hover:bg-amber-500/10"
+                                onClick={() => setAnnulConfirm(f)}
+                                title={estPayee(f) ? "Annuler le paiement" : "Déjà impayée"}
+                              >
+                                <Undo2 className="h-3.5 w-3.5" />
+                              </Button>
+                              {/* Supprimer : bloqué tant que la facture est payée. */}
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                disabled={estPayee(f)}
+                                className="h-7 w-7 text-destructive hover:bg-destructive/10"
+                                onClick={() => setDeleteId(f.id)}
+                                title={estPayee(f) ? "Annulez d'abord le paiement" : "Supprimer la facture"}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
@@ -1199,7 +1373,7 @@ function FournisseursPage() {
                     Chargement des données…
                   </div>
                 ) : (
-                  <Tabs defaultValue="kpis">
+                  <Tabs value={fournDetailTab} onValueChange={(v) => setFournDetailTab(v as "kpis" | "factures" | "justificatifs")}>
                     <TabsList className="mb-4">
                       <TabsTrigger value="kpis">KPIs &amp; Charts</TabsTrigger>
                       <TabsTrigger value="factures">
@@ -1533,14 +1707,28 @@ function FournisseursPage() {
                                         </span>
                                       </TableCell>
                                       <TableCell>
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-7 w-7 text-destructive hover:bg-destructive/10"
-                                          onClick={() => setDeleteId(f.id)}
-                                        >
-                                          <Trash2 className="h-3.5 w-3.5" />
-                                        </Button>
+                                        <div className="flex gap-1">
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            disabled={!estPayee(f)}
+                                            className="h-7 w-7 text-amber-600 hover:bg-amber-500/10"
+                                            onClick={() => setAnnulConfirm(f)}
+                                            title={estPayee(f) ? "Annuler le paiement" : "Déjà impayée"}
+                                          >
+                                            <Undo2 className="h-3.5 w-3.5" />
+                                          </Button>
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            disabled={estPayee(f)}
+                                            className="h-7 w-7 text-destructive hover:bg-destructive/10"
+                                            onClick={() => setDeleteId(f.id)}
+                                            title={estPayee(f) ? "Annulez d'abord le paiement" : "Supprimer la facture"}
+                                          >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                          </Button>
+                                        </div>
                                       </TableCell>
                                     </TableRow>
                                   );
@@ -1622,11 +1810,54 @@ function FournisseursPage() {
           </Card>
         </TabsContent>
 
+        {/* ── Balance âgée : reste à payer des dettes, ventilé par ancienneté ── */}
+        <TabsContent value="balance" className="mt-4">
+          <BalanceAgee
+            dossierId={dossierId}
+            sens="fournisseur"
+            onVoirFactures={(l) => {
+              const f = (l.tiers_id ? fournisseurs.find((x) => x.id === l.tiers_id) : null)
+                ?? fournisseurs.find((x) => x.nom === l.tiers_nom);
+              if (!f) { toast.info("Fiche fournisseur introuvable"); return; }
+              setSelectedFourn(f);
+              setFournDetailTab("factures");
+              setTab("tiers");
+            }}
+          />
+        </TabsContent>
+
         {/* ── Reporting & évolution (fournisseurs uniquement) ── */}
         <TabsContent value="reporting" className="mt-4">
           <TiersReporting dossierId={dossierId} kind="fournisseurs" />
         </TabsContent>
       </Tabs>
+
+      {/* ── Annulation de paiement ── */}
+      <Dialog open={!!annulConfirm} onOpenChange={(o) => { if (!o) setAnnulConfirm(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Annuler le paiement ?</DialogTitle>
+          </DialogHeader>
+          <div className="text-sm text-muted-foreground space-y-2">
+            <p>
+              La facture <span className="font-mono">{annulConfirm?.numero ?? annulConfirm?.id.slice(0, 8)}</span> repassera
+              en « impayée », ce qui débloquera sa suppression.
+            </p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li>Un décaissement <b>espèces ou chèque</b> est supprimé, avec ses écritures.</li>
+              <li>Une ligne de <b>relevé bancaire</b> n'est <b>jamais supprimée</b> : elle est simplement délettrée et redevient « à lettrer ».</li>
+              <li>L'écriture d'<b>achat</b> (journal ACH) est conservée.</li>
+            </ul>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAnnulConfirm(null)} disabled={annulLoading}>Retour</Button>
+            <Button onClick={() => annulConfirm && handleAnnulerPaiement(annulConfirm)} disabled={annulLoading}>
+              {annulLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Undo2 className="h-4 w-4 mr-2" />}
+              Annuler le paiement
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Delete confirmation dialog ── */}
       <Dialog open={!!deleteId} onOpenChange={(o) => { if (!o) setDeleteId(null); }}>
@@ -1797,6 +2028,7 @@ function FournisseursPage() {
                 code_auxiliaire: formEdit.code_auxiliaire || null,
               }).eq("id", editFourn.id);
               if (error) return toast.error(error.message);
+              logAudit({ dossierId, action: "modification_fournisseur", ressourceType: "fournisseur", ressourceId: editFourn.id, details: { nom: formEdit.nom } });
               setEditFourn(null);
               load();
               toast.success("Fournisseur mis à jour");
@@ -1804,6 +2036,9 @@ function FournisseursPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Aperçu du document original (panneau latéral droit) */}
+      <DocumentViewer open={!!docView} onOpenChange={(o) => { if (!o) setDocView(null); }} source={docView} />
     </div>
   );
 }

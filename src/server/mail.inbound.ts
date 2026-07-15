@@ -1,13 +1,14 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { sendMail } from "./mailer";
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// ── Webhook Brevo Inbound ─────────────────────────────────────────────────────
+// ── Webhook Inbound (Brevo / autre fournisseur) ───────────────────────────────
 // Brevo appelle ce endpoint quand un email est reçu sur votre adresse inbound
 // Configuration sur brevo.com → Transactional → Inbound → Add a new inbound webhook
 // URL: https://VOTRE_URL/api/mail/inbound
@@ -116,59 +117,36 @@ export const handleInboundMail = createServerFn({ method: "POST" })
     }
   });
 
-// ── Envoi d'email via Brevo ───────────────────────────────────────────────────
-export const envoyerMailBrevo = createServerFn({ method: "POST" })
+// ── Envoi d'email via SMTP « classique » (nodemailer) ─────────────────────────
+// Anciennement Brevo (API v3). Le passage au SMTP standard élimine les blocages
+// « clé API / IP autorisées / sender validé » ; l'anti-spam (texte+HTML, en-têtes,
+// DKIM/SPF/DMARC côté DNS) est géré dans ./mailer (voir .env.example).
+export const envoyerMail = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z.object({
       to: z.string().email(),
       toName: z.string().optional(),
       subject: z.string(),
       html: z.string(),
+      text: z.string().optional(),
       replyTo: z.string().email().optional(),
+      // Une PJ = base64 (`content`) OU une URL / un chemin (`path`). Le Buffer
+      // binaire n'est pas transportable en JSON → réservé aux appels serveur→serveur
+      // qui passent par `sendMail` directement (ex. envoyerRelance).
       attachments: z.array(z.object({
         name: z.string(),
-        content: z.string(), // base64
+        content: z.string().optional(), // base64
+        path: z.string().optional(),    // URL http(s) ou chemin fichier
+        type: z.string().optional(),
       })).optional(),
     }).parse(input)
   )
   .handler(async ({ data }) => {
-    const brevoKey = process.env.BREVO_API_KEY ?? "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";
-    const fromEmail = process.env.FROM_EMAIL ?? "noreply@hisabpro.ma";
-    const fromName = process.env.FROM_NAME ?? "HisabPro";
-
-    const body: any = {
-      sender: { name: fromName, email: fromEmail },
-      to: [{ email: data.to, name: data.toName ?? data.to }],
-      subject: data.subject,
-      htmlContent: data.html,
-    };
-
-    if (data.replyTo) {
-      body.replyTo = { email: data.replyTo };
-    }
-
-    if (data.attachments?.length) {
-      body.attachment = data.attachments;
-    }
-
-    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
-      method: "POST",
-      headers: {
-        "api-key": brevoKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const err = await res.json() as any;
-      throw new Error(`Brevo: ${err.message ?? res.status}`);
-    }
-
-    const result = await res.json() as any;
-    console.log(`[BREVO] Email envoyé à ${data.to} | ID: ${result.messageId}`);
-    return { success: true, messageId: result.messageId };
+    return await sendMail(data);
   });
+
+// Alias de compatibilité : d'anciens imports référencent encore `envoyerMailBrevo`.
+export const envoyerMailBrevo = envoyerMail;
 
 // ── Utilitaires ───────────────────────────────────────────────────────────────
 function detecterTypeDocument(nomFichier: string, sujet: string): string {

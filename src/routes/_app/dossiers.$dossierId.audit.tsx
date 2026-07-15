@@ -13,8 +13,22 @@ interface Log { id: string; action: string; user_email: string | null; ressource
 
 const ACTION_COLORS: Record<string, string> = {
   efacture_conforme: "default", efacture_rejetee: "destructive", facture_payee: "default",
+  connexion: "default", deconnexion: "outline", ouverture_dossier: "outline",
+  scan_facture: "secondary", scan_releve: "secondary",
+  creation_facture: "default", creation_client: "default",
+  modification_dossier: "secondary", modification_client: "secondary", modification_fournisseur: "secondary",
   "create": "secondary", "update": "secondary", "delete": "destructive",
 };
+
+// Libellés lisibles en français (repli : l'action brute).
+const ACTION_LABELS: Record<string, string> = {
+  efacture_conforme: "E-facture conforme", efacture_rejetee: "E-facture rejetée", facture_payee: "Facture payée",
+  connexion: "Connexion", deconnexion: "Déconnexion", ouverture_dossier: "Ouverture dossier",
+  scan_facture: "Scan facture", scan_releve: "Scan relevé",
+  creation_facture: "Création facture", creation_client: "Création client",
+  modification_dossier: "Modif. dossier", modification_client: "Modif. client", modification_fournisseur: "Modif. fournisseur",
+};
+const actionLabel = (a: string) => ACTION_LABELS[a] ?? a;
 
 function AuditPage() {
   const { dossierId } = Route.useParams();
@@ -24,8 +38,10 @@ function AuditPage() {
   const PAGE = 30;
 
   useEffect(() => {
+    // Événements du dossier + événements globaux du compte (connexion/déconnexion,
+    // dossier_id NULL) pour que la piste d'audit soit complète.
     supabase.from("audit_logs").select("*", { count: "exact" })
-      .eq("dossier_id", dossierId)
+      .or(`dossier_id.eq.${dossierId},dossier_id.is.null`)
       .order("created_at", { ascending: false })
       .range((page - 1) * PAGE, page * PAGE - 1)
       .then(({ data, count }) => { setLogs((data ?? []) as Log[]); setTotal(count ?? 0); });
@@ -60,7 +76,7 @@ function AuditPage() {
                 <TableRow key={l.id}>
                   <TableCell className="text-xs whitespace-nowrap">{new Date(l.created_at).toLocaleString("fr-MA")}</TableCell>
                   <TableCell className="text-xs max-w-[120px] truncate">{l.user_email ?? "—"}</TableCell>
-                  <TableCell><Badge variant={(ACTION_COLORS[l.action] ?? "secondary") as any} className="text-xs">{l.action}</Badge></TableCell>
+                  <TableCell><Badge variant={(ACTION_COLORS[l.action] ?? "secondary") as any} className="text-xs">{actionLabel(l.action)}</Badge></TableCell>
                   <TableCell className="text-xs">{l.ressource_type} {l.ressource_id ? `#${l.ressource_id.slice(0, 8)}` : ""}</TableCell>
                   <TableCell className="text-xs text-muted-foreground max-w-[150px] truncate">
                     {l.details ? Object.entries(l.details).map(([k, v]) => `${k}: ${v}`).join(", ") : "—"}

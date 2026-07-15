@@ -1,5 +1,8 @@
 // Pure utility functions — no framework dependencies, fully testable.
 
+import { extractRibMarocain } from "../lib/releve-attijari";
+import { identifierBanque } from "../lib/bank-identity";
+
 export function parseInvoiceRegex(text: string, dossierNom: string, dossierIce: string) {
   const norm = text.replace(/\r\n/g, "\n").replace(/\t/g, " ");
 
@@ -216,7 +219,20 @@ rib           : RIB complet si visible (24 chiffres)
 solde_initial : solde AVANT la 1ère transaction — labels : "SOLDE DEPART", "ANCIEN SOLDE",
                 "SOLDE REPORT", "SOLDE PRÉCÉDENT", "SOLDE REPORTÉ" — lire EXACTEMENT
 solde_final   : solde APRÈS la dernière transaction — labels : "SOLDE FINAL",
-                "SOLDE A REPORTER", "NOUVEAU SOLDE" — lire EXACTEMENT
+                "SOLDE A REPORTER", "SOLDE A REPORTER AU <date>", "SOLDE AU <date>",
+                "NOUVEAU SOLDE", "SOLDE DE CLÔTURE" — lire EXACTEMENT
+
+════════════ SOLDE A REPORTER / SOLDE AU <date> EN FIN DE TABLEAU — RÈGLE ABSOLUE ════════════
+Beaucoup de relevés (Crédit Agricole, Saham, CIH…) terminent le tableau — ou juste
+en dessous — par une ligne de SOLDE DE FIN dont la date est DANS le libellé :
+  ex: "SOLDE A REPORTER AU 31/12/2024    12 500,00"
+  ex: "SOLDE AU 31/12/2024    12 500,00"
+  ex: "NOUVEAU SOLDE AU 31/12/2024    12 500,00"
+Signes distinctifs : le libellé contient le mot "SOLDE", les colonnes DATE D'OPÉRATION
+et RÉFÉRENCE sont VIDES (la date "AU …" fait partie du texte du solde), et il y a UN
+seul montant = le solde du compte.
+→ Cette ligne N'EST PAS UNE TRANSACTION. Mets son montant dans "solde_final".
+→ NE crée JAMAIS d'objet dans "txs" pour cette ligne, même si elle a un montant.
 
 ════════════ SOLDE REPORTÉ / ANCIEN SOLDE — RÈGLE ABSOLUE ════════════
 Certains relevés (page 2+) affichent en HAUT DU TABLEAU une ligne de report de solde :
@@ -285,6 +301,10 @@ export interface ReleveMarkdownTx {
   montant_debit: number | null;
   montant_credit: number | null;
   solde_courant: number | null;
+  // DERNIER montant numérique de la ligne = solde courant réel du relevé (la colonne
+  // solde est toujours la plus à droite), robuste même quand l'OCR décale les colonnes.
+  // Permet une récupération DÉTERMINISTE des montants par delta de solde (sans LLM).
+  solde_ligne?: number | null;
   // Solde reconstruit pas à pas depuis le solde initial (solde_initial signé +
   // Σ crédits − Σ débits jusqu'à cette ligne incluse). Sert au contrôle de
   // cohérence et au repérage de la ligne où l'écart apparaît.
@@ -476,20 +496,15 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
   const text = sanitizeReleveMarkdown(markdown);
   const lower = mdStripAccentsLower(text);
 
-  const banque =
-    lower.includes("attijariwafa") ? "Attijariwafa Bank" :
-    (lower.includes("banque populaire") || lower.includes("banque centrale populaire")
-      || lower.includes("chaabi") || lower.includes("groupe banque populaire")
-      || /\bbcp\b/.test(lower) || /\bgbp\b/.test(lower)) ? "Banque Populaire du Maroc" :
-    lower.includes("cih") ? "CIH Bank" :
-    lower.includes("bmce") || lower.includes("bank of africa") ? "BMCE Bank of Africa" :
-    lower.includes("bmci") ? "BMCI" :
-    lower.includes("societe generale") || lower.includes("société générale") ? "Société Générale Maroc" :
-    "Banque (OCR)";
+  // RIB marocain = 24 chiffres (3 banque + 3 ville + 16 compte + 2 clé). L'extraction
+  // (ancrée sur le label « RELEVE D'IDENTITE BANCAIRE », tolérante OCR/séparateurs pour
+  // couvrir le champ ATW multi-cellules) est centralisée dans releve-attijari.ts.
+  const rib = extractRibMarocain(text);
 
-  const ribMatch = text.replace(MD_NBSP, " ").match(/\b(\d{3}[\s.]?\d{3}[\s.]?\d{16}[\s.]?\d{2}|\d{24})\b/)
-    ?? text.replace(MD_NBSP, " ").match(/(\d{3})\s+(\d{3})\s+([\d\s]{10,}?)\s+(\d{2})\b/);
-  const rib = ribMatch ? ribMatch[0].replace(/\s+/g, " ").trim() : "";
+  // Identification de la banque : le CODE BANQUE (3 premiers chiffres du RIB) fait
+  // AUTORITÉ (plus fiable qu'un mot-clé OCR bruité) ; repli sur les mots-clés du texte.
+  const identite = identifierBanque({ rib, texte: text });
+  const banque = identite.id === "inconnue" ? "Banque (OCR)" : identite.nom;
 
   // Recherche d'un solde à partir de ses libellés. Le label peut être suivi d'une
   // date ("… AU 31/01/2024 …") AVANT le montant. Deux cas réels :
@@ -502,10 +517,19 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
   // de ligne avec une fenêtre courte. Le quantificateur paresseux capture le 1er
   // montant « …,dd » qui suit le label : la date (sans décimales ,dd) est ignorée.
   const findSolde = (labels: string): number | null => {
-    const sameLine = text.match(new RegExp(`(?:${labels})[^\\n]{0,40}?([\\d \\u00a0.]{1,15},\\d{2})`, "i"));
-    if (sameLine) return mdParseMontant(sameLine[1]);
-    const crossLine = text.match(new RegExp(`(?:${labels})[\\s\\S]{0,80}?([\\d \\u00a0.]{1,15},\\d{2})`, "i"));
-    return crossLine ? mdParseMontant(crossLine[1]) : null;
+    // Dans la fenêtre après le label, on RETIRE d'abord toute date (« SOLDE FINAL AU
+    // 31 01 2026 12 500,00 ») : sinon l'année 2026 se colle à la partie entière du
+    // montant → « 202612500 ». Puis on capte le 1er montant « …,dd ».
+    const grab = (window: string): number | null => {
+      const cleaned = window.replace(/\b\d{1,2}[\s\/.\-]\d{1,2}[\s\/.\-]\d{2,4}\b/g, " ");
+      const amt = cleaned.match(/([\d  .]{1,12},\d{2})/);
+      return amt ? mdParseMontant(amt[1]) : null;
+    };
+    const sl = text.match(new RegExp(`(?:${labels})([^\\n]{0,60})`, "i"));
+    const slv = sl ? grab(sl[1]) : null;
+    if (slv != null) return slv;
+    const cl = text.match(new RegExp(`(?:${labels})([\\s\\S]{0,90})`, "i"));
+    return cl ? grab(cl[1]) : null;
   };
   let solde_initial = findSolde(
     "solde\\s+depart|solde\\s+initial|ancien\\s+solde|solde\\s+report[eé]?|solde\\s+pr[eé]c[eé]dent|solde\\s+[àa]\\s+nouveau|report\\s+[àa]\\s+nouveau"
@@ -529,6 +553,11 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
   // ── RÈGLE 1 (filtre post-OCR sur le LIBELLÉ) : mots de solde/report (hors TOTAL
   // et ARRETE, présents dans de vraies transactions). Testé sur libellé normalisé.
   const LIBELLE_EXCLU = /\b(solde|report|reporter|ancien|nouveau|balance|depart)\b/;
+  // ── « SOLDE AU <date> » / « SOLDE A REPORTER AU <date> » / « SOLDE FINAL AU <date> » :
+  // ligne de solde dont la DATE fait partie du libellé (Crédit Agricole, Saham, CIH…),
+  // reconnue MÊME sans les mots « final »/« reporter ». Avec référence vide, ce n'est
+  // JAMAIS une transaction : c'est le solde d'ouverture (avant toute tx) ou de fin.
+  const SOLDE_AU_DATE = /\bsolde\b.{0,22}?\bau\b\s*\d{1,2}[\s\/.\-]\d{1,2}[\s\/.\-]\d{2,4}/i;
 
   // Récupère le montant le plus à droite d'une ligne de solde (colonne solde sinon dernier nombre).
   const grabSolde = (cells: string[]): number | null => {
@@ -568,6 +597,20 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
     // montant après les deux-points et on ne la compte JAMAIS comme transaction.
     const isInit = SOLDE_INIT_KW.test(rowText);
     const isFinal = SOLDE_FINAL_KW.test(rowText);
+    const refCell = mdGetCell(cells, cols.reference).trim();
+
+    // ── « SOLDE AU <date> » nu (sans « final »/« reporter »), colonne référence
+    // vide → ligne de solde, jamais une transaction. Position dans le tableau :
+    // avant toute transaction = solde d'ouverture ; après = solde de fin.
+    if (!isInit && !isFinal && !refCell && SOLDE_AU_DATE.test(rowText)) {
+      const a = grabSolde(cells);
+      if (a !== null) {
+        if (txs.length === 0 && !solde_initial) solde_initial = a;
+        else solde_final = a;
+      }
+      continue; // ni transaction, ni report de libellé
+    }
+
     if (isInit || isFinal) {
       if (isInit && !solde_initial) {
         const a = soldeAmountAfter(rowText, INIT_KW_SRC) ?? grabSolde(cells);
@@ -582,7 +625,10 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
       // On détecte la présence d'une date valide → on sépare : le solde (ci-dessus)
       // ET la transaction (date + libellé nettoyé + montant ≠ solde).
       if (date_operation) {
-        const soldeAmt = isInit ? soldeAmountAfter(rowText, INIT_KW_SRC) : soldeAmountAfter(rowText, FINAL_KW_SRC);
+        // Repli sur le montant de solde le plus à droite quand aucun montant ne suit
+        // directement le mot-clé (« SOLDE A REPORTER AU 31/12/2024   12 500,00 ») :
+        // garantit que le montant du solde n'est JAMAIS pris pour une transaction.
+        const soldeAmt = (isInit ? soldeAmountAfter(rowText, INIT_KW_SRC) : soldeAmountAfter(rowText, FINAL_KW_SRC)) ?? grabSolde(cells);
         const txLib = libelle
           .replace(new RegExp(`(?:${INIT_KW_SRC}|${FINAL_KW_SRC})\\s*[:\\-]?\\s*[\\d \\u00a0.]{1,15},\\d{2}`, "i"), "")
           .replace(new RegExp(`(?:${INIT_KW_SRC}|${FINAL_KW_SRC})`, "i"), "")
@@ -622,6 +668,10 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
     const date_valeur = mdNormDate(mdGetCell(cells, cols.date_valeur)) || date_operation;
     const reference = mdGetCell(cells, cols.reference).trim() || mdRefFromLibelle(libelle);
     const solde_courant = mdParseMontant(mdGetCell(cells, cols.solde));
+    // Dernier montant numérique de la ligne = solde courant réel (colonne solde =
+    // toujours la plus à droite), fiable même si l'OCR a décalé les colonnes.
+    let solde_ligne: number | null = null;
+    for (let k = cells.length - 1; k >= 0; k--) { const v = mdParseMontant(cells[k]); if (v !== null) { solde_ligne = v; break; } }
 
     let montant_debit = mdParseMontant(mdGetCell(cells, cols.debit));
     let montant_credit = mdParseMontant(mdGetCell(cells, cols.credit));
@@ -637,7 +687,7 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
       }
     }
 
-    txs.push({ reference, date_operation, date_valeur, libelle, montant_debit, montant_credit, solde_courant });
+    txs.push({ reference, date_operation, date_valeur, libelle, montant_debit, montant_credit, solde_courant, solde_ligne });
   }
 
   // Déduplication PRUDENTE : on ne supprime QUE les doublons CONSÉCUTIFS exacts
@@ -650,7 +700,7 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
     `${t.date_operation}|${t.libelle.toUpperCase().replace(/\s+/g, "").slice(0, 40)}|${t.montant_debit ?? "x"}|${t.montant_credit ?? "x"}|${(t.reference || "").toUpperCase().replace(/\s+/g, "")}`;
   const txsUniq = txs.filter((t, i) => i === 0 || txKey(t) !== txKey(txs[i - 1]));
 
-  const controle = controleSoldeReleve(solde_initial, solde_final, txsUniq);
+  const controle = controleSoldeReleve(solde_initial, solde_final, txsUniq, banque);
 
   return { banque, rib, solde_initial, solde_final, txs: txsUniq, controle };
 }
@@ -669,22 +719,26 @@ export function controleSoldeReleve(
   soldeInitialScanne: number,
   soldeFinalScanne: number,
   txs: ReleveMarkdownTx[],
+  banque?: string,
 ): ReleveControle {
   const round2 = (n: number) => Math.round(n * 100) / 100;
   const total_debit = round2(txs.reduce((s, t) => s + (t.montant_debit ?? 0), 0));
   const total_credit = round2(txs.reduce((s, t) => s + (t.montant_credit ?? 0), 0));
   const flux = round2(total_credit - total_debit); // Σ crédits − Σ débits
 
-  // Deux hypothèses sur le signe du solde de départ (BP n'affiche pas le signe).
-  const finalCrediteur = round2(soldeInitialScanne + flux);  // +SI
-  const finalDebiteur = round2(-soldeInitialScanne + flux);  // −SI
+  const finalCrediteur = round2(soldeInitialScanne + flux);  // +SI (identité comptable standard)
+  const finalDebiteur = round2(-soldeInitialScanne + flux);  // −SI (compte débiteur)
   const controlable = soldeFinalScanne > 0; // sans solde de fin lisible : contrôle impossible
 
-  // On choisit la convention dont la VALEUR ABSOLUE est la plus proche du solde
-  // de fin scanné (lui aussi en valeur absolue).
+  // La convention DÉBITEUR (comparer les valeurs absolues) n'est nécessaire que pour
+  // les banques qui affichent le « solde à reporter » SANS signe — cas de la Banque
+  // Populaire. Pour Attijariwafa (et les autres), le solde est SIGNÉ correctement :
+  //   solde_final = solde_initial(écrit) + Σ crédits − Σ débits  (convention créditeur).
+  // On ne teste donc l'hypothèse débiteur que pour la Banque Populaire.
+  const bpSansSigne = /banque\s+populaire|populaire|chaabi|\bbcp\b|\bgbp\b/i.test(banque ?? "");
   const ecartCred = Math.abs(Math.abs(finalCrediteur) - soldeFinalScanne);
   const ecartDeb = Math.abs(Math.abs(finalDebiteur) - soldeFinalScanne);
-  const debiteurMeilleur = soldeInitialScanne > 0 && ecartDeb < ecartCred;
+  const debiteurMeilleur = bpSansSigne && soldeInitialScanne > 0 && ecartDeb < ecartCred;
   const sens: "crediteur" | "debiteur" = debiteurMeilleur ? "debiteur" : "crediteur";
   const solde_final_calcule = debiteurMeilleur ? finalDebiteur : finalCrediteur;
   const ecart = round2(debiteurMeilleur ? ecartDeb : ecartCred);
@@ -736,6 +790,12 @@ Ces règles l'emportent sur toute autre déduction. Ne JAMAIS les contredire.
   → compte_pcm = "61251".
 - Eau / Électricité (Lydec, Amendis, ONEE, ONEP, Redal, Radeema, Radeef…)
   → compte_pcm = "61252".
+- CNSS / Sécurité Sociale — émetteur = "CAISSE NATIONALE DE SÉCURITÉ SOCIALE",
+  ou mention "CNSS" / "Bordereau de paiement CNSS" / "Déclaration CNSS" /
+  "Sécurité Sociale" / "cotisations sociales" → compte_pcm = "6174"
+  ET categorie_pcm = "charges_sociales". PRIORITÉ ABSOLUE : ne JAMAIS classer
+  la CNSS en 6147, en "assurance" (6161) ni en frais bancaires.
+  ⚠️ La "CAISSE NATIONALE DE CRÉDIT AGRICOLE" (CNCA) est une BANQUE, PAS la CNSS.
 ═══════════════════════════════════════════════════════════════════════════
 
 RÈGLES:
@@ -757,6 +817,7 @@ RÈGLES:
   · "eau_electricite" → ONEE, LYDEC, RADEEF, RADEM, RADEEM, eau, électricité, énergie — ou articles = consommation eau/électricité
   · "loyers" → loyer, location, bail, gérance, loyer commercial
   · "assurance" → assurance, Wafa Assurance, AXA, RMA, Allianz, SAHAM, police, prime d'assurance
+  · "charges_sociales" → CNSS, Caisse Nationale de Sécurité Sociale, Sécurité Sociale, cotisations sociales, bordereau / déclaration CNSS (compte 6174). NE PAS confondre avec "assurance" (compagnie privée) ni avec la CNCA (banque)
   · "entretien" → maintenance, réparation, pièces détachées, atelier, garage, dépannage, révision
   · "frais_bancaires" → banque, commission bancaire, frais de tenue, CIH, Attijariwafa, BMCE, BMCI, Banque Populaire, CFG, frais bancaires
   · "encaissement_client" → uniquement si sens_facture = "client" (on émet la facture)
@@ -770,6 +831,7 @@ RÈGLES:
   · "quittance_elec" → "61252" ET taux_tva = 14
   · "recu" → selon la nature de la dépense : "6147" si restaurant/café/repas, "61251" si carburant/station-service, "6141" sinon
   · frais/commissions bancaires (émetteur = banque : BP, ATW, BMCE, CIH…) → "6147"
+  · CNSS / Sécurité Sociale (categorie_pcm = "charges_sociales") → "6174" (RÈGLE STRICTE, priorité absolue)
   · tout autre type → null
 - periode / numero_compteur (UNIQUEMENT pour quittance_eau et quittance_elec) : extraire OBLIGATOIREMENT le montant, la période de consommation (label "Période", "Mois", ex: "01/2025", "Janvier 2025" — retourner telle quelle) et le numéro de compteur (label "N° Compteur", "Compteur", "N° Contrat") → null si absents
 - DATES — deux champs distincts à identifier OBLIGATOIREMENT pour les BL et BC :

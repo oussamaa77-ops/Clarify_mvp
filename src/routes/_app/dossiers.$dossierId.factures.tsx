@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
 import { generateFactureXml, marquerPayee, ocrFacture, ajouterEmailClient, matcherDocumentAvecTransactions } from "@/server/factures.functions";
+import { annulerPaiementFacture } from "@/server/paiements.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,8 +13,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, FileCode, Eye, CheckCircle, Upload, Loader2, Download, X, AlertCircle, CheckCircle2, UserPlus, Clock, Mail, FileText, Trash2 } from "lucide-react";
+import { Plus, FileCode, Eye, CheckCircle, Upload, Loader2, Download, X, AlertCircle, CheckCircle2, UserPlus, Clock, Mail, FileText, Trash2, Undo2 } from "lucide-react";
 import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/components/EcheancesInput";
+import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
+import { logAudit } from "@/lib/audit";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/factures")({ component: FacturesPage });
@@ -24,7 +27,7 @@ interface Facture {
   id: string; numero: string | null; date_facture: string; date_echeance: string | null;
   client_id: string | null; statut: string; statut_paiement: string; statut_dgi: string | null;
   montant_ht: number; montant_ttc: number; montant_tva: number;
-  type_facture: string; montant_paye: number; montant_restant: number; mode_reglement: string | null;
+  type: string; montant_paye: number; montant_restant: number; mode_reglement: string | null;
   xml_ubl: string | null; hash_sha256: string | null; dgi_uuid: string | null; dgi_response: any;
   fichier_original_url: string | null; fichier_original_nom: string | null; fichier_original_type: string | null;
 }
@@ -68,7 +71,7 @@ function StatutPaiementBadge({ f }: { f: Facture }) {
     return <Badge className="bg-green-100 text-green-700 text-xs">✅ Payée</Badge>;
   if (f.statut_paiement === "partielle")
     return <Badge className="bg-blue-100 text-blue-700 text-xs">🔵 Acompte partiel</Badge>;
-  if (f.type_facture === "acompte")
+  if (f.type === "acompte")
     return <Badge className="bg-orange-100 text-orange-700 text-xs">🟠 Acompte</Badge>;
   return <Badge variant="secondary" className="text-xs">En attente</Badge>;
 }
@@ -90,15 +93,18 @@ function FacturesPage() {
   const ocrFn    = useServerFn(ocrFacture);
   const addEmailFn = useServerFn(ajouterEmailClient);
   const matchFn  = useServerFn(matcherDocumentAvecTransactions);
+  const annulerPaiementFn = useServerFn(annulerPaiementFacture);
 
   const [factures, setFactures] = useState<Facture[]>([]);
   const [clients, setClients]   = useState<Client[]>([]);
   const [loading, setLoading]   = useState(true);
   const [openCreate, setOpenCreate] = useState(false);
   const [viewXml, setViewXml]   = useState<Facture | null>(null);
+  const [docView, setDocView]   = useState<DocumentViewerSource | null>(null);
   const [dgiResult, setDgiResult] = useState<any>(null);
   const [processing, setProcessing] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [annulConfirm, setAnnulConfirm] = useState<Facture | null>(null);
   const [docTab, setDocTab] = useState<"factures" | "documents">("factures");
   const [justificatifsVente, setJustificatifsVente] = useState<any[]>([]);
 
@@ -218,6 +224,7 @@ function FacturesPage() {
       const result = await ocrFn({ data: { extracted_text: extractedText, image_base64, mime_type, dossier_id: dossierId } });
       const r = result.result as OcrData;
       setOcrData(r);
+      logAudit({ dossierId, action: "scan_facture", ressourceType: "facture", details: { numero: r.numero_facture ?? null, sens: r.sens_facture } });
 
       // Pré-remplir formulaire
       if (r.client_id) setClientId(r.client_id);
@@ -296,7 +303,9 @@ function FacturesPage() {
       dossier_id:dossierId,client_id:clientId,numero:numero||null,
       date_facture:dateF,date_echeance:dateE||null,
       lignes:lignes as any,montant_ht:ht,montant_tva:tva,montant_ttc:ttc,
-      type_facture:typeFacture,
+      // Colonne `type` consolidée (enum) : le rôle « standard » du formulaire correspond
+      // à la nature « facture » ; acompte/solde/avoir sont repris tels quels.
+      type: typeFacture==="standard" ? "facture" : typeFacture,
       montant_paye:montantPayeInitial,
       montant_restant:montantRestantInitial,
       mode_reglement:modeReglement||null,
@@ -321,6 +330,7 @@ function FacturesPage() {
     }
 
     toast.success("Facture créée");
+    if (newFact) logAudit({ dossierId, action: "creation_facture", ressourceType: "facture", ressourceId: newFact.id, details: { numero: numero || null } });
     setOpenCreate(false);
     resetForm();
     load();
@@ -345,18 +355,47 @@ function FacturesPage() {
     setEcheances([]);
   };
 
+  // Une facture payée ne se supprime pas : il faut d'abord annuler son paiement,
+  // sinon on détruirait les traces comptables (et, avant, la ligne de relevé bancaire).
+  const estPayee = (f: Facture) => f.statut_paiement !== "non_payee";
+
   const handleDelete = async (factureId: string) => {
+    const f = factures.find(x => x.id === factureId);
+    if (f && estPayee(f)) { toast.error("Annulez d'abord le paiement de cette facture"); return; }
     try {
       // Supprimer dans l'ordre des dépendances (clés étrangères)
       await supabase.from("ged_documents" as any).delete().eq("facture_id", factureId);
       await supabase.from("ecritures_comptables").delete().eq("facture_id", factureId);
-      await supabase.from("transactions_bancaires" as any).delete().eq("facture_id", factureId);
+      // Filet de sécurité : une transaction de relevé est un fait bancaire. Si une
+      // subsistait liée à cette facture, on la DÉLIE — on ne la supprime jamais.
+      await supabase.from("transactions_bancaires" as any)
+        .update({ facture_id: null, document_type: null, rapproche: false })
+        .eq("facture_id", factureId);
       const { error } = await supabase.from("factures").delete().eq("id", factureId);
       if (error) throw error;
       toast.success("Facture supprimée");
       setDeleteConfirm(null);
       load();
     } catch(e:any) { toast.error(e.message); }
+  };
+
+  const handleAnnulerPaiement = async (f: Facture) => {
+    setProcessing(f.id);
+    try {
+      const r = await annulerPaiementFn({ data: { facture_id: f.id, type: "client" } });
+      if (r.dejaImpayee) toast.info("Cette facture est déjà impayée");
+      else {
+        const parts = [
+          r.txDeliees && `${r.txDeliees} ligne${r.txDeliees > 1 ? "s" : ""} de relevé remise${r.txDeliees > 1 ? "s" : ""} « à lettrer »`,
+          r.encaissementsSupprimes && `${r.encaissementsSupprimes} encaissement${r.encaissementsSupprimes > 1 ? "s" : ""} supprimé${r.encaissementsSupprimes > 1 ? "s" : ""}`,
+          r.ecrituresSupprimees && `${r.ecrituresSupprimees} écriture${r.ecrituresSupprimees > 1 ? "s" : ""} de règlement supprimée${r.ecrituresSupprimees > 1 ? "s" : ""}`,
+        ].filter(Boolean);
+        toast.success(`Paiement annulé — facture impayée${parts.length ? ` (${parts.join(", ")})` : ""}`);
+      }
+      setAnnulConfirm(null);
+      load();
+    } catch(e:any) { toast.error(e.message); }
+    finally { setProcessing(null); }
   };
 
   const handleGenXml = async (f: Facture) => {
@@ -409,9 +448,9 @@ function FacturesPage() {
   // KPIs
   const conformes  = factures.filter(f=>f.statut==="conforme");
   // CA HT = factures standard conformes (les acomptes vont en 4191, pas en CA)
-  const caHT       = conformes.filter(f=>f.type_facture!=="acompte").reduce((s,f)=>s+Number(f.montant_ht),0);
+  const caHT       = conformes.filter(f=>f.type!=="acompte").reduce((s,f)=>s+Number(f.montant_ht),0);
   // CA encaissé = factures standard partielles ou payées
-  const caEncaisse = conformes.filter(f=>f.type_facture!=="acompte"&&f.statut_paiement!=="non_payee").reduce((s,f)=>s+Number(f.montant_paye??0),0);
+  const caEncaisse = conformes.filter(f=>f.type!=="acompte"&&f.statut_paiement!=="non_payee").reduce((s,f)=>s+Number(f.montant_paye??0),0);
   // Encours = montant_restant de toutes les factures non soldées (acomptes + standard)
   const encours    = conformes.filter(f=>f.statut_paiement!=="payee").reduce((s,f)=>s+Number(f.montant_restant??f.montant_ttc),0);
   const enAnalyse  = factures.filter(f=>f.statut==="envoyee"||f.statut_dgi==="en_analyse").length;
@@ -659,9 +698,24 @@ function FacturesPage() {
                         <Button size="sm" variant="ghost" onClick={()=>setViewXml(f)} title="Voir XML"><Eye className="h-3 w-3"/></Button>
                       )}
                       {f.fichier_original_url&&(
-                        <Button size="sm" variant="ghost" onClick={()=>window.open(f.fichier_original_url!,"_blank")} title="Voir original"><FileText className="h-3 w-3"/></Button>
+                        <Button size="sm" variant="ghost" title="Voir original"
+                          onClick={()=>setDocView({ title:`Facture ${f.numero??""}`.trim(), url:f.fichier_original_url, fileName:f.fichier_original_nom, mimeType:f.fichier_original_type })}>
+                          <FileText className="h-3 w-3"/>
+                        </Button>
                       )}
-                      <Button size="sm" variant="ghost" className="text-red-500 hover:text-red-700" onClick={()=>setDeleteConfirm(f.id)}>
+                      {/* Annuler le paiement : actif seulement si la facture est payée
+                          (ou partiellement). Débloque ensuite la suppression. */}
+                      <Button size="sm" variant="ghost" disabled={!estPayee(f)||processing===f.id}
+                        className="text-amber-600 hover:text-amber-700"
+                        title={estPayee(f)?"Annuler le paiement":"Déjà impayée"}
+                        onClick={()=>setAnnulConfirm(f)}>
+                        {processing===f.id?<Loader2 className="h-3 w-3 animate-spin"/>:<Undo2 className="h-3 w-3"/>}
+                      </Button>
+                      {/* Supprimer : bloqué tant que la facture est payée. */}
+                      <Button size="sm" variant="ghost" disabled={estPayee(f)}
+                        className="text-red-500 hover:text-red-700"
+                        title={estPayee(f)?"Annulez d'abord le paiement":"Supprimer la facture"}
+                        onClick={()=>setDeleteConfirm(f.id)}>
                         <Trash2 className="h-3 w-3"/>
                       </Button>
                     </div>
@@ -752,6 +806,30 @@ function FacturesPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Modal confirmation annulation de paiement */}
+      <Dialog open={!!annulConfirm} onOpenChange={()=>setAnnulConfirm(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Annuler le paiement ?</DialogTitle></DialogHeader>
+          <div className="text-sm text-muted-foreground space-y-2">
+            <p>
+              La facture <span className="font-mono">{annulConfirm?.numero ?? annulConfirm?.id.slice(0,8)}</span> repassera en
+              « impayée », ce qui débloquera sa suppression.
+            </p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li>Un encaissement <b>espèces ou chèque</b> est supprimé, avec ses écritures.</li>
+              <li>Une ligne de <b>relevé bancaire</b> n'est <b>jamais supprimée</b> : elle est simplement délettrée et redevient « à lettrer ».</li>
+              <li>L'écriture de <b>vente</b> (journal VTE) est conservée.</li>
+            </ul>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={()=>setAnnulConfirm(null)}>Retour</Button>
+            <Button onClick={()=>annulConfirm&&handleAnnulerPaiement(annulConfirm)} disabled={!!processing}>
+              {processing?<Loader2 className="h-4 w-4 mr-2 animate-spin"/>:<Undo2 className="h-4 w-4 mr-2"/>}Annuler le paiement
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Modal confirmation suppression */}
       <Dialog open={!!deleteConfirm} onOpenChange={()=>setDeleteConfirm(null)}>
         <DialogContent>
@@ -798,6 +876,9 @@ function FacturesPage() {
           <pre className="bg-muted p-4 rounded text-xs overflow-auto max-h-96 font-mono whitespace-pre-wrap">{viewXml?.xml_ubl}</pre>
         </DialogContent>
       </Dialog>
+
+      {/* Aperçu du document original (panneau latéral droit) */}
+      <DocumentViewer open={!!docView} onOpenChange={(o)=>{ if(!o) setDocView(null); }} source={docView} />
     </div>
   );
 }

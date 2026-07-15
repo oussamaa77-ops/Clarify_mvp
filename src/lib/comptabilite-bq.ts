@@ -71,8 +71,10 @@ export function genererLignesBQ(p: {
   type: string;
   montant: number;
   categorie?: string | null;
-  // Compte PCM enregistré en base pour la transaction (= celui affiché dans l'UI).
-  // Sert de contrepartie quand aucune facture n'est liée, à la place de 4711/4712.
+  // Compte PCM affiché dans l'UI pour la transaction. NON UTILISÉ pour choisir la
+  // contrepartie : depuis le modèle « bank suspense », une transaction sans pièce va
+  // toujours en 4711/4712, jamais sur un compte de charge deviné. Conservé car des
+  // appelants le passent encore.
   compteComptable?: string | null;
   factureLiee?: boolean;
   justificatif?: { compte_pcm?: string | null; taux_tva?: number | null; eligible_edi?: boolean | null } | null;

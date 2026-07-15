@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   LayoutDashboard, FileText, Users, Building2, BookOpen, Landmark,
   FolderArchive, History, LogOut, Briefcase, Receipt, Users2, FileSearch,
-  Paperclip,
+  Paperclip, Sparkles, CreditCard,
 } from "lucide-react";
 
 export const Route = createFileRoute("/_app")({
@@ -40,6 +40,7 @@ function AppLayout() {
     { to: "/dossiers/$dossierId/justificatifs", label: "Justificatifs",   icon: Paperclip       },
     { to: "/dossiers/$dossierId/ged",           label: "GED",             icon: FolderArchive   },
     { to: "/dossiers/$dossierId/audit",         label: "Audit",           icon: History         },
+    { to: "/dossiers/$dossierId/analytics",     label: "Usage IA",        icon: Sparkles        },
   ] : [];
 
   return (
@@ -59,6 +60,14 @@ function AppLayout() {
             activeProps={{ className: "bg-accent" }}
           >
             <Briefcase className="h-4 w-4" /> Mes dossiers
+          </Link>
+
+          <Link
+            to="/abonnement"
+            className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-accent"
+            activeProps={{ className: "bg-accent" }}
+          >
+            <CreditCard className="h-4 w-4" /> Abonnement
           </Link>
 
           {dossierId && (

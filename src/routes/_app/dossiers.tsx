@@ -1,6 +1,8 @@
 import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/hooks/useAuth";
+import { logAudit } from "@/lib/audit";
 import { useServerFn } from "@tanstack/react-start";
 import { initDossierPCM } from "@/server/ocr.functions";
 import { Button } from "@/components/ui/button";
@@ -9,30 +11,48 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
-import { Plus, Building2, ArrowRight, Loader2 } from "lucide-react";
+import { DatePicker } from "@/components/ui/date-picker";
+import { Plus, Building2, ArrowRight, Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/dossiers")({ component: DossiersPage });
 
-interface Dossier { id: string; nom_societe: string; ice: string | null; rc: string | null; if_fiscal: string | null; statut: string; created_at: string; }
+interface Dossier { id: string; nom_societe: string; ice: string | null; rc: string | null; if_fiscal: string | null; statut: string; created_at: string; date_reprise: string | null; }
 
 function DossiersPage() {
   const initPCM = useServerFn(initDossierPCM);
+  const { profile, loading: authLoading } = useAuth();
   const [dossiers, setDossiers] = useState<Dossier[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ nom_societe: "", ice: "", rc: "", if_fiscal: "", email_societe: "", adresse: "" });
   const [search, setSearch] = useState("");
+  // Édition des réglages d'un dossier (dont la date de reprise comptable).
+  const [editDossier, setEditDossier] = useState<Dossier | null>(null);
+  const [editForm, setEditForm] = useState<{ nom_societe: string; ice: string; rc: string; if_fiscal: string; date_reprise: string | null }>({ nom_societe: "", ice: "", rc: "", if_fiscal: "", date_reprise: null });
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const load = async () => {
     setLoading(true);
-    const { data, error } = await supabase.from("dossiers").select("*").order("created_at", { ascending: false });
+    // Défense en profondeur : on borne EXPLICITEMENT la liste au cabinet de
+    // l'utilisateur courant (en plus de la RLS). Ainsi, même si la RLS venait à
+    // être désactivée sur la base, un compte ne voit jamais les dossiers d'un
+    // autre cabinet. Sans cabinet_id → aucune donnée (jamais « tout lister »).
+    if (!profile?.cabinet_id) { setDossiers([]); setLoading(false); return; }
+    const { data, error } = await supabase.from("dossiers").select("*")
+      .eq("cabinet_id", profile.cabinet_id)
+      .order("created_at", { ascending: false });
     if (error) toast.error(error.message);
-    else setDossiers(data as Dossier[]);
+    else setDossiers(data as unknown as Dossier[]);
     setLoading(false);
   };
-  useEffect(() => { load(); }, []);
+  // Recharge dès que le profil (donc le cabinet_id) est disponible / change.
+  useEffect(() => {
+    if (authLoading) return;
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, profile?.cabinet_id]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,6 +84,31 @@ function DossiersPage() {
       setForm({ nom_societe: "", ice: "", rc: "", if_fiscal: "", email_societe: "", adresse: "" });
       load();
     } finally { setCreating(false); }
+  };
+
+  const openEdit = (d: Dossier) => {
+    setEditDossier(d);
+    setEditForm({ nom_societe: d.nom_societe, ice: d.ice ?? "", rc: d.rc ?? "", if_fiscal: d.if_fiscal ?? "", date_reprise: d.date_reprise ?? null });
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editDossier) return;
+    setSavingEdit(true);
+    try {
+      const { error } = await (supabase.from("dossiers") as any).update({
+        nom_societe: editForm.nom_societe,
+        ice: editForm.ice || null,
+        rc: editForm.rc || null,
+        if_fiscal: editForm.if_fiscal || null,
+        date_reprise: editForm.date_reprise || null,   // MAJ réactive de la date de reprise
+      }).eq("id", editDossier.id);
+      if (error) { toast.error(error.message); return; }
+      logAudit({ dossierId: editDossier.id, action: "modification_dossier", ressourceType: "dossier", ressourceId: editDossier.id, details: { nom_societe: editForm.nom_societe } });
+      toast.success("Réglages du dossier enregistrés ✓");
+      setEditDossier(null);
+      load();
+    } finally { setSavingEdit(false); }
   };
 
   const filtered = dossiers.filter(d =>
@@ -125,6 +170,11 @@ function DossiersPage() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {[1,2,3].map(i => <div key={i} className="h-44 bg-muted rounded-xl animate-pulse" />)}
         </div>
+      ) : !profile?.cabinet_id ? (
+        <Card><CardContent className="py-16 text-center">
+          <Building2 className="h-12 w-12 mx-auto text-muted-foreground mb-4 opacity-30" />
+          <p className="text-muted-foreground">Cabinet non identifié pour ce compte. Reconnectez-vous.</p>
+        </CardContent></Card>
       ) : filtered.length === 0 ? (
         <Card><CardContent className="py-16 text-center">
           <Building2 className="h-12 w-12 mx-auto text-muted-foreground mb-4 opacity-30" />
@@ -140,7 +190,14 @@ function DossiersPage() {
                     <div className="w-10 h-10 bg-primary/10 rounded-lg flex items-center justify-center mb-2">
                       <Building2 className="h-5 w-5 text-primary" />
                     </div>
-                    <ArrowRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-1 transition-transform" />
+                    <div className="flex items-center gap-1">
+                      <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground"
+                        title="Réglages du dossier"
+                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); openEdit(d); }}>
+                        <Settings2 className="h-4 w-4" />
+                      </Button>
+                      <ArrowRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-1 transition-transform" />
+                    </div>
                   </div>
                   <CardTitle className="text-lg leading-tight">{d.nom_societe}</CardTitle>
                 </CardHeader>
@@ -148,8 +205,13 @@ function DossiersPage() {
                   {d.ice && <div>ICE: <span className="font-mono">{d.ice}</span></div>}
                   {d.rc && <div>RC: {d.rc}</div>}
                   {d.if_fiscal && <div>IF: {d.if_fiscal}</div>}
-                  <div className="pt-2">
+                  <div className="pt-2 flex items-center gap-2">
                     <Badge variant="outline" className="text-green-600 border-green-200">{d.statut}</Badge>
+                    {d.date_reprise && (
+                      <Badge variant="outline" className="text-sky-600 border-sky-200">
+                        Reprise: {d.date_reprise.split("-").reverse().join("/")}
+                      </Badge>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -157,6 +219,37 @@ function DossiersPage() {
           ))}
         </div>
       )}
+
+      {/* ── Réglages du dossier (dont la date de reprise comptable) ── */}
+      <Dialog open={!!editDossier} onOpenChange={(o) => { if (!o) setEditDossier(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Réglages du dossier</DialogTitle></DialogHeader>
+          <form onSubmit={handleSaveEdit} className="space-y-3">
+            <div className="space-y-2"><Label>Raison sociale *</Label>
+              <Input required value={editForm.nom_societe} onChange={e => setEditForm({ ...editForm, nom_societe: e.target.value })} /></div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-2"><Label>ICE</Label><Input value={editForm.ice} onChange={e => setEditForm({ ...editForm, ice: e.target.value })} /></div>
+              <div className="space-y-2"><Label>RC</Label><Input value={editForm.rc} onChange={e => setEditForm({ ...editForm, rc: e.target.value })} /></div>
+              <div className="space-y-2"><Label>IF</Label><Input value={editForm.if_fiscal} onChange={e => setEditForm({ ...editForm, if_fiscal: e.target.value })} /></div>
+            </div>
+            <div className="space-y-2 rounded-md border p-3 bg-muted/30">
+              <Label>Date de reprise comptable</Label>
+              <DatePicker value={editForm.date_reprise} onChange={(iso) => setEditForm({ ...editForm, date_reprise: iso })} />
+              <p className="text-xs text-muted-foreground">
+                Avant cette date = <strong>migration</strong> (rapprochement prioritaire sur les écritures du Grand Livre).
+                À partir de cette date = <strong>flux courant</strong> (priorité à la facture / justificatif OCR).
+              </p>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setEditDossier(null)}>Annuler</Button>
+              <Button type="submit" disabled={savingEdit}>
+                {savingEdit && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Enregistrer
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

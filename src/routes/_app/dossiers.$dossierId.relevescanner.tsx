@@ -9,7 +9,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Loader2, CheckCircle, X, RefreshCw, Download, AlertCircle, FileText, Sparkles, Image } from "lucide-react";
 import { toast } from "sonner";
-import { analyserReleveIA, ocrReleve } from "@/server/factures.functions";
+import { ocrReleve } from "@/server/factures.functions";
+import { memoriserTiers } from "@/server/tiers-memoire.functions";
+import { runDocumentJob } from "@/hooks/useDocumentJob";
+import { parseAttijariReleve, extractRibMarocain } from "@/lib/releve-attijari";
+import { enregistrerPaiement } from "@/lib/paiements";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/relevescanner")({
   component: RelEveScanner,
@@ -28,6 +32,7 @@ interface Transaction {
   necessite_remarque: boolean; message_pour_comptable: string | null;
   etape_rapprochement: string; facture_id: string | null;
   justificatif_id: string | null;
+  source: "memoire" | "ia";   // 'memoire' = classé sans appel IA (skipLLM)
   suggestions: Array<{ nature: string; code_pcm: string; tiers: string | null; facture: string | null; confiance: number }>;
 }
 
@@ -117,22 +122,38 @@ function RelEveScanner() {
                 ?? text.match(/(?:SOLDE\s+DEPART|ANCIEN\s+SOLDE)[^\n]*([\d\s]+,\d{2})/i);
     const mFin  = text.match(/(?:SOLDE\s+FINAL|SOLDE\s+A\s+REPORTER|NOUVEAU\s+SOLDE)\s+AU\s+\d{1,2}\s+\d{1,2}\s+\d{4}\s+([\d\s]+,\d{2})\s*(?:CREDITEUR|DEBITEUR)?/i)
                 ?? text.match(/(?:SOLDE\s+FINAL|SOLDE\s+A\s+REPORTER|NOUVEAU\s+SOLDE)[^\n]*([\d\s]+,\d{2})/i);
+    // Repli « SOLDE AU <date>  12 500,00 » nu (Crédit Agricole, Saham, CIH…) : le solde
+    // de fin est la DERNIÈRE occurrence dans le document (l'ouverture serait la 1re).
+    const soldeAuAll = [...text.matchAll(/\bSOLDE\s+AU\s+\d{1,2}[\s\/.\-]\d{1,2}[\s\/.\-]\d{2,4}\s+([\d\s]+,\d{2})/ig)];
+    const mFinBare = soldeAuAll.length ? soldeAuAll[soldeAuAll.length - 1][1] : undefined;
 
     const parseMontant = (s?: string) => s ? parseFloat(s.replace(/\s/g, "").replace(",", ".")) : 0;
 
-    const mRib = text.match(/(\d{3})\s+(\d{3})\s+([\d\s]{10,}?)\s+(\d{2})\b/);
-    const rib = mRib ? `${mRib[1]} ${mRib[2]} ${mRib[3].trim()} ${mRib[4]}` : "";
+    // RIB : extraction robuste (ancrée sur le label « RELEVE D'IDENTITE BANCAIRE »,
+    // tolérante aux séparateurs -/|/gras et au bruit OCR) — même logique que le serveur.
+    const rib = extractRibMarocain(text);
 
     const info: InfoReleve = {
       banque, rib,
       solde_initial: parseMontant(mInit?.[1]),
-      solde_final:   parseMontant(mFin?.[1]),
+      solde_final:   parseMontant(mFin?.[1] ?? mFinBare),
     };
+
+    // ── ATTIJARIWAFA : preprocessing HEURISTIQUE multi-étapes (tolérant OCR) ────
+    // Remplace l'ancien regex mono-ligne fragile. Reconstruit les transactions
+    // multi-lignes, tolère le bruit OCR/CamScanner, et logue chaque bloc.
+    if (banque === "Attijariwafa Bank") {
+      const { txs: atwTxs } = parseAttijariReleve(text, { year, soldeInitial: info.solde_initial });
+      if (atwTxs.length > 0) {
+        return { txs: atwTxs.map((t, i) => ({ ...t, ligne: i + 1 })), info };
+      }
+      console.warn("[ATW] heuristique : 0 transaction → repli sur le parseur générique");
+    }
 
     // ── Mots-clés exclusion ───────────────────────────────────────────────────
     // NB: ne pas mettre "debit"/"credit" ici — ils peuvent apparaître dans les libellés de transactions
     const EXCL = [
-      "solde depart","solde final","solde a reporter","ancien solde","nouveau solde",
+      "solde depart","solde final","solde a reporter","solde au ","ancien solde","nouveau solde",
       "total mouvements","total des","banque populaire","attijariwafa","cih bank",
       "agence","adresse","extrait de compte","releve de compte","code banque",
       "date oper","date valeur","libelle","montant","page n",
@@ -317,6 +338,10 @@ function RelEveScanner() {
       let txBrutes: any[] = [];
       let info: InfoReleve = { banque: "", rib: "", solde_initial: 0, solde_final: 0 };
 
+      // Identité du DOCUMENT : les N pages d'un relevé scanné ne doivent
+      // consommer qu'un seul scan de quota (cf. ocrReleve.scan_key).
+      const scanKey = `${file.name}:${file.size}:${file.lastModified}`;
+
       if (isImage) {
         // ── Chemin image directe (JPEG/PNG) ─────────────────────────────────
         const base64 = await new Promise<string>((res, rej) => {
@@ -325,7 +350,7 @@ function RelEveScanner() {
           reader.onerror = rej;
           reader.readAsDataURL(file);
         });
-        const result = await ocrReleve({ data: { image_base64: base64, mime_type: file.type } });
+        const result = await ocrReleve({ data: { image_base64: base64, mime_type: file.type, dossier_id: dossierId, scan_key: scanKey } });
         txBrutes = result.txs;
         info = result.info;
       } else {
@@ -367,7 +392,7 @@ function RelEveScanner() {
           let lastSoldeFinal: number | undefined;
           for (let p = 1; p <= pdf.numPages; p++) {
             const base64 = await pdfPageToBase64(pdfjsLib, ab, p);
-            const result = await ocrReleve({ data: { image_base64: base64, mime_type: "image/jpeg", solde_initial_override: lastSoldeFinal } });
+            const result = await ocrReleve({ data: { image_base64: base64, mime_type: "image/jpeg", solde_initial_override: lastSoldeFinal, dossier_id: dossierId, scan_key: scanKey } });
             // Le solde_final de cette page = solde_initial de la page suivante
             if (result.info.solde_final > 0) lastSoldeFinal = result.info.solde_final;
             allTxs.push(...result.txs.map((t: any, i: number) => ({ ...t, ligne: allTxs.length + i + 1 })));
@@ -391,22 +416,23 @@ function RelEveScanner() {
         return;
       }
 
-      // analyserReleveIA : fonction unifiée avec _idx, overrides mots-clés,
-      // déduplication best-match-wins et prompt riche (remplace l'ancienne
-      // analyserTransactions inline qui ignorait tous ces correctifs)
-      const result = await analyserReleveIA({
-        data: {
-          dossier_nom: dossier?.nom_societe ?? "",
-          dossier_ice: dossier?.ice ?? "",
-          transactions_brutes: txBrutes,
-          factures_client:  freshF  ?? factures,
-          factures_fourn:   freshFF ?? facturesFourn,
-          fournisseurs:     freshFo ?? fournisseurs,
-          clients:          freshCl ?? clients,
-          justificatifs:    freshJJ ?? justificatifs,
-          remarques: remarquesExtra || remarques,
+      // ── Traitement DÉCOUPLÉ (queue BullMQ) : l'OCR (txBrutes) est fait ici, le
+      // LLM + mémoire + rapprochement partent dans un job. Le worker récupère
+      // lui-même le contexte (factures/clients…) côté serveur. En l'absence de
+      // Redis, enqueueDocumentJob traite en INLINE et renvoie déjà le résultat.
+      // Le résultat conserve la forme { analyses } de analyserReleveIA.
+      toast.info("Traitement en cours…");
+      const job = await runDocumentJob(
+        {
+          dossier_id: dossierId,
+          type: "releve",
+          payload: { transactions_brutes: txBrutes, remarques: remarquesExtra || remarques },
         },
-      });
+        (s) => { if (s === "processing") toast.loading("Analyse IA en cours…", { id: "job-releve" }); },
+      );
+      toast.dismiss("job-releve");
+      if (job.status === "failed") { toast.error("Échec du traitement : " + (job.error ?? "inconnu")); setStep("upload"); return; }
+      const result = job.result ?? { analyses: [] };
 
       const txFinal: Transaction[] = txBrutes.map((tx: any, idx: number) => {
         // analyserReleveIA retourne analyses[idx] = analyse de txBrutes[idx]
@@ -432,6 +458,7 @@ function RelEveScanner() {
           etape_rapprochement: a.etape_rapprochement ?? "inconnu",
           facture_id:      a.facture_id ?? null,
           justificatif_id: a.justificatif_id ?? null,
+          source: a.source === "memoire" ? "memoire" : "ia",
           suggestions: a.suggestions ?? [],
         };
       });
@@ -516,12 +543,57 @@ function RelEveScanner() {
 
       await supabase.from("ecritures_comptables").insert(ecritures);
 
-      if (facturesClientPayees.length > 0) {
-        await supabase.from("factures").update({ statut_paiement: "payee", date_paiement: new Date().toISOString().slice(0, 10) }).in("id", facturesClientPayees);
-      }
-      if (facturesFournPayees.length > 0) {
-        await (supabase as any).from("factures_fournisseurs").update({ statut_paiement: "payee", date_paiement: new Date().toISOString().slice(0, 10) }).in("id", facturesFournPayees);
-      }
+      // Solder les factures rapprochées via un PAIEMENT (source de vérité) couvrant le
+      // reste dû ; le trigger recalcule montant_paye/restant/statut. Ces transactions
+      // scannées ne sont pas persistées dans transactions_bancaires : le paiement est donc
+      // 'manuel', avec une référence d'idempotence (rejouer le scan ne double pas). Repli
+      // avant migration : la mise à jour directe des colonnes, gérée par enregistrerPaiement.
+      const datePaiement = new Date().toISOString().slice(0, 10);
+      const solder = async (table: "factures" | "factures_fournisseurs", ids: string[], source: any[]) => {
+        for (const id of ids) {
+          const f = source.find((x: any) => x.id === id);
+          const reste = Math.round((Number(f?.montant_ttc ?? 0) - Number(f?.montant_paye ?? 0)) * 100) / 100;
+          if (reste <= 0) continue;
+          await enregistrerPaiement(supabase, {
+            dossierId, table, factureId: id, montant: reste, date: datePaiement,
+            origine: "manuel", reference: "solde-releve-scan",
+          });
+        }
+      };
+      await solder("factures", facturesClientPayees, factures);
+      await solder("factures_fournisseurs", facturesFournPayees, facturesFourn);
+
+      // ── MÉMOIRE BANQUE (point 1) : write-back après validation utilisateur ──
+      // Chaque transaction validée enrichit tiers_memoire (sens='banque') : le
+      // pattern du libellé → classif (compte/catégorie/TVA) + type_tiers. Au 2e
+      // passage du même tiers (occurrences ≥ 2), le scan court-circuitera le LLM.
+      // Dégradation gracieuse : un échec mémoire ne bloque jamais la compta.
+      const AUTRE_CATS = new Set([
+        "frais_bancaires", "retrait_especes", "virement_interne", "salaires",
+        "cnss_amo", "tva_dgi", "interets_crediteurs", "taxe_professionnelle", "frais_douane",
+      ]);
+      try {
+        await Promise.all(
+          transactions.filter(t => t.valide).map((tx) => {
+            const libelle = tx.nature_operation ?? "";
+            if (!libelle.trim()) return Promise.resolve();
+            const type_tiers = AUTRE_CATS.has(tx.nature_confirmee)
+              ? "autre" as const
+              : (tx.montant_credit ? "client" as const : "fournisseur" as const);
+            return memoriserTiers({
+              data: {
+                dossier_id: dossierId,
+                sens: "banque",
+                nom: libelle,
+                compte_pcm: tx.code_comptable ?? null,
+                categorie_pcm: tx.nature_confirmee ?? null,
+                taux_tva: tx.taux_tva ?? null,
+                type_tiers,
+              },
+            }).catch(() => undefined);
+          }),
+        );
+      } catch { /* mémoire best-effort — jamais bloquant */ }
 
       const nbPayees = facturesClientPayees.length + facturesFournPayees.length;
       toast.success(`${transactions.filter(t => t.valide).length} transactions comptabilisées` + (nbPayees > 0 ? ` — ${nbPayees} facture(s) marquée(s) payée(s)` : ""));
@@ -694,7 +766,18 @@ function RelEveScanner() {
                       {tx.montant_credit ? `+${tx.montant_credit.toLocaleString("fr-MA",{minimumFractionDigits:2})}` : tx.montant_debit ? `-${tx.montant_debit.toLocaleString("fr-MA",{minimumFractionDigits:2})}` : "—"}
                     </div>
                   </div>
-                  <div className="mt-0.5 text-[10px] text-muted-foreground pl-6 truncate">{tx.nature_operation}</div>
+                  <div className="mt-0.5 pl-6 flex items-center gap-1.5 min-w-0">
+                    <span className="text-[10px] text-muted-foreground truncate">{tx.nature_operation}</span>
+                    {tx.source === "memoire" ? (
+                      <span className="shrink-0 inline-flex items-center gap-0.5 rounded bg-green-100 text-green-700 px-1 py-px text-[9px] font-medium" title="Classé instantanément par la mémoire — appel IA évité">
+                        ⚡ Mémoire · IA évitée
+                      </span>
+                    ) : (
+                      <span className="shrink-0 inline-flex items-center gap-0.5 rounded bg-muted text-muted-foreground px-1 py-px text-[9px] font-medium" title="Analysé par l'IA">
+                        🤖 IA
+                      </span>
+                    )}
+                  </div>
                   {selectedTx === idx && (
                     <div className="mt-3 ml-6 p-3 rounded-lg bg-muted/50 border space-y-3" onClick={e => e.stopPropagation()}>
                       <div className="grid grid-cols-3 gap-3">

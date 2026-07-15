@@ -10,12 +10,19 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Landmark, Upload, Loader2, TrendingUp, TrendingDown, CheckCircle, FileText, AlertCircle, RefreshCw, Download, X, Sparkles, Eye, Pencil, ChevronRight } from "lucide-react";
+import { Plus, Landmark, Upload, Loader2, TrendingUp, TrendingDown, CheckCircle, FileText, AlertCircle, AlertTriangle, RefreshCw, Download, X, Sparkles, Eye, Pencil, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
 import { analyserReleveIA, extraireTransactionsVision } from "@/server/factures.functions";
-import { lettrerDossier } from "@/server/lettrage.functions";
+import { lettrerDossier, getRapprochementGL, lierTransactionEcriture } from "@/server/lettrage.functions";
+import type { OpenLedgerItem } from "@/server/lettrage.functions";
 import { PCM_MAP, RX_VIREMENT_INTERNE, deriveCategorie, genererLignesBQ } from "@/lib/comptabilite-bq";
+import { extractRibMarocain } from "@/lib/releve-attijari";
+import { identifierBanque, identifierBanqueParNom, maskRib } from "@/lib/bank-identity";
+import { reconcilierPaiements } from "@/lib/paiements";
+import { BankLogo } from "@/components/BankLogo";
+import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
+import { logAudit } from "@/lib/audit";
 // @ts-ignore
 import * as pdfjsLib from 'pdfjs-dist';
 
@@ -389,26 +396,12 @@ const EXCL_LINES = /^(?:CODE|DATE\s+OP|LIBELLE|VALEUR|NATURE|REFERENCE|MONTANT|T
 // (en-tête présent sur la page 1). Il permet de parser une page ou un segment
 // isolé tout en conservant l'identification banque issue de la 1ère page.
 function parserRelevePDF(text: string, headerText: string = text): { txs: any[]; info: InfoReleve } {
-  const lower = headerText.toLowerCase();
-  const mRib = headerText.match(/\b(\d{3})\s+(\d{3})\s+([\d ]{8,20})\s+(\d{2})\b(?=\D)/); const rib = mRib ? `${mRib[1]} ${mRib[2]} ${mRib[3].trim()} ${mRib[4]}` : ""; const codeRib = mRib ? mRib[1] : ""; console.log("[RIB DEBUG] code:", codeRib, "| full:", rib);
-
-
-
-  const banque =
-    ["101","102","103","104","105","110","115","120","125","130","145","150","155","160","165","170","175","180","185","190","195"].includes(codeRib) ? "Banque Populaire"
-    : codeRib === "011" ? "Attijariwafa Bank"
-    : codeRib === "230" ? "CIH Bank"
-    : codeRib === "013" ? "BMCE Bank of Africa"
-    : codeRib === "141" ? "BMCI"
-    : codeRib === "022" ? "Société Générale"
-    : lower.includes("attijariwafa") ? "Attijariwafa Bank"
-    : (lower.includes("banque populaire") || lower.includes("banque centrale populaire")
-        || lower.includes("chaabi") || /\bbcp\b/.test(lower) || /\bgbp\b/.test(lower)) ? "Banque Populaire"
-    : lower.includes("cih bank") ? "CIH Bank"
-    : lower.includes("bmce") || lower.includes("bank of africa") ? "BMCE Bank of Africa"
-    : lower.includes("bmci") ? "BMCI"
-    : lower.includes("société générale") || lower.includes("societe generale") ? "Société Générale"
-    : "Banque";
+  // Identification : le CODE BANQUE (3 premiers chiffres du RIB) fait AUTORITÉ, avec
+  // repli sur les mots-clés du texte. Extraction RIB robuste et mapping centralisés
+  // dans bank-identity.ts (corrige les anciens codes erronés 011/013/141…).
+  const rib = extractRibMarocain(headerText);
+  const identite = identifierBanque({ rib, texte: headerText });
+  const banque = identite.id === "inconnue" ? "Banque" : identite.nom;
 
   const isATW = banque === "Attijariwafa Bank";
   const isCIH = banque === "CIH Bank";
@@ -601,9 +594,15 @@ function BanquePage() {
   const childMatches = useChildMatches();
 
   const [tab, setTab] = useState<"comptes"|"releves"|"scanner"|"encaissements">("comptes");
+  const [docView, setDocView] = useState<DocumentViewerSource | null>(null);
   const [comptes, setComptes] = useState<Compte[]>([]);
   const [selectedId, setSelectedId] = useState<string|null>(null);
   const [transactions, setTransactions] = useState<TxBancaire[]>([]);
+  // Rapprochement Grand Livre : postes ouverts (candidats « secours/migration »),
+  // transactions déjà liées à une écriture GL (encadré audit), date de reprise.
+  const [postesOuverts, setPostesOuverts] = useState<OpenLedgerItem[]>([]);
+  const [ledgerTxIds, setLedgerTxIds] = useState<Set<string>>(new Set());
+  const [dateReprise, setDateReprise] = useState<string|null>(null);
   const [liaisonTx, setLiaisonTx] = useState<TxBancaire|null>(null);
   const [liaisonStatut, setLiaisonStatut] = useState<"ouvert"|"ferme">("ouvert");
   const [liaisonDocType, setLiaisonDocType] = useState<""|"facture_client"|"facture_fournisseur"|"justificatif">("");
@@ -635,6 +634,8 @@ function BanquePage() {
   const [txInsertedIds, setTxInsertedIds] = useState<string[]>([]);
   const [txExtraites, setTxExtraites] = useState<TxExtracted[]>([]);
   const [infoReleve, setInfoReleve] = useState<InfoReleve|null>(null);
+  // Override manuel du solde final calculé (si l'utilisateur corrige une imprécision).
+  const [soldeFinalManuel, setSoldeFinalManuel] = useState<number|null>(null);
   const [releveCompteId, setReleveCompteId] = useState("");
   const [pdfUrl, setPdfUrl] = useState<string|null>(null);
   // Fichier scanné conservé pour upload sécurisé (bucket privé) à l'enregistrement.
@@ -648,6 +649,8 @@ function BanquePage() {
 
   // Autres modals
   const [openCompte, setOpenCompte] = useState(false);
+  // Édition d'un compte existant : même modal que la création. null ⇒ mode création.
+  const [editCompteId, setEditCompteId] = useState<string|null>(null);
   const [openEncaissement, setOpenEncaissement] = useState(false);
   const [processing, setProcessing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -660,12 +663,42 @@ function BanquePage() {
     facture_id:"",facture_fournisseur_id:"",
   });
 
+  // ── Comptes : création / correction ────────────────────────────────────────
+  const FORM_COMPTE_VIDE = {banque:"",intitule:"",rib:"",iban:"",solde_actuel:0};
+  const ouvrirCreationCompte = () => { setEditCompteId(null); setFormCompte(FORM_COMPTE_VIDE); setOpenCompte(true); };
+  const ouvrirEditionCompte = (c: Compte) => {
+    setEditCompteId(c.id);
+    setFormCompte({banque:c.banque??"", intitule:c.intitule??"", rib:c.rib??"", iban:(c as any).iban??"", solde_actuel:c.solde_actuel??0});
+    setOpenCompte(true);
+  };
+
+  // En édition on ne touche PAS au solde : il est recalculé à chaque import de relevé
+  // (cf. update solde_actuel après enregistrement d'un relevé). L'écraser ici ferait
+  // diverger le compte de ses relevés.
+  const enregistrerCompte = async () => {
+    const banque = formCompte.banque.trim(), intitule = formCompte.intitule.trim();
+    const rib = formCompte.rib.trim(), iban = formCompte.iban.trim();
+    if (!banque && !intitule) return toast.error("Renseignez au moins la banque ou l'intitulé");
+    const champs = { banque: banque || null, intitule: intitule || null, rib: rib || null, iban: iban || null };
+    if (editCompteId) {
+      const { error } = await (supabase.from("comptes_bancaires") as any).update(champs).eq("id", editCompteId);
+      if (error) return toast.error(error.message);
+      toast.success("Compte mis à jour");
+    } else {
+      const { error } = await (supabase.from("comptes_bancaires") as any)
+        .insert({ dossier_id: dossierId, ...champs, solde_actuel: formCompte.solde_actuel });
+      if (error) return toast.error(error.message);
+      toast.success("Compte créé");
+    }
+    setOpenCompte(false); setEditCompteId(null); setFormCompte(FORM_COMPTE_VIDE); load();
+  };
+
   const load = async () => {
     const [{data:c},{data:r},{data:fc},{data:ff},{data:fo},{data:cl},{data:dos},{data:jus},{data:fcAll},{data:ffAll},{data:jusAll},{data:rstats}]=await Promise.all([
       (supabase.from("comptes_bancaires") as any).select("*").eq("dossier_id",dossierId).order("created_at"),
       (supabase.from("releves_bancaires") as any).select("*").eq("dossier_id",dossierId).order("created_at",{ascending:false}),
       // Non payées → dropdown "Lier un document"
-      supabase.from("factures").select("id,numero,montant_ttc,montant_ht,montant_tva,montant_paye,montant_restant,type_facture,date_facture,date_echeance,client_id,mode_reglement,clients(id,nom,ice)").eq("dossier_id",dossierId).eq("statut","conforme").neq("statut_paiement","payee"),
+      supabase.from("factures").select("id,numero,montant_ttc,montant_ht,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,client_id,mode_reglement,clients(id,nom,ice)").eq("dossier_id",dossierId).eq("statut","conforme").neq("statut_paiement","payee"),
       (supabase.from("factures_fournisseurs") as any).select("id,numero,montant_ttc,montant_ht,montant_tva,montant_paye,montant_restant,date_facture,date_echeance,fournisseur_nom,fournisseur_id,mode_reglement").eq("dossier_id",dossierId).neq("statut_paiement","payee"),
       (supabase.from("fournisseurs") as any).select("id,nom,ice").eq("dossier_id",dossierId),
       supabase.from("clients").select("id,nom,ice").eq("dossier_id",dossierId),
@@ -706,8 +739,21 @@ function BanquePage() {
     setSelectedTxIds(new Set(rows.map(t=>t.id)));
   };
 
-  useEffect(()=>{load();},[dossierId]);
+  // Postes ouverts du GL + liens écriture↔transaction + date de reprise (pour l'UI).
+  const loadGL=async()=>{
+    try{
+      const res:any=await getRapprochementGL({data:{dossierId}});
+      setPostesOuverts((res.open??[]) as OpenLedgerItem[]);
+      setLedgerTxIds(new Set<string>(res.ledgerTxIds??[]));
+      setDateReprise(res.dateReprise??null);
+    }catch{/* dégrade silencieusement si migration non appliquée */}
+  };
+
+  useEffect(()=>{load();loadGL();},[dossierId]);
   useEffect(()=>{if(selectedId){loadTx(selectedId);}},[selectedId]);
+
+  // Une transaction est-elle « présent » (flux courant) ? Avant la date de reprise = passé (migration).
+  const estPresent=(t:TxBancaire)=> !dateReprise || String(t.date_operation) >= String(dateReprise);
 
   // NB : l'auto-rematch côté client (useEffect au chargement) a été SUPPRIMÉ.
   // Le lettrage est désormais 100 % serveur, déclenché par événements :
@@ -1042,6 +1088,7 @@ function BanquePage() {
       setScanStep("review");
       const nbMatch=txFinalMatched.filter(t=>t.facture_id||t.justificatif_id).length;
       toast.success(`${txFinalMatched.length} transactions analysées${nbMatch>0?` — ${nbMatch} matchées`:""}`);
+      logAudit({ dossierId, action: "scan_releve", ressourceType: "releve_bancaire", details: { transactions: txFinalMatched.length, banque: info.banque || null } });
 
     }catch(e:any){toast.error("Erreur: "+e.message);}
     finally{setScanLoading(false);}
@@ -1083,7 +1130,9 @@ function BanquePage() {
     setSaving(true);
     try{
       const compte=comptes.find(c=>c.id===releveCompteId);
-      let soldeCourant=compte?.solde_actuel??0;
+      // Le solde final CALCULÉ part du solde initial SCANNÉ sur le relevé (à défaut,
+      // le solde actuel du compte) : solde_final = solde_initial + Σcrédits − Σdébits.
+      let soldeCourant=infoReleve?.solde_initial??compte?.solde_actuel??0;
 
       // Calculer fcPay/ffPay/justiPay pour mise à jour des documents
       const fcPay:string[]=[],ffPay:string[]=[],justiPay:string[]=[];
@@ -1182,7 +1231,10 @@ function BanquePage() {
           periode_debut:periodeDates[0]||null,
           periode_fin:periodeDates[periodeDates.length-1]||null,
           solde_initial:infoReleve?.solde_initial??compte?.solde_actuel??0,
-          solde_final:infoReleve?.solde_final||soldeCourant,
+          // Solde final = CALCULÉ (solde initial scanné + Σcrédits − Σdébits), ou la
+          // valeur corrigée manuellement par l'utilisateur. Pas le « solde à reporter »
+          // scanné (celui-ci ne sert qu'à vérifier le scan).
+          solde_final:soldeFinalManuel??soldeCourant,
           nombre_transactions:txExtraites.length,
           statut:"actif",
           fichier_nom:releveFile?.name||"relevé importé",
@@ -1232,37 +1284,36 @@ function BanquePage() {
       setTxInsertedIds((insertedTx??[]).map((t:any)=>t.id));
       await (supabase.from("comptes_bancaires") as any).update({solde_actuel:soldeCourant}).eq("id",releveCompteId);
 
-      // Mise à jour statut factures clients
-      for(const fid of fcPay){
-        const fac=facturesClient.find((f:any)=>f.id===fid);
-        const tx=txExtraites.find(t=>t.facture_id===fid);
-        const ancienPaye=Number(fac?.montant_paye)||0;
-        const txMontant=tx?.montant??0;
-        const montantPaye=Math.abs(ancienPaye-txMontant)<1&&fac?.type_facture==="acompte"
-          ?txMontant:Math.round((txMontant+ancienPaye)*100)/100;
-        const montantTotal=Number(fac?.montant_ttc)||0;
-        const estPaye=montantPaye>=montantTotal-0.01;
-        await (supabase.from("factures") as any).update({
-          statut_paiement:estPaye?"payee":"partielle",
-          montant_paye:montantPaye,
-          montant_restant:Math.max(0,Math.round((montantTotal-montantPaye)*100)/100),
-          date_paiement:new Date().toISOString().slice(0,10),
-        }).eq("id",fid);
-      }
-      for(const fid of ffPay){
-        const fac=facturesFourn.find((f:any)=>f.id===fid);
-        const tx=txExtraites.find(t=>t.facture_id===fid);
-        const ancienPayeF=Number(fac?.montant_paye)||0;
-        const txMontantF=tx?.montant??0;
-        const montantPaye=Math.round((txMontantF+ancienPayeF)*100)/100;
-        const montantTotal=Number(fac?.montant_ttc)||0;
-        const estPaye=montantPaye>=montantTotal-0.01;
-        await (supabase.from("factures_fournisseurs") as any).update({
-          statut_paiement:estPaye?"payee":"partielle",
-          montant_paye:montantPaye,
-          montant_restant:Math.max(0,Math.round((montantTotal-montantPaye)*100)/100),
-          date_paiement:new Date().toISOString().slice(0,10),
-        }).eq("id",fid);
+      // Paiements (source de vérité) : les transactions viennent d'être insérées AVEC
+      // leur facture_id ; on reconstruit les paiements du dossier depuis ces liens et le
+      // trigger met à jour montant_paye/restant/statut. Repli avant migration : ancienne
+      // mise à jour directe des colonnes (sans la garde acompte, obsolète — l'idempotence
+      // est désormais portée par la reconstruction, pas par un test de montant).
+      const recImport = await reconcilierPaiements(supabase, dossierId);
+      if(!recImport){
+        const dateP=new Date().toISOString().slice(0,10);
+        for(const fid of fcPay){
+          const fac=facturesClient.find((f:any)=>f.id===fid);
+          const montantPaye=Math.round(((Number(fac?.montant_paye)||0)+(txExtraites.find(t=>t.facture_id===fid)?.montant??0))*100)/100;
+          const montantTotal=Number(fac?.montant_ttc)||0;
+          await (supabase.from("factures") as any).update({
+            statut_paiement:montantPaye>=montantTotal-0.01?"payee":"partielle",
+            montant_paye:montantPaye,
+            montant_restant:Math.max(0,Math.round((montantTotal-montantPaye)*100)/100),
+            date_paiement:dateP,
+          }).eq("id",fid);
+        }
+        for(const fid of ffPay){
+          const fac=facturesFourn.find((f:any)=>f.id===fid);
+          const montantPaye=Math.round(((Number(fac?.montant_paye)||0)+(txExtraites.find(t=>t.facture_id===fid)?.montant??0))*100)/100;
+          const montantTotal=Number(fac?.montant_ttc)||0;
+          await (supabase.from("factures_fournisseurs") as any).update({
+            statut_paiement:montantPaye>=montantTotal-0.01?"payee":"partielle",
+            montant_paye:montantPaye,
+            montant_restant:Math.max(0,Math.round((montantTotal-montantPaye)*100)/100),
+            date_paiement:dateP,
+          }).eq("id",fid);
+        }
       }
       for(const jid of justiPay){
         await (supabase.from("justificatifs") as any).update({statut:"rapproche"}).eq("id",jid);
@@ -1477,7 +1528,7 @@ function BanquePage() {
       const dateFac=dateFacRaw?_toDisplayDate(dateFacRaw):datePaie;
 
       totalHT+=ht; totalTVA+=tva; totalTTC+=ttc;
-      dataRows.push([i+1,factNum,libFrss.slice(0,50)||tx.libelle.slice(0,50),ht,tva,ttc,ifFrss,libFrss,iceFrss,taux,i+1,datePaie,dateFac]);
+      dataRows.push([i+1,factNum,libFrss.slice(0,50)||(tx.libelle||"").slice(0,50),ht,tva,ttc,ifFrss,libFrss,iceFrss,taux,i+1,datePaie,dateFac]);
     });
 
     const XLSX=await import("xlsx");
@@ -1526,6 +1577,10 @@ function BanquePage() {
       .update(txUpd)
       .eq("id", liaisonTx.id);
 
+    // Paiements dérivés reconstruits depuis le nouvel état du lien (le trigger recalcule
+    // la facture). `recLiaison=false` avant migration → repli sur l'ancien calcul direct.
+    const recLiaison = await reconcilierPaiements(supabase, dossierId);
+
     // Détachement (fermé → ouvert) : restituer l'état du document précédemment lié,
     // sinon le justificatif reste "rapproché" en base et disparaît des listes de liaison
     if (!ferme && (liaisonTx.justificatif_id || liaisonTx.facture_id)) {
@@ -1533,7 +1588,7 @@ function BanquePage() {
         await (supabase.from("justificatifs") as any)
           .update({ statut: "non_rapproche", rapproche: false })
           .eq("id", liaisonTx.justificatif_id);
-      } else if (liaisonTx.facture_id) {
+      } else if (liaisonTx.facture_id && !recLiaison) {
         const table = liaisonTx.document_type === "facture_client" ? "factures" : "factures_fournisseurs";
         const { data: fac } = await (supabase.from(table) as any)
           .select("montant_ttc,montant_paye").eq("id", liaisonTx.facture_id).maybeSingle();
@@ -1554,7 +1609,7 @@ function BanquePage() {
       const mt = txUpd.montant as number;
       if (liaisonDocType === "facture_client") {
         const fac = facturesClient.find((f:any) => f.id === liaisonDocId);
-        if (fac) {
+        if (fac && !recLiaison) {
           const newPaye = Math.round((Number(fac.montant_paye||0) + mt) * 100) / 100;
           const newRestant = Math.max(0, Math.round((Number(fac.montant_ttc) - newPaye) * 100) / 100);
           await (supabase.from("factures") as any).update({
@@ -1564,7 +1619,7 @@ function BanquePage() {
         }
       } else if (liaisonDocType === "facture_fournisseur") {
         const fac = facturesFourn.find((f:any) => f.id === liaisonDocId);
-        if (fac) {
+        if (fac && !recLiaison) {
           const newPaye = Math.round((Number(fac.montant_paye||0) + mt) * 100) / 100;
           const newRestant = Math.max(0, Math.round((Number(fac.montant_ttc) - newPaye) * 100) / 100);
           await (supabase.from("factures_fournisseurs") as any).update({
@@ -1751,7 +1806,7 @@ function BanquePage() {
       const dateFac   = dateFacRaw ? _toDisplayDate(dateFacRaw) : datePaie;
 
       totalHT+=ht; totalTVA+=tva; totalTTC+=ttc;
-      dataRows.push([i+1,factNum,libFrss.slice(0,50)||tx.libelle.slice(0,50),ht,tva,ttc,ifFrss,libFrss,iceFrss,taux,i+1,datePaie,dateFac]);
+      dataRows.push([i+1,factNum,libFrss.slice(0,50)||(tx.libelle||"").slice(0,50),ht,tva,ttc,ifFrss,libFrss,iceFrss,taux,i+1,datePaie,dateFac]);
     });
 
     const XLSX=await import("xlsx");
@@ -1781,7 +1836,26 @@ function BanquePage() {
     toast.success(`Bilan Sage (DB) — ${txSel.length} transactions exportées`);
   };
 
-  const resetScan=()=>{setScanStep("idle");setTxExtraites([]);setInfoReleve(null);setPdfUrl(null);setReleveFile(null);setSelectedTx(null);setReleveEnregistre(false);setTxInsertedIds([]);};
+  const resetScan=()=>{setScanStep("idle");setTxExtraites([]);setInfoReleve(null);setSoldeFinalManuel(null);setPdfUrl(null);setReleveFile(null);setSelectedTx(null);setReleveEnregistre(false);setTxInsertedIds([]);};
+
+  // Impute un règlement sur une facture (client ou fournisseur) : cumule le montant
+  // payé, recalcule le restant, et n'écrit « payee » que si le restant est soldé.
+  // Miroir exact de la RPC lier_transaction (seuil de 1 MAD sur le restant), pour que
+  // les deux chemins de paiement laissent la facture dans le même état.
+  const imputerReglement=async(table:"factures"|"factures_fournisseurs",factureId:string,montant:number,date:string)=>{
+    if(!factureId) return;
+    const {data:f}=await (supabase.from(table) as any)
+      .select("montant_ttc,montant_paye").eq("id",factureId).single();
+    if(!f) return;
+    const paye=Math.round((Number(f.montant_paye??0)+Number(montant))*100)/100;
+    const restant=Math.max(0,Math.round((Number(f.montant_ttc)-paye)*100)/100);
+    const {error}=await (supabase.from(table) as any).update({
+      montant_paye:paye, montant_restant:restant,
+      statut_paiement:restant<=1?"payee":"partielle",
+      date_paiement:date,
+    }).eq("id",factureId);
+    if(error) throw error;
+  };
 
   // ── Encaissement (code original préservé) ─────────────────────────────────
   const handleEncaissement=async()=>{
@@ -1799,12 +1873,34 @@ function BanquePage() {
       const journalCode=formEnc.type==="especes"?"CAI":"BQ";
       const compteDebit=formEnc.type==="especes"?"5143":"5141";
       const compteContre=formEnc.facture_id?"3421":formEnc.facture_fournisseur_id?"4411":"7111";
+      // Estampille de rattachement — indispensable pour retrouver ces 2 écritures à
+      // l'annulation du paiement sans se fier à (date, montant), ambigu en cas de
+      // doublon le même jour. La FK ecritures_comptables.facture_id pointe sur
+      // `factures` : un id de facture FOURNISSEUR y est refusé, on l'ancre donc sur
+      // reference_piece (les écritures d'achat ACH, elles, n'en portent pas).
+      // L'id de la facture prime sur la référence libre : c'est lui qui rend la
+      // recherche exacte. La référence saisie reste conservée sur l'encaissement.
+      const factureId=formEnc.facture_id||null;
+      const refPiece=formEnc.facture_id||formEnc.facture_fournisseur_id||formEnc.reference||null;
       await supabase.from("ecritures_comptables").insert([
-        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteDebit,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||`Encaissement ${formEnc.type}`,debit:formEnc.montant,credit:0,reference_piece:formEnc.reference||null,valide:true},
-        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteContre,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||"Règlement",debit:0,credit:formEnc.montant,reference_piece:formEnc.reference||null,valide:true},
+        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteDebit,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||`Encaissement ${formEnc.type}`,debit:formEnc.montant,credit:0,facture_id:factureId,reference_piece:refPiece,valide:true},
+        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteContre,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||"Règlement",debit:0,credit:formEnc.montant,facture_id:factureId,reference_piece:refPiece,valide:true},
       ]);
-      if(formEnc.facture_id) await (supabase.from("factures") as any).update({statut_paiement:"payee",date_paiement:formEnc.date_encaissement}).eq("id",formEnc.facture_id);
-      if(formEnc.facture_fournisseur_id) await (supabase as any).from("factures_fournisseurs").update({statut_paiement:"payee",date_paiement:formEnc.date_encaissement}).eq("id",formEnc.facture_fournisseur_id);
+      // Imputation du règlement sur la facture. Deux corrections par rapport à l'ancien
+      // code, qui posait `statut_paiement:'payee'` en dur :
+      //  • les colonnes « Payé » / « Restant » de l'UI viennent de montant_paye /
+      //    montant_restant : sans les mettre à jour, la facture s'affichait payée
+      //    avec 0,00 encaissé ;
+      //  • un encaissement PARTIEL soldait la facture à tort. Le statut se déduit
+      //    désormais du restant, comme dans la RPC lier_transaction (seuil 1 MAD).
+      // Paiements (source de vérité) reconstruits depuis l'encaissement qu'on vient
+      // d'insérer ; le trigger recalcule la facture. Repli avant migration : imputation
+      // directe (ancien comportement).
+      const recEnc = await reconcilierPaiements(supabase, dossierId);
+      if(!recEnc){
+        await imputerReglement(formEnc.facture_id ? "factures" : "factures_fournisseurs",
+          formEnc.facture_id || formEnc.facture_fournisseur_id, formEnc.montant, formEnc.date_encaissement);
+      }
       toast.success("Encaissement enregistré + écriture créée");
       setOpenEncaissement(false);
       setFormEnc({type:"especes",montant:0,date_encaissement:new Date().toISOString().slice(0,10),reference:"",numero_cheque:"",banque_cheque:"",libelle:"",facture_id:"",facture_fournisseur_id:""});
@@ -1833,7 +1929,11 @@ function BanquePage() {
   const finalDebiteur=Math.round((-si+flux)*100)/100;   // SI débiteur (−SI) ⇒ CR−DB−SI
   const ecartCred=Math.abs(Math.abs(finalCrediteur)-soldeReporterScanne);
   const ecartDeb=Math.abs(Math.abs(finalDebiteur)-soldeReporterScanne);
-  const estDebiteur=si>0&&soldeReporterScanne>0&&ecartDeb<ecartCred;
+  // La convention DÉBITEUR (valeur absolue) n'est nécessaire que pour la Banque
+  // Populaire, qui affiche le « solde à reporter » SANS signe. Pour Attijariwafa
+  // (et les autres), le solde est signé → toujours créditeur : SI + Σcrédits − Σdébits.
+  const bpSansSigne=/banque\s+populaire|populaire|chaabi|\bbcp\b|\bgbp\b/i.test(infoReleve?.banque??"");
+  const estDebiteur=bpSansSigne&&si>0&&soldeReporterScanne>0&&ecartDeb<ecartCred;
   const soldeFinalCalcule=estDebiteur?finalDebiteur:finalCrediteur;
   const soldeEcart=soldeReporterScanne!==0?(estDebiteur?ecartDeb:ecartCred):0;
 
@@ -1853,11 +1953,16 @@ function BanquePage() {
           {list.map(r=>{
             const st=releveStats[r.id]??{nb_total:r.nombre_transactions||0,nb_lettrees:0,nb_orphelines:0,nb_cloturees:0};
             const badge=STATUT_BRIQUE[r.statut]??{label:r.statut,cls:"bg-muted text-foreground"};
+            // Même identification que les cartes de comptes : RIB du relevé (autoritaire),
+            // puis repli sur le compte porteur (relevés créés avant la migration méta).
+            const cpt=comptes.find(c=>c.id===r.compte_id);
+            const rib=r.rib||cpt?.rib, nom=r.banque||cpt?.banque;
+            const ident=rib?identifierBanque({rib,texte:nom??""}):identifierBanqueParNom(nom);
             return (
               <Link key={r.id} to="/dossiers/$dossierId/banque/$releveId" params={{dossierId,releveId:r.id}} className="block">
                 <Card className="hover:shadow-md transition-shadow cursor-pointer">
                   <CardContent className="py-3 flex items-center gap-4">
-                    <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0"><FileText className="h-5 w-5 text-primary"/></div>
+                    <BankLogo ident={ident} size="lg"/>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <p className="font-semibold truncate">{r.banque||"Relevé"} — {r.fichier_nom||"document"}</p>
@@ -1874,6 +1979,13 @@ function BanquePage() {
                       <Badge className="text-[10px] bg-green-100 text-green-700">{st.nb_lettrees} lettrées</Badge>
                       {st.nb_orphelines>0&&<Badge className="text-[10px] bg-orange-100 text-orange-700">{st.nb_orphelines} ⚠</Badge>}
                     </div>
+                    {r.fichier_path&&(
+                      <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" title="Voir le relevé"
+                        onClick={(e)=>{ e.preventDefault(); e.stopPropagation();
+                          setDocView({ title:`Relevé — ${r.banque||"document"}`, fileName:r.fichier_nom, mimeType:r.fichier_type, bucket:"releves-bancaires", path:r.fichier_path! }); }}>
+                        <Eye className="h-4 w-4"/>
+                      </Button>
+                    )}
                     <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0"/>
                   </CardContent>
                 </Card>
@@ -1894,7 +2006,7 @@ function BanquePage() {
           <Button variant="outline" onClick={()=>setOpenEncaissement(true)}>
             <FileText className="h-4 w-4 mr-2"/>Encaissement espèces/chèque
           </Button>
-          <Button onClick={()=>setOpenCompte(true)}>
+          <Button onClick={ouvrirCreationCompte}>
             <Plus className="h-4 w-4 mr-2"/>Compte bancaire
           </Button>
         </div>
@@ -1919,20 +2031,41 @@ function BanquePage() {
                 <Landmark className="h-10 w-10 mx-auto mb-2 opacity-30"/>
                 <p>Aucun compte bancaire — créez-en un</p>
               </CardContent></Card>
-            ):comptes.map(c=>(
-              <Card key={c.id} className={`cursor-pointer transition-all ${selectedId===c.id?"ring-2 ring-primary":"hover:shadow-md"}`}
+            ):comptes.map(c=>{
+              // Banque identifiée par RIB (autoritaire) puis par le libellé stocké.
+              const ident = c.rib ? identifierBanque({ rib: c.rib, texte: c.banque ?? "" }) : identifierBanqueParNom(c.banque);
+              const ribMasque = maskRib(c.rib);
+              return (
+              <Card key={c.id} className={`group cursor-pointer rounded-2xl border-slate-100 dark:border-slate-800 transition-all ${selectedId===c.id?"ring-2 ring-primary shadow-lg":"hover:shadow-md hover:-translate-y-0.5"}`}
                 onClick={()=>setSelectedId(c.id===selectedId?null:c.id)}>
-                <CardContent className="pt-5 pb-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-muted-foreground">{c.banque}</span>
-                    <Landmark className="h-4 w-4 text-muted-foreground"/>
+                <CardContent className="p-6">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <BankLogo ident={ident} size="lg"/>
+                      <div className="min-w-0">
+                        <p className="font-semibold leading-tight truncate">{c.intitule || ident.nom}</p>
+                        <p className="text-xs text-muted-foreground truncate">{c.banque || ident.nom}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${ident.accent} ${ident.accentText}`}>
+                        <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70"/>Actif
+                      </span>
+                      {/* stopPropagation : le clic sur la carte sert à sélectionner le compte. */}
+                      <Button variant="ghost" size="icon" title="Corriger les informations du compte"
+                        className="h-7 w-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                        onClick={(e)=>{e.stopPropagation();ouvrirEditionCompte(c);}}>
+                        <Pencil className="h-3.5 w-3.5"/>
+                      </Button>
+                    </div>
                   </div>
-                  <p className="font-semibold">{c.intitule}</p>
-                  <p className="font-mono text-xs text-muted-foreground mt-1">{c.rib}</p>
-                  <p className={`text-2xl font-bold mt-3 ${c.solde_actuel>=0?"text-green-600":"text-red-600"}`}>{fmt(c.solde_actuel)}</p>
+                  <p className="font-mono text-sm text-muted-foreground mt-6 tracking-[0.2em]">{ribMasque || "•••• •••• •••• ••••"}</p>
+                  <p className={`text-3xl font-bold tracking-tight mt-2 ${c.solde_actuel>=0?"text-slate-900 dark:text-slate-50":"text-red-600"}`}>{fmt(c.solde_actuel)}</p>
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground mt-1">Solde actuel</p>
                 </CardContent>
               </Card>
-            ))}
+              );
+            })}
           </div>
           {selectedId&&(
             <div className="mb-3 flex items-center justify-between">
@@ -1955,7 +2088,7 @@ function BanquePage() {
                   <Button size="sm" variant="outline" onClick={genererEDIFromDB} title="Générer EDI DGI TVA depuis les transactions en base">
                     <FileText className="h-3 w-3 mr-1"/>EDI DGI
                   </Button>
-                  <Button size="sm" variant="outline" onClick={handleRematcher} disabled={rematchLoading}>
+                  <Button size="sm" variant="outline" onClick={()=>handleRematcher()} disabled={rematchLoading}>
                     {rematchLoading?<Loader2 className="h-3 w-3 mr-1 animate-spin"/>:<RefreshCw className="h-3 w-3 mr-1"/>}
                     Re-matcher
                   </Button>
@@ -1965,7 +2098,7 @@ function BanquePage() {
                     {cloturerLoading?<Loader2 className="h-3 w-3 mr-1 animate-spin"/>:<CheckCircle className="h-3 w-3 mr-1"/>}
                     Clôturer la sélection
                   </Button>
-                  <Button size="sm" onClick={()=>{setReleveCompteId(selectedId);setTab("scanner");}}>
+                  <Button size="sm" onClick={()=>{setReleveCompteId(selectedId??"");setTab("scanner");}}>
                     <Upload className="h-3 w-3 mr-1"/>Importer relevé
                   </Button>
                 </div>
@@ -2000,6 +2133,10 @@ function BanquePage() {
                         const facFourn   = t.facture_id && t.document_type==="facture_fournisseur" ? (allFacturesFourn as any[]).find(f=>f.id===t.facture_id) : null;
                         const justi      = t.justificatif_id ? (allJustificatifs as any[]).find(j=>j.id===t.justificatif_id) : null;
                         const hasDoc     = !!(facClient||facFourn||justi);
+                        // Candidats « Écritures GL / postes ouverts » (secours/migration) : même sens + montant ±1.
+                        const glCandidats = postesOuverts.filter(o=>(t.type==="credit"?o.type==="client":o.type==="fournisseur") && Math.abs(Number(t.montant)-o.montant)<1);
+                        // Transaction liée à une écriture GL mais sans pièce OCR → piste d'audit à compléter.
+                        const auditManquant = !hasDoc && ledgerTxIds.has(t.id) && estPresent(t);
                         return (
                         <TableRow key={t.id} className={selectedTxIds.has(t.id)?"":"opacity-50"}>
                           <TableCell className="px-2">
@@ -2043,9 +2180,27 @@ function BanquePage() {
                                 🧾 {justi.type_document} — {justi.nom_tiers||"—"}
                               </span>
                             )}
+                            {/* ── Encadré piste d'audit DGI : lié au GL mais sans PDF ── */}
+                            {auditManquant&&(
+                              <div className="mb-1 flex items-start gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                                <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0"/>
+                                <span><strong>Justificatif manquant</strong> — déposez la facture pour sécuriser la piste d'audit DGI.</span>
+                              </div>
+                            )}
                             {!hasDoc&&(
                               <Select onValueChange={async val=>{
                                 if(!val||val==="none") return;
+                                // ── Poste ouvert du Grand Livre (secours/migration) ──
+                                if(val.startsWith("ec:")){
+                                  const key=val.slice(3);
+                                  const item=glCandidats.find(o=>o.id===key)||postesOuverts.find(o=>o.id===key);
+                                  if(!item) return;
+                                  const res=await lierTransactionEcriture({data:{dossierId,txId:t.id,ecritureIds:item.ids,cloture:st==="cloture"}});
+                                  if(!(res as any).ok){toast.error((res as any).reason??"Lettrage GL impossible");return;}
+                                  toast.success("Lettré sur écriture du Grand Livre");
+                                  await loadGL();loadTx(selectedId!);load();
+                                  return;
+                                }
                                 let docType:"facture_client"|"facture_fournisseur"|"justificatif";
                                 let docId:string;
                                 if(val.startsWith("fc:")){docType="facture_client";docId=val.slice(3);}
@@ -2057,24 +2212,28 @@ function BanquePage() {
                                 if(docType==="justificatif"){upd.justificatif_id=docId;upd.facture_id=null;}
                                 else{upd.facture_id=docId;upd.justificatif_id=null;}
                                 await (supabase.from("transactions_bancaires") as any).update(upd).eq("id",t.id);
-                                // Mettre à jour le document
+                                // Paiements reconstruits depuis le lien (trigger MAJ la facture) ;
+                                // repli direct avant migration.
+                                const recLier = await reconcilierPaiements(supabase, dossierId);
                                 if(docType==="facture_client"){
                                   const fac=(facturesClient as any[]).find(f=>f.id===docId);
-                                  if(fac){const np=Math.round((Number(fac.montant_paye||0)+t.montant)*100)/100;const nr=Math.max(0,Math.round((Number(fac.montant_ttc)-np)*100)/100);await (supabase.from("factures") as any).update({montant_paye:np,montant_restant:nr,statut_paiement:nr<=0.01?"payee":"partielle"}).eq("id",docId);}
+                                  if(fac&&!recLier){const np=Math.round((Number(fac.montant_paye||0)+t.montant)*100)/100;const nr=Math.max(0,Math.round((Number(fac.montant_ttc)-np)*100)/100);await (supabase.from("factures") as any).update({montant_paye:np,montant_restant:nr,statut_paiement:nr<=0.01?"payee":"partielle"}).eq("id",docId);}
                                 }else if(docType==="facture_fournisseur"){
                                   const fac=(facturesFourn as any[]).find(f=>f.id===docId);
-                                  if(fac){const np=Math.round((Number(fac.montant_paye||0)+t.montant)*100)/100;const nr=Math.max(0,Math.round((Number(fac.montant_ttc)-np)*100)/100);await (supabase.from("factures_fournisseurs") as any).update({montant_paye:np,montant_restant:nr,statut_paiement:nr<=0.01?"payee":"partielle"}).eq("id",docId);}
+                                  if(fac&&!recLier){const np=Math.round((Number(fac.montant_paye||0)+t.montant)*100)/100;const nr=Math.max(0,Math.round((Number(fac.montant_ttc)-np)*100)/100);await (supabase.from("factures_fournisseurs") as any).update({montant_paye:np,montant_restant:nr,statut_paiement:nr<=0.01?"payee":"partielle"}).eq("id",docId);}
                                 }else{
                                   await (supabase.from("justificatifs") as any).update({statut:"rapproche"}).eq("id",docId);
                                 }
                                 toast.success("Document lié");
-                                loadTx(selectedId!);load();
+                                await loadGL();loadTx(selectedId!);load();
                               }}>
                                 <SelectTrigger className="h-6 text-xs w-48 border-dashed">
                                   <SelectValue placeholder="+ Lier un document…"/>
                                 </SelectTrigger>
                                 <SelectContent>
                                   <SelectItem value="none" className="text-xs text-muted-foreground">— aucun —</SelectItem>
+                                  {/* ── Factures / justificatifs OCR (PRIORITAIRES, flux courant) ── */}
+                                  <div className="px-2 pt-1 text-[10px] text-emerald-700 uppercase font-bold tracking-wide">✅ Factures OCR — prioritaire</div>
                                   {(facturesClient as any[]).length>0&&<>
                                     <div className="px-2 py-1 text-[10px] text-muted-foreground uppercase font-semibold">Factures client</div>
                                     {(facturesClient as any[]).map(f=><SelectItem key={f.id} value={`fc:${f.id}`} className="text-xs">📤 {f.numero||f.id.slice(0,8)} — {f.clients?.nom||"Client"} — {fmt(Number(f.montant_ttc))}</SelectItem>)}
@@ -2086,6 +2245,11 @@ function BanquePage() {
                                   {(justificatifs as any[]).length>0&&<>
                                     <div className="px-2 py-1 text-[10px] text-muted-foreground uppercase font-semibold">Justificatifs</div>
                                     {(justificatifs as any[]).map(j=><SelectItem key={j.id} value={`jus:${j.id}`} className="text-xs">🧾 {j.type_document} — {j.nom_tiers||"—"} — {fmt(Number(j.montant_ttc))}</SelectItem>)}
+                                  </>}
+                                  {/* ── Écritures GL / postes ouverts (SECOURS / migration) ── */}
+                                  {glCandidats.length>0&&<>
+                                    <div className="px-2 pt-2 text-[10px] text-sky-700 uppercase font-bold tracking-wide border-t mt-1">📒 Écritures GL — secours / migration</div>
+                                    {glCandidats.map(o=><SelectItem key={o.id} value={`ec:${o.id}`} className="text-xs">📒 {o.type==="client"?"Créance":"Dette"} {o.libelle||"—"} — {fmt(o.montant)}</SelectItem>)}
                                   </>}
                                 </SelectContent>
                               </Select>
@@ -2288,23 +2452,51 @@ function BanquePage() {
               </div>
 
               {/* Soldes */}
-              {infoReleve&&(
-                <div className="space-y-2">
-                  <div className="grid grid-cols-5 gap-3">
-                    {[
-                      {label:"Banque",value:infoReleve.banque,color:"text-primary"},
-                      {label:"RIB",value:infoReleve.rib||"—",color:"text-muted-foreground"},
-                      {label:"Solde initial",value:fmt(infoReleve.solde_initial),color:"text-blue-600"},
-                      {label:`Solde final (calculé${estDebiteur?" · débiteur":""})`,value:fmt(soldeFinalCalcule),color:soldeEcart<1?"text-green-600":"text-orange-600"},
-                      {label:"Solde à reporter (PDF · vérif.)",value:soldeReporterScanne!==0?fmt(soldeReporterScanne):"Non extrait",color:soldeReporterScanne!==0?(soldeEcart<1?"text-blue-700":"text-orange-500"):"text-orange-500"},
-                    ].map(k=>(
-                      <Card key={k.label} className="border-0 bg-muted/40">
-                        <CardContent className="pt-3 pb-3">
-                          <p className="text-[10px] text-muted-foreground uppercase">{k.label}</p>
-                          <p className={`font-semibold text-sm mt-0.5 ${k.color}`}>{k.value}</p>
-                        </CardContent>
-                      </Card>
-                    ))}
+              {infoReleve&&(()=>{
+                // Identification premium de la banque scannée (RIB autoritaire).
+                const identScan = identifierBanque({ rib: infoReleve.rib, texte: infoReleve.banque });
+                const ribMasqueScan = maskRib(infoReleve.rib);
+                return (
+                <div className="space-y-3">
+                  {/* Bannière d'identification : logo + banque + RIB masqué + statut */}
+                  <div className="flex items-center gap-4 rounded-2xl border border-slate-100 dark:border-slate-800 bg-gradient-to-br from-slate-50 to-white dark:from-slate-900 dark:to-slate-950 p-5">
+                    <BankLogo ident={identScan} size="lg"/>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-semibold leading-tight truncate">{identScan.id==="inconnue"?(infoReleve.banque||"Banque"):identScan.nom}</p>
+                      <p className="font-mono text-xs text-muted-foreground mt-0.5 tracking-[0.2em]">{ribMasqueScan||"•••• •••• •••• ••••"}</p>
+                    </div>
+                    <span className={`shrink-0 inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full ${identScan.accent} ${identScan.accentText}`}>
+                      <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70"/>Synchronisé
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    {/* Solde initial — ÉDITABLE (recalcule le solde final) */}
+                    <Card className="border-0 bg-muted/40">
+                      <CardContent className="pt-3 pb-3">
+                        <p className="text-[10px] text-muted-foreground uppercase">Solde initial</p>
+                        <Input type="number" step="0.01" value={infoReleve.solde_initial}
+                          onChange={e=>setInfoReleve({...infoReleve,solde_initial:parseFloat(e.target.value)||0})}
+                          className="h-7 mt-0.5 font-semibold text-sm text-blue-600 px-1"/>
+                      </CardContent>
+                    </Card>
+                    {/* Solde final CALCULÉ — éditable (override manuel si imprécision) */}
+                    <Card className="border-0 bg-muted/40">
+                      <CardContent className="pt-3 pb-3">
+                        <p className="text-[10px] text-muted-foreground uppercase">Solde final (calculé{estDebiteur?" · débiteur":""})</p>
+                        <Input type="number" step="0.01" value={soldeFinalManuel??soldeFinalCalcule}
+                          onChange={e=>setSoldeFinalManuel(e.target.value===""?null:(parseFloat(e.target.value)||0))}
+                          className={`h-7 mt-0.5 font-semibold text-sm px-1 ${soldeEcart<1?"text-green-600":"text-orange-600"}`}/>
+                      </CardContent>
+                    </Card>
+                    {/* Solde à reporter SCANNÉ — éditable (cible de vérification) */}
+                    <Card className="border-0 bg-muted/40">
+                      <CardContent className="pt-3 pb-3">
+                        <p className="text-[10px] text-muted-foreground uppercase">Solde à reporter (scanné · vérif.)</p>
+                        <Input type="number" step="0.01" value={infoReleve.solde_final||0}
+                          onChange={e=>setInfoReleve({...infoReleve,solde_final:parseFloat(e.target.value)||0})}
+                          className="h-7 mt-0.5 font-semibold text-sm text-blue-700 px-1"/>
+                      </CardContent>
+                    </Card>
                   </div>
                   {soldeEcart>1&&soldeReporterScanne!==0&&(
                     <div className="flex items-center gap-2 text-xs text-orange-600 bg-orange-50 border border-orange-200 rounded px-3 py-2">
@@ -2313,7 +2505,8 @@ function BanquePage() {
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
 
               {/* Tableau transactions */}
               <Card><CardContent className="p-0">
@@ -2442,8 +2635,35 @@ function BanquePage() {
                                 <div className="grid grid-cols-2 gap-3 text-xs">
                                   <div><p className="text-muted-foreground mb-1">Confiance IA</p><p className={`font-semibold ${confColor(tx.confiance)}`}>{tx.confiance}%</p></div>
                                   <div><p className="text-muted-foreground mb-1">Méthode match</p><p>{etapeLabel[tx.etape_rapprochement]??tx.etape_rapprochement}</p></div>
-                                  {tx.facture_id&&<div className="col-span-2"><p className="text-green-700">✅ Facture: {tx.reference_facture} — {tx.tiers_nom}</p></div>}
-                                  {tx.justificatif_id&&<div className="col-span-2"><p className="text-yellow-700">📎 Justificatif: {justiChoisie?.nom_tiers??tx.justificatif_id.slice(0,8)} — {justiChoisie?.type_document}{!justiChoisie?.eligible_edi&&<span className="text-red-500 ml-2 font-medium">⚠️ Non éligible EDI</span>}</p></div>}
+                                  {tx.facture_id&&(
+                                    <div className="col-span-2 rounded border border-green-200 bg-green-50 p-2 space-y-1">
+                                      <p className="text-green-800 font-semibold">✅ Facture rapprochée : {facChoisie?.numero||tx.reference_facture||"—"} — {facChoisie?.fournisseur_nom||facChoisie?.clients?.nom||tx.tiers_nom||"—"}</p>
+                                      {facChoisie&&(()=>{const cible=Number(facChoisie.montant_restant??facChoisie.montant_ttc??0);const ecart=Math.abs(tx.montant-cible);return(
+                                        <div className="grid grid-cols-3 gap-x-3 gap-y-0.5 text-[11px]">
+                                          <span>Montant TTC : <b>{fmt(Number(facChoisie.montant_ttc||0))}</b></span>
+                                          {facChoisie.montant_restant!=null&&<span>Restant dû : <b>{fmt(Number(facChoisie.montant_restant))}</b></span>}
+                                          <span>Payé (transaction) : <b>{fmt(tx.montant)}</b></span>
+                                          {facChoisie.date_facture&&<span>Date facture : {facChoisie.date_facture}</span>}
+                                          {facChoisie.date_echeance&&<span>Échéance : {facChoisie.date_echeance}</span>}
+                                          <span className={ecart<2?"text-green-700 font-medium":"text-orange-600 font-medium"}>Écart montant : {fmt(ecart)}</span>
+                                        </div>
+                                      );})()}
+                                    </div>
+                                  )}
+                                  {tx.justificatif_id&&(
+                                    <div className="col-span-2 rounded border border-yellow-200 bg-yellow-50 p-2 space-y-1">
+                                      <p className="text-yellow-800 font-semibold">📎 Justificatif : {justiChoisie?.nom_tiers??tx.justificatif_id.slice(0,8)} — {typeDocLabel(justiChoisie?.type_document||"")||justiChoisie?.type_document||"justificatif"}{!justiChoisie?.eligible_edi&&<span className="text-red-500 ml-2 font-medium">⚠️ Non éligible EDI</span>}</p>
+                                      {justiChoisie&&(()=>{const ecart=Math.abs(tx.montant-Number(justiChoisie.montant_ttc||0));return(
+                                        <div className="grid grid-cols-3 gap-x-3 gap-y-0.5 text-[11px]">
+                                          {justiChoisie.numero_piece&&<span>N° pièce : {justiChoisie.numero_piece}</span>}
+                                          <span>Montant TTC : <b>{fmt(Number(justiChoisie.montant_ttc||0))}</b></span>
+                                          <span>Payé (transaction) : <b>{fmt(tx.montant)}</b></span>
+                                          {justiChoisie.date_document&&<span>Date : {justiChoisie.date_document}</span>}
+                                          <span className={ecart<2?"text-green-700 font-medium":"text-orange-600 font-medium"}>Écart montant : {fmt(ecart)}</span>
+                                        </div>
+                                      );})()}
+                                    </div>
+                                  )}
                                   {!tx.facture_id&&!tx.justificatif_id&&<div className="col-span-2"><p className="text-orange-600">⚠️ {tx.alerte||"Aucune facture correspondante détectée — choisissez dans la liste déroulante"}</p></div>}
                                 </div>
                               </TableCell>
@@ -2615,29 +2835,61 @@ function BanquePage() {
         </DialogContent>
       </Dialog>
 
-      {/* Modal compte (code original) */}
-      <Dialog open={openCompte} onOpenChange={setOpenCompte}>
+      {/* Modal compte — création ET correction (editCompteId) */}
+      <Dialog open={openCompte} onOpenChange={(o)=>{setOpenCompte(o); if(!o) setEditCompteId(null);}}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Nouveau compte bancaire</DialogTitle></DialogHeader>
+          <DialogHeader>
+            <DialogTitle>{editCompteId?"Modifier le compte bancaire":"Nouveau compte bancaire"}</DialogTitle>
+          </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-2"><Label>Banque</Label><Input value={formCompte.banque} onChange={e=>setFormCompte({...formCompte,banque:e.target.value})} placeholder="Attijariwafa, CIH, BMCE…"/></div>
             <div className="space-y-2"><Label>Intitulé</Label><Input value={formCompte.intitule} onChange={e=>setFormCompte({...formCompte,intitule:e.target.value})}/></div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2"><Label>RIB</Label><Input value={formCompte.rib} onChange={e=>setFormCompte({...formCompte,rib:e.target.value})}/></div>
-              <div className="space-y-2"><Label>Solde initial (MAD)</Label><Input type="number" value={formCompte.solde_actuel} onChange={e=>setFormCompte({...formCompte,solde_actuel:parseFloat(e.target.value)||0})}/></div>
+            <div className={editCompteId?"space-y-2":"grid grid-cols-2 gap-3"}>
+              <div className="space-y-2"><Label>RIB</Label><Input value={formCompte.rib} onChange={e=>setFormCompte({...formCompte,rib:e.target.value})} placeholder="24 chiffres"/></div>
+              {/* Solde éditable à la création seulement : ensuite il est recalculé par les relevés. */}
+              {!editCompteId&&(
+                <div className="space-y-2"><Label>Solde initial (MAD)</Label><Input type="number" value={formCompte.solde_actuel} onChange={e=>setFormCompte({...formCompte,solde_actuel:parseFloat(e.target.value)||0})}/></div>
+              )}
             </div>
+
+            {/* Aperçu de l'identification : c'est le RIB (code banque) qui fait autorité,
+                donc l'utilisateur voit immédiatement si sa saisie donne la bonne banque. */}
+            {(()=>{
+              const rib=formCompte.rib.trim(), nom=formCompte.banque.trim();
+              if(!rib&&!nom) return null;
+              const ident=rib?identifierBanque({rib,texte:nom}):identifierBanqueParNom(nom);
+              const nbChiffres=rib.replace(/\D/g,"").length;
+              return (
+                <div className="flex items-center gap-3 rounded-lg border bg-muted/40 p-3">
+                  <BankLogo ident={ident} size="lg"/>
+                  <div className="min-w-0 text-xs">
+                    <p className="font-medium truncate">{ident.id==="inconnue"?"Banque non reconnue":ident.nom}</p>
+                    <p className="text-muted-foreground truncate">
+                      {rib?(maskRib(rib)||"RIB illisible"):"Identifiée d'après le libellé — saisissez le RIB pour fiabiliser"}
+                    </p>
+                    {rib&&nbChiffres!==24&&(
+                      <p className="text-amber-600 dark:text-amber-500 mt-0.5">{nbChiffres} chiffres — un RIB marocain en compte 24</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {editCompteId&&(
+              <p className="text-[11px] text-muted-foreground">
+                Le solde n'est pas modifiable ici : il est recalculé à chaque import de relevé.
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={()=>setOpenCompte(false)}>Annuler</Button>
-            <Button onClick={async()=>{
-              const{error}=await (supabase.from("comptes_bancaires") as any).insert({dossier_id:dossierId,...formCompte,iban:formCompte.iban||null});
-              if(error) return toast.error(error.message);
-              toast.success("Compte créé");setOpenCompte(false);
-              setFormCompte({banque:"",intitule:"",rib:"",iban:"",solde_actuel:0});load();
-            }}>Créer</Button>
+            <Button onClick={enregistrerCompte}>{editCompteId?"Enregistrer":"Créer"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Aperçu du relevé (panneau latéral droit) */}
+      <DocumentViewer open={!!docView} onOpenChange={(o)=>{ if(!o) setDocView(null); }} source={docView} />
     </div>
   );
 }

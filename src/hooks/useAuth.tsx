@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { logAudit } from "@/lib/audit";
 import type { Session, User } from "@supabase/supabase-js";
 
 interface Profile {
@@ -61,6 +62,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = async () => {
+    // Tracer AVANT la déconnexion : après signOut la session n'existe plus et
+    // l'insert d'audit échouerait (RLS user_id = auth.uid()).
+    await logAudit({ action: "deconnexion" });
     await supabase.auth.signOut();
   };
 

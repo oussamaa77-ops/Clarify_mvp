@@ -13,6 +13,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Plus, Upload, Loader2, FileText, Paperclip, X, Pencil, Trash2, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
+import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
+import { logAudit } from "@/lib/audit";
 import { ocrFacture, matcherDocumentAvecTransactions, lettrerJustificatif } from "@/server/factures.functions";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/justificatifs")({
@@ -92,6 +94,7 @@ const CATEGORIES_PCM = [
   { value: "encaissement_client",   label: "Encaissement client",                  code: "3421"  },
   { value: "salaires",              label: "Salaires",                             code: "6171"  },
   { value: "cnss_amo",              label: "CNSS / AMO",                           code: "6174"  },
+  { value: "charges_sociales",      label: "Charges Sociales",                     code: "6174"  },
   { value: "loyers",                label: "Loyer / Location",                     code: "61311" },
   { value: "eau_electricite",       label: "Eau / Électricité",                    code: "6125"  },
   { value: "telecom",               label: "Téléphone / Internet",                 code: "6132"  },
@@ -169,6 +172,12 @@ const FISCAL_RULES: Partial<Record<string, FiscalRule>> = {
     tva_zero_doc:       true,
     alerte: "⚠️ Droits de timbre / LCN — Hors champ TVA (taxe fiscale). Compte 61671. À exclure impérativement du relevé de déduction EDI DGI (ADC082F-15I).",
   },
+  charges_sociales: {
+    tva_non_deductible: false,
+    edi_bloque:         true,
+    tva_zero_doc:       true,
+    alerte: "ℹ️ CNSS / Sécurité Sociale — Charges sociales imputées au compte 6174. Hors champ TVA, à exclure du relevé de déduction EDI DGI.",
+  },
 };
 
 // Applique les règles fiscales sur un snapshot du formulaire
@@ -232,6 +241,9 @@ interface Justificatif {
   statut: string;
   created_at: string;
   lignes: LigneJustif[] | null;
+  fichier_original_url: string | null;
+  fichier_original_nom: string | null;
+  fichier_original_type: string | null;
 }
 
 const EMPTY_FORM = {
@@ -411,6 +423,9 @@ function JustificatifsPage() {
   const [datesRef, setDatesRef]   = useState<{ valeur: string; libelle: string }[]>([]);
   const [lignes, setLignes]       = useState<LigneJustif[]>([]);
   const [editId, setEditId]       = useState<string | null>(null);
+  // Fichier scanné en cours — archivé (bucket) à l'enregistrement pour re-consultation.
+  const [scanFile, setScanFile]   = useState<File | null>(null);
+  const [docView, setDocView]     = useState<DocumentViewerSource | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Justificatif | null>(null);
   const [deleting, setDeleting]   = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -514,6 +529,7 @@ function JustificatifsPage() {
     setLignes([]);
     setDatesRef([]);
     setEditId(null);
+    setScanFile(file);
     setOcrLoading(true);
     try {
       let extractedText = "";
@@ -567,6 +583,7 @@ function JustificatifsPage() {
       });
 
       console.log("[DEBUG OCR]", JSON.stringify(result, null, 2));
+      logAudit({ dossierId, action: "scan_facture", ressourceType: "justificatif", details: { type: (result as any).type_document_justificatif ?? null } });
 
       const aiType    = (result as any).type_document_justificatif;
       let finalType = (aiType && aiType !== "facture")
@@ -729,6 +746,22 @@ function JustificatifsPage() {
         }).select("id").single();
         if (error) throw error;
         toast.success("Justificatif enregistré");
+        // Archive le document scanné (pour re-consultation : bouton Voir + GED).
+        if (newJusti && scanFile) {
+          try {
+            const ext = scanFile.name.split(".").pop() || "bin";
+            const path = `${dossierId}/justif_${newJusti.id}.${ext}`;
+            const { error: upErr } = await supabase.storage.from("factures-originales").upload(path, scanFile, { upsert: true });
+            if (!upErr) {
+              const { data: urlData } = supabase.storage.from("factures-originales").getPublicUrl(path);
+              await (supabase.from("justificatifs") as any).update({
+                fichier_original_url: urlData?.publicUrl ?? null,
+                fichier_original_nom: scanFile.name,
+                fichier_original_type: scanFile.type,
+              }).eq("id", newJusti.id);
+            }
+          } catch { /* archivage best-effort */ }
+        }
         // Lettrage précis à l'enregistrement : montant EXACT + date (paiement/échéance,
         // marge ±2 j), sur tous les comptes du dossier (même tx clôturées non lettrées).
         // Génère l'écriture comptable (compte PCM → Grand Livre). Repli sur le matcher
@@ -763,6 +796,7 @@ function JustificatifsPage() {
       setOpen(false);
       setEditId(null);
       setForm({ ...EMPTY_FORM });
+      setScanFile(null);
       load();
     } catch (e: any) {
       toast.error(e.message);
@@ -851,6 +885,7 @@ function JustificatifsPage() {
             setForm({ ...EMPTY_FORM });
             setDatesRef([]);
             setLignes([]);
+            setScanFile(null);   // saisie manuelle → pas de fichier scanné à rattacher
             setOpen(true);
           }}>
             <Plus className="h-4 w-4 mr-2" />Ajouter manuellement
@@ -971,6 +1006,13 @@ function JustificatifsPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-0.5">
+                        {j.fichier_original_url && (
+                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0"
+                            title="Voir le document scanné"
+                            onClick={() => setDocView({ title: `Justificatif ${j.numero_piece ?? ""}`.trim(), url: j.fichier_original_url, fileName: j.fichier_original_nom, mimeType: j.fichier_original_type })}>
+                            <FileText className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         <Button size="sm" variant="ghost" className="h-7 w-7 p-0"
                           title="Voir / Imprimer" onClick={() => handleView(j)}>
                           <Eye className="h-3.5 w-3.5" />
@@ -1425,6 +1467,9 @@ function JustificatifsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Aperçu du document scanné (panneau latéral droit) */}
+      <DocumentViewer open={!!docView} onOpenChange={(o) => { if (!o) setDocView(null); }} source={docView} />
     </div>
   );
 }

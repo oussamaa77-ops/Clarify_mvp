@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
+import { parseInvoiceRegex, correctMontants, buildOcrPrompt, parseReleveMarkdown } from "./factures.utils";
 
 // ─── parseInvoiceRegex ────────────────────────────────────────────────────────
 
@@ -330,5 +330,55 @@ describe("buildOcrPrompt — règles présentes (intégration)", () => {
   it("mentionne la société gérée dans le prompt", () => {
     expect(promptText).toContain("Dossier SA");
     expect(promptText).toContain("123456789012345");
+  });
+});
+
+// ─── parseReleveMarkdown — solde de fin « SOLDE AU <date> » ───────────────────
+// Crédit Agricole, Saham, CIH… : la ligne de solde de fin porte sa date DANS le
+// libellé et n'a ni date d'opération ni référence en colonne. Elle ne doit JAMAIS
+// être comptée comme une transaction, mais alimenter solde_final.
+
+const HEADER = [
+  "| Date | Référence | Libellé | Débit | Crédit | Solde |",
+  "| --- | --- | --- | --- | --- | --- |",
+];
+
+describe("parseReleveMarkdown — SOLDE AU <date> en fin de tableau", () => {
+  it("« SOLDE AU <date> » nu → solde_final, pas une transaction", () => {
+    const md = [
+      ...HEADER,
+      "| 05/12/2024 | REF1 | ACHAT CARTE MAGASIN | 200,00 |  | 12 700,00 |",
+      "| 10/12/2024 | REF2 | VIREMENT RECU SALAIRE |  | 500,00 | 13 200,00 |",
+      "| SOLDE AU 31/12/2024 |  |  |  |  | 12 500,00 |",
+    ].join("\n");
+    const r = parseReleveMarkdown(md);
+    expect(r.solde_final).toBe(12500);
+    expect(r.txs.length).toBe(2);
+    expect(r.txs.some((t) => /solde/i.test(t.libelle))).toBe(false);
+  });
+
+  it("« SOLDE A REPORTER AU <date> » avec date en colonne → jamais une transaction", () => {
+    const md = [
+      ...HEADER,
+      "| 05/12/2024 | REF1 | ACHAT | 200,00 |  | 12 700,00 |",
+      "| 31/12/2024 |  | SOLDE A REPORTER AU 31/12/2024 |  |  | 12 500,00 |",
+    ].join("\n");
+    const r = parseReleveMarkdown(md);
+    expect(r.solde_final).toBe(12500);
+    expect(r.txs.length).toBe(1);
+    expect(r.txs.some((t) => /solde/i.test(t.libelle))).toBe(false);
+  });
+
+  it("« SOLDE AU <date> » AVANT toute transaction → solde_initial (ouverture)", () => {
+    const md = [
+      ...HEADER,
+      "| SOLDE AU 01/12/2024 |  |  |  |  | 12 000,00 |",
+      "| 05/12/2024 | REF1 | ACHAT | 200,00 |  | 11 800,00 |",
+      "| SOLDE AU 31/12/2024 |  |  |  |  | 11 800,00 |",
+    ].join("\n");
+    const r = parseReleveMarkdown(md);
+    expect(r.solde_initial).toBe(12000);
+    expect(r.solde_final).toBe(11800);
+    expect(r.txs.length).toBe(1);
   });
 });

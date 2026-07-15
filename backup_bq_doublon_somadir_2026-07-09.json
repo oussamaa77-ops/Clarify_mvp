@@ -1,0 +1,22 @@
+{
+  "id": "77e28445-9e28-4a2d-95ab-c5a8b238f767",
+  "dossier_id": "8c37a591-1dfa-44ee-bd31-9f15f40c0a9d",
+  "journal_id": null,
+  "compte_id": null,
+  "journal_code": "BQ",
+  "compte_numero": "3421",
+  "date_ecriture": "2026-02-01",
+  "libelle": "Règlement SUPER-PAIN MAROC SARL FAC-2024-306",
+  "debit": 0,
+  "credit": 10800,
+  "type_ecriture": null,
+  "reference_piece": "FAC-2024-306",
+  "facture_id": null,
+  "valide": true,
+  "created_at": "2026-05-11T23:31:30.109652+00:00",
+  "lettre": null,
+  "date_lettrage": null,
+  "transaction_id": null,
+  "batch_id": null,
+  "lettree": false
+}

@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Loader2, Download, Trash2, Plus, Save, RefreshCw, AlertTriangle, CheckCircle } from "lucide-react";
 import { toast } from "sonner";
+import ImportGrandLivre from "@/components/ImportGrandLivre";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/comptabilite")({
   component: ComptabilitePage,
@@ -53,9 +54,15 @@ const LIVRES: Record<LivreKey, { label: string; court: string; journaux: string[
 
 const fmt = (n: number) => Number(n).toLocaleString("fr-MA", { minimumFractionDigits: 2 });
 
+// Excel refuse \ / ? * [ ] : dans un nom d'onglet, et le limite à 31 caractères.
+// Sans ce nettoyage, « Divers (OD/TVA) » fait échouer book_append_sheet et l'export
+// entier s'interrompt — aucun fichier, aucun message. Les libellés d'écran restent
+// inchangés : seul le nom de la feuille est normalisé.
+const nomOnglet = (nom: string) => nom.replace(/[\\/?*[\]:]/g, "-").slice(0, 31);
+
 function ComptabilitePage() {
   const { dossierId } = Route.useParams();
-  const [tab, setTab] = useState<"grandlivre"|"balance"|"saisie">("grandlivre");
+  const [tab, setTab] = useState<"grandlivre"|"balance"|"saisie"|"import">("grandlivre");
   const [livre, setLivre] = useState<LivreKey>("tous");
   const [ecritures, setEcritures] = useState<Ecriture[]>([]);
   const [pcmComptes, setPcmComptes] = useState<{ numero: string; intitule: string }[]>([]);
@@ -251,45 +258,53 @@ function ComptabilitePage() {
 
   // Export Excel
   const exportExcel = async () => {
-    const XLSX = await import("xlsx");
-    const wb = XLSX.utils.book_new();
+    if (!ecritures.length) { toast.error("Aucune écriture à exporter"); return; }
+    try {
+      const XLSX = await import("xlsx");
+      const wb = XLSX.utils.book_new();
 
-    // Grand livre
-    const glData = [
-      ["Date", "Journal", "Compte", "Libellé", "Débit", "Crédit", "Réf."],
-      ...ecritures.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
-    ];
-    const wsGL = XLSX.utils.aoa_to_sheet(glData);
-    const glCols = [{wch:12},{wch:8},{wch:10},{wch:50},{wch:14},{wch:14},{wch:15}];
-    wsGL["!cols"] = glCols;
-    XLSX.utils.book_append_sheet(wb, wsGL, "Grand Livre");
-
-    // Un onglet par Grand Livre distinct (Ventes / Achats / Trésorerie / Divers)
-    (["ventes","achats","tresorerie","divers"] as LivreKey[]).forEach(k => {
-      const lignes = ecritures.filter(e => LIVRES[k].journaux.includes(e.journal_code));
-      const td = lignes.reduce((s,e)=>s+Number(e.debit),0);
-      const tc = lignes.reduce((s,e)=>s+Number(e.credit),0);
-      const data = [
-        ["Date","Journal","Compte","Libellé","Débit","Crédit","Réf."],
-        ...lignes.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
-        ["TOTAL","","","", td, tc, ""],
+      // Grand livre
+      const glData = [
+        ["Date", "Journal", "Compte", "Libellé", "Débit", "Crédit", "Réf."],
+        ...ecritures.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
       ];
-      const ws = XLSX.utils.aoa_to_sheet(data);
-      ws["!cols"] = glCols;
-      XLSX.utils.book_append_sheet(wb, ws, LIVRES[k].court);
-    });
+      const wsGL = XLSX.utils.aoa_to_sheet(glData);
+      const glCols = [{wch:12},{wch:8},{wch:10},{wch:50},{wch:14},{wch:14},{wch:15}];
+      wsGL["!cols"] = glCols;
+      XLSX.utils.book_append_sheet(wb, wsGL, nomOnglet("Grand Livre"));
 
-    // Balance
-    const balData = [
-      ["Compte", "Total Débit", "Total Crédit", "Solde", "Sens"],
-      ...balance.map(l => [l.compte, l.total_debit, l.total_credit, l.solde, l.sens]),
-      ["TOTAL", totalDebit, totalCredit, Math.abs(totalDebit-totalCredit), equilibre?"✅":"⚠️"],
-    ];
-    const wsBal = XLSX.utils.aoa_to_sheet(balData);
-    XLSX.utils.book_append_sheet(wb, wsBal, "Balance");
+      // Un onglet par Grand Livre distinct (Ventes / Achats / Trésorerie / Divers)
+      (["ventes","achats","tresorerie","divers"] as LivreKey[]).forEach(k => {
+        const lignes = ecritures.filter(e => LIVRES[k].journaux.includes(e.journal_code));
+        const td = lignes.reduce((s,e)=>s+Number(e.debit),0);
+        const tc = lignes.reduce((s,e)=>s+Number(e.credit),0);
+        const data = [
+          ["Date","Journal","Compte","Libellé","Débit","Crédit","Réf."],
+          ...lignes.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
+          ["TOTAL","","","", td, tc, ""],
+        ];
+        const ws = XLSX.utils.aoa_to_sheet(data);
+        ws["!cols"] = glCols;
+        XLSX.utils.book_append_sheet(wb, ws, nomOnglet(LIVRES[k].court));
+      });
 
-    XLSX.writeFile(wb, `Comptabilite_${dossierId.slice(0,8)}_${new Date().toISOString().slice(0,10)}.xlsx`);
-    toast.success("Export Excel généré");
+      // Balance
+      const balData = [
+        ["Compte", "Total Débit", "Total Crédit", "Solde", "Sens"],
+        ...balance.map(l => [l.compte, l.total_debit, l.total_credit, l.solde, l.sens]),
+        ["TOTAL", totalDebit, totalCredit, Math.abs(totalDebit-totalCredit), equilibre?"✅":"⚠️"],
+      ];
+      const wsBal = XLSX.utils.aoa_to_sheet(balData);
+      XLSX.utils.book_append_sheet(wb, wsBal, nomOnglet("Balance"));
+
+      XLSX.writeFile(wb, `Comptabilite_${dossierId.slice(0,8)}_${new Date().toISOString().slice(0,10)}.xlsx`);
+      toast.success(`Export Excel généré — ${ecritures.length} écritures`);
+    } catch (e: any) {
+      // Un échec silencieux (rien ne se télécharge, aucun message) est le pire des cas :
+      // on remonte toujours la cause à l'utilisateur.
+      console.error("[EXPORT EXCEL]", e);
+      toast.error(`Export Excel impossible : ${e?.message ?? e}`);
+    }
   };
 
   const modifiees = ecritures.filter(e => e._modifie).length;
@@ -353,6 +368,7 @@ function ComptabilitePage() {
           <TabsTrigger value="grandlivre">Grand Livre ({ecritures.length})</TabsTrigger>
           <TabsTrigger value="balance">Balance ({balance.length} comptes)</TabsTrigger>
           <TabsTrigger value="saisie">Saisie manuelle</TabsTrigger>
+          <TabsTrigger value="import">+ Import</TabsTrigger>
         </TabsList>
 
         {/* ── GRAND LIVRE ÉDITABLE ── */}
@@ -540,6 +556,11 @@ function ComptabilitePage() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ── IMPORT EXCEL (réversible) ── */}
+        <TabsContent value="import" className="mt-4">
+          <ImportGrandLivre dossierId={dossierId} onDone={load} />
         </TabsContent>
       </Tabs>
 

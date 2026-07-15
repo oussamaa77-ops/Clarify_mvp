@@ -4,123 +4,43 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, Loader2, TrendingUp, TrendingDown, Minus, Users, Building2, ThumbsUp, AlertTriangle } from "lucide-react";
+import { Download, Loader2, TrendingUp, TrendingDown, Minus, Users, Building2, ThumbsUp, AlertTriangle, Info } from "lucide-react";
 import { toast } from "sonner";
+import {
+  type Gran, type Periode, type IndicsTiers, GRAN_LABEL,
+  periodBounds, previousPeriodAnchor, formatPeriodeRange, toISO, calcTiers, detailTiers,
+} from "@/lib/tiers-reporting";
+import { TiersComposition } from "@/components/TiersComposition";
 
 // ── Formatage ────────────────────────────────────────────────────────────────
 const fmtMad = (n: number) => Number(n).toLocaleString("fr-MA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtNum = (n: number) => Number(n).toLocaleString("fr-MA");
-const MOIS = ["janv.","févr.","mars","avr.","mai","juin","juil.","août","sept.","oct.","nov.","déc."];
-
-type Gran = "jour" | "mois" | "trimestre" | "semestre" | "annee";
-const GRAN_LABEL: Record<Gran, string> = {
-  jour: "Jour", mois: "Mois", trimestre: "Trimestre", semestre: "Semestre", annee: "Année",
-};
-
-const pad = (n: number) => String(n).padStart(2, "0");
-const ymd = (y: number, m0: number, d: number) => `${y}-${pad(m0 + 1)}-${pad(d)}`;
-const lastDay = (y: number, m0: number) => new Date(y, m0 + 1, 0).getDate();
-const toISO = (a: Date) => ymd(a.getFullYear(), a.getMonth(), a.getDate());
-
-interface Periode { startStr: string; endStr: string; label: string; }
-
-function periodBounds(gran: Gran, anchorStr: string): Periode {
-  const a = new Date(anchorStr + "T00:00:00");
-  const y = a.getFullYear(), m = a.getMonth(), d = a.getDate();
-  switch (gran) {
-    case "jour":      return { startStr: ymd(y, m, d), endStr: ymd(y, m, d), label: `${pad(d)}/${pad(m + 1)}/${y}` };
-    case "mois":      return { startStr: ymd(y, m, 1), endStr: ymd(y, m, lastDay(y, m)), label: `${MOIS[m]} ${y}` };
-    case "trimestre": { const q = Math.floor(m / 3), sm = q * 3, em = sm + 2; return { startStr: ymd(y, sm, 1), endStr: ymd(y, em, lastDay(y, em)), label: `T${q + 1} ${y}` }; }
-    case "semestre":  { const s = m < 6 ? 0 : 1, sm = s * 6, em = sm + 5; return { startStr: ymd(y, sm, 1), endStr: ymd(y, em, lastDay(y, em)), label: `S${s + 1} ${y}` }; }
-    case "annee":     return { startStr: ymd(y, 0, 1), endStr: ymd(y, 11, 31), label: `${y}` };
-  }
-}
-
-function previousAnchor(gran: Gran, anchorStr: string): string {
-  const a = new Date(anchorStr + "T00:00:00");
-  if (gran === "jour") a.setDate(a.getDate() - 1);
-  else if (gran === "mois") a.setMonth(a.getMonth() - 1);
-  else if (gran === "trimestre") a.setMonth(a.getMonth() - 3);
-  else if (gran === "semestre") a.setMonth(a.getMonth() - 6);
-  else a.setFullYear(a.getFullYear() - 1);
-  return toISO(a);
-}
-
-const inP = (dateStr: string | null | undefined, p: Periode) => {
-  if (!dateStr) return false;
-  const ds = dateStr.slice(0, 10);
-  return ds >= p.startStr && ds <= p.endStr;
-};
 
 type Fmt = "count" | "mad" | "jours";
 type Sens = "up_good" | "up_bad" | "neutral";
 interface Indic { label: string; fmt: Fmt; sens: Sens; depart: number | null; final: number | null; }
 
-// ── Calcul d'un bloc d'indicateurs (clients OU fournisseurs) pour une période ──
-function calcTiers(
-  p: Periode,
-  tiers: any[],        // clients ou fournisseurs : { id, created_at, deleted_at }
-  factures: any[],     // factures clients OU factures_fournisseurs
-  tiersKey: string,    // "client_id" | "fournisseur_id"
-) {
-  // Existants à la fin de la période (créés avant la fin, non supprimés à la fin)
-  const existants = tiers.filter(t => t.created_at?.slice(0, 10) <= p.endStr && (!t.deleted_at || t.deleted_at.slice(0, 10) > p.endStr));
-  const existantsIds = new Set(existants.map(t => t.id));
-  const total = existants.length;
-  const nouveaux = tiers.filter(t => inP(t.created_at, p)).length;
-  const perdus = tiers.filter(t => inP(t.deleted_at, p)).length;
-
-  const facturesP = factures.filter(f => inP(f.date_facture, p));
-  // Actifs = tiers EXISTANTS ayant ≥ 1 facture dans la période. On intersecte avec
-  // l'ensemble des existants pour garantir l'invariant : actifs + passifs = total
-  // (sans cette intersection, une facture d'un tiers non existant gonflerait actifs).
-  const actifsSet = new Set(facturesP.map(f => f[tiersKey]).filter(id => id && existantsIds.has(id)));
-  const actifs = actifsSet.size;
-  const passifs = total - actifs;
-
-  // CA / Achats HT (hors acomptes côté clients)
-  const caTotal = facturesP
-    .filter(f => f.type_facture !== "acompte")
-    .reduce((s, f) => s + Number(f.montant_ht ?? 0), 0);
-  // CA moyen = panier moyen rapporté à TOUS les tiers ayant existé sur la période :
-  // existants à la fin (total) + perdus/supprimés durant la période (perdus, exclus de total).
-  // Cohérent avec caTotal qui est un flux incluant les factures des tiers désormais partis.
-  const baseTiers = total + perdus;
-  const caMoyen = baseTiers > 0 ? caTotal / baseTiers : 0;
-
-  // Créances / Dettes = encours restant à la fin de la période
-  const encours = factures
-    .filter(f => f.date_facture?.slice(0, 10) <= p.endStr && f.statut_paiement !== "payee")
-    .reduce((s, f) => s + Number(f.montant_restant ?? f.montant_ttc ?? 0), 0);
-
-  // Délai moyen de paiement (jours) sur les factures réglées dans la période
-  const payees = factures.filter(f => inP(f.date_paiement, p) && f.date_facture);
-  const delai = payees.length
-    ? Math.round(payees.reduce((s, f) => s + (new Date(f.date_paiement).getTime() - new Date(f.date_facture).getTime()) / 86400000, 0) / payees.length)
-    : null;
-
-  return { total, nouveaux, perdus, actifs, passifs, caTotal, caMoyen, encours, delai };
-}
-
 // ── Définition des indicateurs par type de tiers ───────────────────────────────
-const buildIndicsClients = (d: ReturnType<typeof calcTiers>, f: ReturnType<typeof calcTiers>): Indic[] => [
+const buildIndicsClients = (d: IndicsTiers, f: IndicsTiers): Indic[] => [
   { label: "Nombre total clients",        fmt: "count", sens: "up_good", depart: d.total,    final: f.total },
   { label: "Nouveaux clients",            fmt: "count", sens: "up_good", depart: d.nouveaux, final: f.nouveaux },
   { label: "Clients perdus",              fmt: "count", sens: "up_bad",  depart: d.perdus,   final: f.perdus },
   { label: "Clients actifs",              fmt: "count", sens: "up_good", depart: d.actifs,   final: f.actifs },
   { label: "Clients passifs",             fmt: "count", sens: "up_bad",  depart: d.passifs,  final: f.passifs },
+  { label: "Nouveaux clients sans facture", fmt: "count", sens: "up_bad", depart: d.nouveauxSansFacture, final: f.nouveauxSansFacture },
   { label: "CA Total (HT)",               fmt: "mad",   sens: "up_good", depart: d.caTotal,  final: f.caTotal },
   { label: "CA moyen par client",         fmt: "mad",   sens: "up_good", depart: d.caMoyen,  final: f.caMoyen },
   { label: "Créances clients",            fmt: "mad",   sens: "up_bad",  depart: d.encours,  final: f.encours },
   { label: "Délai moyen de paiement",     fmt: "jours", sens: "up_bad",  depart: d.delai,    final: f.delai },
 ];
 
-const buildIndicsFourn = (d: ReturnType<typeof calcTiers>, f: ReturnType<typeof calcTiers>): Indic[] => [
+const buildIndicsFourn = (d: IndicsTiers, f: IndicsTiers): Indic[] => [
   { label: "Nombre total fournisseurs",   fmt: "count", sens: "neutral", depart: d.total,    final: f.total },
   { label: "Nouveaux fournisseurs",       fmt: "count", sens: "up_good", depart: d.nouveaux, final: f.nouveaux },
   { label: "Fournisseurs perdus",         fmt: "count", sens: "neutral", depart: d.perdus,   final: f.perdus },
   { label: "Fournisseurs actifs",         fmt: "count", sens: "up_good", depart: d.actifs,   final: f.actifs },
   { label: "Fournisseurs passifs",        fmt: "count", sens: "neutral", depart: d.passifs,  final: f.passifs },
+  { label: "Nouveaux fournisseurs sans facture", fmt: "count", sens: "neutral", depart: d.nouveauxSansFacture, final: f.nouveauxSansFacture },
   { label: "Achats Total (HT)",           fmt: "mad",   sens: "neutral", depart: d.caTotal,  final: f.caTotal },
   { label: "Achat moyen par fournisseur", fmt: "mad",   sens: "neutral", depart: d.caMoyen,  final: f.caMoyen },
   { label: "Dettes fournisseurs",         fmt: "mad",   sens: "up_bad",  depart: d.encours,  final: f.encours },
@@ -134,8 +54,9 @@ const CONFIG = {
     icon: Users,
     table: "clients",
     facturesTable: "factures",
-    facturesSelect: "client_id,date_facture,date_paiement,montant_ht,montant_ttc,montant_restant,statut_paiement,type_facture",
-    tiersKey: "client_id",
+    facturesSelect: "client_id,date_facture,date_paiement,montant_ht,montant_ttc,montant_restant,statut_paiement,type",
+    // `factures.client_id` est la seule voie de rattachement : la table ne porte pas de nom dénormalisé.
+    join: { tiersKey: "client_id" },
     buildIndics: buildIndicsClients,
   },
   fournisseurs: {
@@ -144,7 +65,9 @@ const CONFIG = {
     table: "fournisseurs",
     facturesTable: "factures_fournisseurs",
     facturesSelect: "fournisseur_id,fournisseur_nom,date_facture,date_paiement,montant_ht,montant_ttc,montant_restant,statut_paiement",
-    tiersKey: "fournisseur_id",
+    // `factures_fournisseurs.fournisseur_id` est nullable (saisie ou OCR sans fournisseur résolu) :
+    // on retombe sur `fournisseur_nom` pour ne pas déclarer passif un fournisseur qui facture.
+    join: { tiersKey: "fournisseur_id", factureNomKey: "fournisseur_nom" },
     buildIndics: buildIndicsFourn,
   },
 } as const;
@@ -159,7 +82,7 @@ export function TiersReporting({ dossierId, kind }: { dossierId: string; kind: "
   const [gran, setGran] = useState<Gran>("trimestre");
   const todayISO = toISO(new Date());
   const [finalAnchor, setFinalAnchor] = useState(todayISO);
-  const [departAnchor, setDepartAnchor] = useState(previousAnchor("trimestre", todayISO));
+  const [departAnchor, setDepartAnchor] = useState(previousPeriodAnchor("trimestre", todayISO));
 
   const [tiers, setTiers] = useState<any[]>([]);
   const [factures, setFactures] = useState<any[]>([]);
@@ -169,7 +92,7 @@ export function TiersReporting({ dossierId, kind }: { dossierId: string; kind: "
     (async () => {
       setLoading(true);
       const [{ data: t }, { data: f }] = await Promise.all([
-        supabase.from(cfg.table).select("id,created_at,deleted_at").eq("dossier_id", dossierId),
+        supabase.from(cfg.table).select("id,nom,created_at,deleted_at").eq("dossier_id", dossierId),
         supabase.from(cfg.facturesTable).select(cfg.facturesSelect).eq("dossier_id", dossierId),
       ]);
       setTiers(t ?? []); setFactures(f ?? []);
@@ -177,20 +100,30 @@ export function TiersReporting({ dossierId, kind }: { dossierId: string; kind: "
     })();
   }, [dossierId, kind]);
 
-  // Quand on change de granularité, on recale le départ sur la période précédente.
-  const onGranChange = (g: Gran) => {
-    setGran(g);
-    setDepartAnchor(previousAnchor(g, finalAnchor));
-  };
-
   const pDepart = useMemo(() => periodBounds(gran, departAnchor), [gran, departAnchor]);
   const pFinal = useMemo(() => periodBounds(gran, finalAnchor), [gran, finalAnchor]);
 
+  // Changer de granularité re-découpe les deux ancres sans les déplacer : la date saisie
+  // par l'utilisateur est conservée. Il choisit lui-même de recaler le départ.
+  const recalerDepart = () => setDepartAnchor(previousPeriodAnchor(gran, finalAnchor));
+
+  // Deux ancres tombant dans la même période donnent des évolutions nulles : on le dit,
+  // au lieu de réécrire silencieusement la saisie.
+  const memePeriode = pDepart.startStr === pFinal.startStr;
+  const departApresFinal = pDepart.startStr > pFinal.startStr;
+
   const indics = useMemo<Indic[]>(() => {
-    const d = calcTiers(pDepart, tiers, factures, cfg.tiersKey);
-    const f = calcTiers(pFinal, tiers, factures, cfg.tiersKey);
+    const d = calcTiers(pDepart, tiers, factures, cfg.join);
+    const f = calcTiers(pFinal, tiers, factures, cfg.join);
     return cfg.buildIndics(d, f);
   }, [pDepart, pFinal, tiers, factures, kind]);
+
+  // Détail nominatif des deux périodes : alimente le graphique ET son drill-down, à partir
+  // de la même partition que les indicateurs ci-dessus.
+  const periodesDetail = useMemo(() => [
+    { cle: "depart", periode: pDepart, detail: detailTiers(pDepart, tiers, factures, cfg.join) },
+    { cle: "final", periode: pFinal, detail: detailTiers(pFinal, tiers, factures, cfg.join) },
+  ], [pDepart, pFinal, tiers, factures, kind]);
 
   // ── Synthèse : améliorations vs alertes ──
   const synth = useMemo(() => {
@@ -212,7 +145,7 @@ export function TiersReporting({ dossierId, kind }: { dossierId: string; kind: "
     const wb = XLSX.utils.book_new();
     const data = [
       [cfg.titre],
-      [`Granularité : ${GRAN_LABEL[gran]}`, `Départ : ${pDepart.label}`, `Final : ${pFinal.label}`],
+      [`Granularité : ${GRAN_LABEL[gran]}`, `Départ : ${pDepart.label} (${formatPeriodeRange(pDepart)})`, `Final : ${pFinal.label} (${formatPeriodeRange(pFinal)})`],
       [],
       ["Indicateur", `Départ (${pDepart.label})`, `Final (${pFinal.label})`, "Évolution", "Taux évolution"],
       ...indics.map(r => {
@@ -240,32 +173,51 @@ export function TiersReporting({ dossierId, kind }: { dossierId: string; kind: "
 
       {/* Sélecteurs de période */}
       <Card>
-        <CardContent className="pt-4 pb-4 flex flex-wrap items-end gap-4">
-          <div>
-            <label className="text-xs font-medium mb-1 block text-muted-foreground">Granularité</label>
-            <Select value={gran} onValueChange={(v) => onGranChange(v as Gran)}>
-              <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
-              <SelectContent>{(Object.keys(GRAN_LABEL) as Gran[]).map(g => <SelectItem key={g} value={g}>{GRAN_LABEL[g]}</SelectItem>)}</SelectContent>
-            </Select>
+        <CardContent className="pt-4 pb-4 space-y-3">
+          <div className="flex flex-wrap items-end gap-4">
+            <div>
+              <label className="text-xs font-medium mb-1 block text-muted-foreground">Granularité</label>
+              <Select value={gran} onValueChange={(v) => setGran(v as Gran)}>
+                <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+                <SelectContent>{(Object.keys(GRAN_LABEL) as Gran[]).map(g => <SelectItem key={g} value={g}>{GRAN_LABEL[g]}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-xs font-medium mb-1 block text-muted-foreground">Période de départ</label>
+              <Input type="date" value={departAnchor} onChange={e => setDepartAnchor(e.target.value)} className="w-44" />
+              <p className="text-[11px] text-primary font-medium mt-1">{pDepart.label}</p>
+              <p className="text-[11px] text-muted-foreground">{formatPeriodeRange(pDepart)}</p>
+            </div>
+            <div className="text-muted-foreground pb-10">→</div>
+            <div>
+              <label className="text-xs font-medium mb-1 block text-muted-foreground">Période finale</label>
+              <Input type="date" value={finalAnchor} onChange={e => setFinalAnchor(e.target.value)} className="w-44" />
+              <p className="text-[11px] text-primary font-medium mt-1">{pFinal.label}</p>
+              <p className="text-[11px] text-muted-foreground">{formatPeriodeRange(pFinal)}</p>
+            </div>
+            <Button variant="ghost" size="sm" className="pb-0 mb-6" onClick={recalerDepart}>
+              Départ = période précédente
+            </Button>
           </div>
-          <div>
-            <label className="text-xs font-medium mb-1 block text-muted-foreground">Période de départ</label>
-            <Input type="date" value={departAnchor} onChange={e => setDepartAnchor(e.target.value)} className="w-44" />
-            <p className="text-[11px] text-primary font-medium mt-1">{pDepart.label}</p>
-          </div>
-          <div className="text-muted-foreground pb-6">→</div>
-          <div>
-            <label className="text-xs font-medium mb-1 block text-muted-foreground">Période finale</label>
-            <Input type="date" value={finalAnchor} onChange={e => setFinalAnchor(e.target.value)} className="w-44" />
-            <p className="text-[11px] text-primary font-medium mt-1">{pFinal.label}</p>
-          </div>
+
+          {(memePeriode || departApresFinal) && (
+            <p className="text-[11px] text-amber-700 flex items-center gap-1.5">
+              <Info className="h-3.5 w-3.5 shrink-0" />
+              {memePeriode
+                ? `Les deux dates tombent dans ${pFinal.label} — toutes les évolutions seront nulles.`
+                : `La période de départ (${pDepart.label}) est postérieure à la période finale (${pFinal.label}) — les évolutions sont inversées.`}
+            </p>
+          )}
         </CardContent>
       </Card>
 
       {loading ? (
         <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin" /></div>
       ) : (
-        <IndicTable titre={cfg.titre} icon={cfg.icon} rows={indics} pDepart={pDepart} pFinal={pFinal} synth={synth} />
+        <>
+          <TiersComposition kind={kind} periodes={periodesDetail} />
+          <IndicTable titre={cfg.titre} icon={cfg.icon} rows={indics} pDepart={pDepart} pFinal={pFinal} synth={synth} />
+        </>
       )}
     </div>
   );

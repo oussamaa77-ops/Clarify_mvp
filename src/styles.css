@@ -87,6 +87,27 @@
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
+  /* Composition du portefeuille tiers (actif / passif / nouveau sans facture).
+     Palette catégorielle validée contre la surface de carte réelle (#ffffff) :
+     bande de clarté, plancher de chroma et séparation CVD (pire paire adjacente ΔE 47,2).
+     L'ordre des slots est la sécurité daltonisme — ne pas permuter. Le contraste de
+     l'ambre et de l'aqua est < 3:1 sur fond clair : labels visibles + tableau obligatoires. */
+  --tiers-actif: #2a78d6;
+  --tiers-passif: #eda100;
+  --tiers-nouveau: #1baf7a;
+  /* Atténuation des segments non sélectionnés (mise en avant). */
+  --tiers-dim: 0.35;
+  /* Balance âgée : les tranches d'ancienneté forment une échelle ORDONNÉE, pas des
+     catégories. Rampe monochrome bleue, plus foncé = plus vieux (steps 250/350/450/600).
+     Validée en ordinal sur surface #ffffff : clarté monotone, ΔL ≥ 0,06, extrémité claire
+     à 2,11:1. Ne pas remplacer par quatre teintes distinctes : ce serait un arc-en-ciel
+     sur une grandeur ordonnée. */
+  --age-0: #86b6ef;   /* non échu */
+  --age-1: #5598e7;   /* 1-30 j   */
+  --age-2: #2a78d6;   /* 31-60 j  */
+  --age-3: #184f95;   /* +60 j    */
+  /* Statut réservé (jamais une couleur de série) : toujours accompagné d'une icône + libellé. */
+  --status-critical: #d03b3b;
   --sidebar: oklch(0.984 0.003 247.858);
   --sidebar-foreground: oklch(0.129 0.042 264.695);
   --sidebar-primary: oklch(0.208 0.042 265.755);
@@ -122,6 +143,26 @@
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
+  /* Mêmes teintes recalées pour la surface de carte sombre (#0f172b) — pas un simple
+     éclaircissement du jeu clair. Validées à part : les trois passent 3:1, ΔE adjacent 41,3. */
+  --tiers-actif: #3987e5;
+  --tiers-passif: #c98500;
+  --tiers-nouveau: #199e70;
+  /* Atténuer vers une surface sombre efface la teinte bien plus vite que vers du blanc :
+     à 0,35 le bleu virait au bleu nuit, indistinct du fond. */
+  --tiers-dim: 0.55;
+  /* Rampe ordinale recalée pour la surface sombre (#0f172b), et RETOURNÉE. Le principe
+     n'est pas « plus vieux = plus foncé », c'est « proche de zéro = proche de la surface ».
+     Sur fond sombre, garder +60 j en bleu nuit faisait disparaître la tranche la plus grave
+     dans le fond ; c'est donc « non échu » qui recule (#184f95, 2,20:1) et « +60 j » qui
+     ressort. Dans les deux modes, plus la créance est vieille, plus elle tranche. */
+  --age-0: #184f95;
+  --age-1: #3987e5;
+  --age-2: #6da7ec;
+  --age-3: #b7d3f6;
+  /* Le pas clair du rouge de statut : #d03b3b ne donne que 3,71:1 sur cette surface,
+     insuffisant pour le texte 12 px de la colonne « retard max ». #e66767 → 5,52:1. */
+  --status-critical: #e66767;
   --sidebar: oklch(0.208 0.042 265.755);
   --sidebar-foreground: oklch(0.984 0.003 247.858);
   --sidebar-primary: oklch(0.488 0.243 264.376);

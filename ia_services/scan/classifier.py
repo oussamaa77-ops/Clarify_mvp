@@ -41,8 +41,19 @@ class HardcodedRule:
 
 # --- Règles métier Maroc (extensibles) --------------------------------------
 DEFAULT_HARDCODED_RULES: tuple[HardcodedRule, ...] = (
+    # CNSS — règle STRICTE : tout document émis par la Caisse Nationale de
+    # Sécurité Sociale est une charge sociale imputée OBLIGATOIREMENT au 6174.
+    # Mots-clés volontairement spécifiques : on N'UTILISE PAS le fragment isolé
+    # "CAISSE NATIONALE" car il capturerait à tort la « CAISSE NATIONALE DE
+    # CRÉDIT AGRICOLE » (CNCA, une banque → jamais 6174). Seuls "CNSS", le nom
+    # complet, ou "SECURITE SOCIALE" déclenchent la règle.
     HardcodedRule(
-        keywords=("CNSS", "SECURITE SOCIALE", "SECURITE SOCIAL", "CAISSE NATIONALE"),
+        keywords=(
+            "CNSS",
+            "CAISSE NATIONALE DE SECURITE SOCIALE",
+            "SECURITE SOCIALE",
+            "SECURITE SOCIAL",
+        ),
         type_document="Bordereau",
         compte_pcm="6174",
         categorie_pcm="Charges Sociales",

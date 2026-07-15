@@ -18,8 +18,13 @@ import { z } from "zod";
 import { createHash } from "crypto";
 import { createClient } from "@supabase/supabase-js";
 import { emailFactureClient, emailFactureRejetee } from "./email.templates";
+import { sendMail } from "./mailer";
 import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
+import { rappelerMemoire } from "./tiers-memoire.functions";
+import { logUsage, logUsageBatch, estimerCoutIA } from "./analytics.functions";
+import { guardScan, libererScan } from "./billing";
+import { enregistrerPaiement } from "@/lib/paiements";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -28,7 +33,13 @@ function getSupabase() {
     process.env.SUPABASE_PUBLISHABLE_KEY ??
     process.env.VITE_SUPABASE_PUBLISHABLE_KEY ??
     "";
-  return createClient(url, key);
+  // Derrière le proxy TLS d'entreprise, le fetch global de Node échoue
+  // (`TypeError: fetch failed`) → on route supabase-js par proxyFetch (repli undici),
+  // comme les appels IA, sinon TOUTE écriture/lecture serveur échoue silencieusement.
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { fetch: (input: any, init?: any) => proxyFetch(String(input), init) },
+  });
 }
 
 const ligneSchema = z.object({
@@ -38,45 +49,58 @@ const ligneSchema = z.object({
   taux_tva: z.number().min(0).max(100).default(20),
 });
 
-// ─── Email via Brevo ──────────────────────────────────────────────────────────
+// ─── Email via SMTP « classique » (nodemailer) ────────────────────────────────
+// Best-effort : renvoie false sur échec (config SMTP absente / serveur KO) sans
+// jamais bloquer la génération de facture. Détail anti-spam dans ./mailer.
 async function envoyerEmail(
   to: string,
   subject: string,
   html: string,
   attachments?: { name: string; content: string; type: string }[]
 ): Promise<boolean> {
-  const brevoKey = process.env.BREVO_API_KEY ?? "";
-  const fromEmail = process.env.FROM_EMAIL ?? "noreply@hisabpro.ma";
-  const fromName = process.env.FROM_NAME ?? "HisabPro";
-  if (!brevoKey) return false;
   try {
-    const body: any = {
-      sender: { name: fromName, email: fromEmail },
-      to: [{ email: to }],
-      subject,
-      htmlContent: html,
-    };
-    if (attachments?.length) {
-      body.attachment = attachments.map((a) => ({
-        name: a.name,
-        content: a.content,
-      }));
-    }
-    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
-      method: "POST",
-      headers: {
-        "api-key": brevoKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    return res.ok;
-  } catch {
+    await sendMail({ to, subject, html, attachments });
+    return true;
+  } catch (e: any) {
+    console.error("[email] envoi échoué:", e?.message ?? e);
     return false;
   }
 }
 
-// ─── Appel IA (Groq) ─────────────────────────────────────────────────────────
+// ─── fetch tolérant au proxy SSL d'entreprise ───────────────────────────────
+// Derrière un proxy d'inspection TLS, le PREMIER `fetch` échoue (SELF_SIGNED_CERT)
+// et on doit réessayer via undici sans vérif TLS. Pour ne PAS payer cet échec sur
+// CHAQUE appel (OCR + extraction + N lots de matching), on mémorise la détection :
+// une fois le proxy vu, tous les appels suivants passent DIRECTEMENT par undici.
+let PROXY_DIRECT = false;
+async function proxyFetch(url: string, opts: any): Promise<Response> {
+  if (PROXY_DIRECT) {
+    const { fetch: undiciFetch, Agent } = await import("undici");
+    const agent = new Agent({ connect: { rejectUnauthorized: false } });
+    return await (undiciFetch as any)(url, { ...opts, dispatcher: agent }) as Response;
+  }
+  try {
+    return await fetch(url, opts);
+  } catch (fetchErr: any) {
+    const cause: string = fetchErr?.cause?.code ?? fetchErr?.cause?.message ?? fetchErr?.message ?? "";
+    // Proxy d'inspection TLS : le premier fetch échoue soit sur le certificat
+    // (SELF_SIGNED/CERT_), soit avec un « fetch failed » générique. Dans les deux
+    // cas, on rebascule sur undici sans vérif TLS (le proxy présente son propre CA).
+    if (/SELF_SIGNED|CERT_|UNABLE_TO_VERIFY|fetch failed|ECONNRESET|EPROTO/i.test(cause) || /fetch failed/i.test(String(fetchErr?.message ?? ""))) {
+      PROXY_DIRECT = true; // mémorise → plus aucun échec de fetch sur les appels suivants
+      const { fetch: undiciFetch, Agent } = await import("undici");
+      const agent = new Agent({ connect: { rejectUnauthorized: false } });
+      return await (undiciFetch as any)(url, { ...opts, dispatcher: agent }) as Response;
+    }
+    throw new Error(`Réseau KO: ${cause || "fetch failed"}`);
+  }
+}
+
+// ─── Appel IA (Groq — SECOURS) ───────────────────────────────────────────────
+// Groq n'est plus le moteur principal : il prend le relais quand Mistral est
+// indisponible (clé absente, 429, panne, réponse inexploitable).
+// Texte : openai/gpt-oss-120b. Vision : llama-4-scout — gpt-oss-120b est
+// TEXT-ONLY, il ne peut pas remplacer le modèle vision.
 async function callAI(
   prompt: string,
   imageBase64?: string,
@@ -89,7 +113,7 @@ async function callAI(
 
   const model = imageBase64
     ? (visionModel ?? "meta-llama/llama-4-scout-17b-16e-instruct")
-    : "llama-3.3-70b-versatile";
+    : "openai/gpt-oss-120b";
 
   const userContent: any = imageBase64
     ? [
@@ -103,13 +127,19 @@ async function callAI(
       ]
     : prompt;
 
-  const defaultTokens = imageBase64 ? 2000 : 1500;
+  // gpt-oss-120b est un modèle À RAISONNEMENT : ses tokens de réflexion sont
+  // facturés/comptés dans la sortie AVANT le JSON. Avec max_tokens trop bas, la
+  // réflexion épuise le budget et Groq renvoie 400 json_validate_failed (sortie
+  // vide). D'où reasoning_effort "low" + un plancher de sortie confortable.
+  const defaultTokens = imageBase64 ? 2000 : 3000;
   const groqBody = JSON.stringify({
     model,
     max_tokens: maxTokens ?? defaultTokens,
     temperature: 0,
     messages: [{ role: "user", content: userContent }],
-    ...(imageBase64 ? {} : { response_format: { type: "json_object" } }),
+    ...(imageBase64
+      ? {}
+      : { response_format: { type: "json_object" }, reasoning_effort: "low" }),
   });
 
   const groqHeaders = {
@@ -117,30 +147,11 @@ async function callAI(
     Authorization: `Bearer ${groqKey}`,
   };
 
-  let res: Response;
-  try {
-    res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: groqHeaders,
-      body: groqBody,
-    });
-  } catch (fetchErr: any) {
-    const causeCode: string = fetchErr?.cause?.code ?? fetchErr?.cause?.message ?? fetchErr?.message ?? "";
-    console.error("[Groq] fetch error — cause:", causeCode);
-
-    // Proxy SSL inspection (SELF_SIGNED_CERT_IN_CHAIN) → retry via undici avec rejectUnauthorized:false
-    if (/SELF_SIGNED|CERT_/i.test(causeCode)) {
-      console.warn("[Groq] Proxy SSL détecté — retry undici sans vérification TLS");
-      const { fetch: undiciFetch, Agent } = await import("undici");
-      const agent = new Agent({ connect: { rejectUnauthorized: false } });
-      res = await (undiciFetch as any)(
-        "https://api.groq.com/openai/v1/chat/completions",
-        { method: "POST", headers: groqHeaders, body: groqBody, dispatcher: agent }
-      ) as Response;
-    } else {
-      throw new Error(`Groq réseau KO: ${causeCode || "fetch failed"}`);
-    }
-  }
+  const res: Response = await proxyFetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: groqHeaders,
+    body: groqBody,
+  });
 
   if (!res.ok) {
     const errText = await res.text();
@@ -182,21 +193,7 @@ async function callMistralOcr(base64: string, mimeType: string): Promise<string>
   };
   const ENDPOINT = "https://api.mistral.ai/v1/ocr";
 
-  let res: Response;
-  try {
-    res = await fetch(ENDPOINT, { method: "POST", headers, body });
-  } catch (fetchErr: any) {
-    const causeCode: string = fetchErr?.cause?.code ?? fetchErr?.cause?.message ?? fetchErr?.message ?? "";
-    // Proxy SSL d'entreprise (SELF_SIGNED_CERT_IN_CHAIN) → retry undici sans vérif TLS
-    if (/SELF_SIGNED|CERT_/i.test(causeCode)) {
-      console.warn("[MISTRAL OCR] Proxy SSL détecté — retry undici sans vérification TLS");
-      const { fetch: undiciFetch, Agent } = await import("undici");
-      const agent = new Agent({ connect: { rejectUnauthorized: false } });
-      res = await (undiciFetch as any)(ENDPOINT, { method: "POST", headers, body, dispatcher: agent }) as Response;
-    } else {
-      throw new Error(`Mistral OCR réseau KO: ${causeCode || "fetch failed"}`);
-    }
-  }
+  const res: Response = await proxyFetch(ENDPOINT, { method: "POST", headers, body });
 
   if (!res.ok) {
     const errText = await res.text();
@@ -227,12 +224,12 @@ async function callMistralOcr(base64: string, mimeType: string): Promise<string>
 // Utilisé pour la catégorisation comptable et le rapprochement facture/
 // justificatif des transactions du relevé (équivalent du callAI texte Groq,
 // mais sur Mistral). Mode JSON strict. Gère le proxy SSL d'entreprise.
-async function callMistralChat(prompt: string, maxTokens?: number): Promise<string> {
+async function callMistralChat(prompt: string, maxTokens?: number, model: string = "mistral-large-latest"): Promise<string> {
   const key = process.env.MISTRAL_API_KEY;
   if (!key) throw new Error("MISTRAL_API_KEY manquante");
 
   const body = JSON.stringify({
-    model: "mistral-large-latest",
+    model,
     max_tokens: maxTokens ?? 4096,
     temperature: 0,
     response_format: { type: "json_object" },
@@ -244,20 +241,7 @@ async function callMistralChat(prompt: string, maxTokens?: number): Promise<stri
   };
   const ENDPOINT = "https://api.mistral.ai/v1/chat/completions";
 
-  let res: Response;
-  try {
-    res = await fetch(ENDPOINT, { method: "POST", headers, body });
-  } catch (fetchErr: any) {
-    const causeCode: string = fetchErr?.cause?.code ?? fetchErr?.cause?.message ?? fetchErr?.message ?? "";
-    if (/SELF_SIGNED|CERT_/i.test(causeCode)) {
-      console.warn("[MISTRAL CHAT] Proxy SSL détecté — retry undici sans vérification TLS");
-      const { fetch: undiciFetch, Agent } = await import("undici");
-      const agent = new Agent({ connect: { rejectUnauthorized: false } });
-      res = await (undiciFetch as any)(ENDPOINT, { method: "POST", headers, body, dispatcher: agent }) as Response;
-    } else {
-      throw new Error(`Mistral chat réseau KO: ${causeCode || "fetch failed"}`);
-    }
-  }
+  const res: Response = await proxyFetch(ENDPOINT, { method: "POST", headers, body });
 
   if (!res.ok) {
     const errText = await res.text();
@@ -266,8 +250,52 @@ async function callMistralChat(prompt: string, maxTokens?: number): Promise<stri
 
   const data = (await res.json()) as any;
   const content = data.choices?.[0]?.message?.content ?? "{}";
-  console.log("[MISTRAL CHAT] model: mistral-large-latest | chars:", content.length);
+  console.log("[MISTRAL CHAT] model:", model, "| chars:", content.length);
   return content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+}
+
+// ─── Extraction facture / justificatif : Mistral principal, Groq secours ─────
+// Même cascade que le relevé, appliquée au document unitaire :
+//   • document scanné (pas de couche texte) → mistral-ocr-latest rend le
+//     Markdown, puis mistral-large-latest en extrait le JSON métier ;
+//   • PDF avec couche texte → un seul appel mistral-large sur le texte.
+// Secours Groq (vision llama-4-scout / texte gpt-oss-120b) si Mistral est
+// indisponible ou rend un JSON inexploitable. Retourne aussi le fournisseur
+// réellement utilisé, pour la journalisation.
+type FactureExtraction = { ai: any; provider: "mistral" | "groq" };
+
+async function extraireFactureIA(args: {
+  dossierNom: string;
+  dossierIce: string;
+  text: string;
+  imageBase64?: string;
+  mimeType: string;
+  useVision: boolean;
+}): Promise<FactureExtraction> {
+  const { dossierNom, dossierIce, text, imageBase64, mimeType, useVision } = args;
+
+  if (process.env.MISTRAL_API_KEY) {
+    try {
+      // Un scan sans couche texte passe d'abord par l'OCR document Mistral.
+      let contenu = text;
+      if (useVision && imageBase64) {
+        contenu = await callMistralOcr(imageBase64, mimeType);
+        if (!contenu.trim()) throw new Error("Mistral OCR : Markdown vide");
+        console.log(`[OCR FACTURE] mistral-ocr → ${contenu.length} chars de Markdown`);
+      }
+      const raw = await callMistralChat(buildOcrPrompt(dossierNom, dossierIce, contenu), 4000);
+      return { ai: JSON.parse(raw), provider: "mistral" };
+    } catch (e: any) {
+      // Pas de throw : Mistral KO ne doit pas faire échouer le scan, Groq prend le relais.
+      console.warn("[OCR FACTURE] Mistral échoué → secours Groq:", String(e?.message ?? e).slice(0, 200));
+    }
+  }
+
+  const prompt = buildOcrPrompt(dossierNom, dossierIce, text);
+  const raw = useVision && imageBase64
+    ? await callAI(prompt, imageBase64, mimeType)
+    : await callAI(prompt);
+  return { ai: JSON.parse(raw), provider: "groq" };
 }
 
 // ─── Contrôle d'équilibre du relevé ──────────────────────────────────────────
@@ -362,6 +390,9 @@ Retourne UNIQUEMENT ce JSON :
 {"txs":[{"date_operation":"JJ/MM/AAAA","date_valeur":"JJ/MM/AAAA","reference":"","libelle":"","montant_debit":null,"montant_credit":null}]}`;
 
   try {
+    // mistral-large : l'extraction d'un tableau OCR DÉCALÉ exige du raisonnement
+    // (mistral-small y inverse/mélange les montants → écart de solde). Précision > vitesse
+    // ici ; la voie rapide est la récupération déterministe par delta de solde en amont.
     const content = await callMistralChat(prompt, 8000);
     const parsed = JSON.parse(content);
     const arr: any[] = Array.isArray(parsed) ? parsed : parsed.txs;
@@ -403,6 +434,78 @@ Retourne UNIQUEMENT ce JSON :
     console.warn("[RECONCILE] échec:", e?.message ?? e);
     return null;
   }
+}
+
+// ─── Extraction LÉGÈRE des transactions depuis le Markdown OCR ────────────────
+// Le parsing regex `parseReleveMarkdown` casse quand mistral-ocr change la mise en
+// forme du tableau (colonnes fusionnées/décalées) → montants=null. Le LLM, lui, lit
+// n'importe quelle forme. Stratégie RAPIDE (1 seul appel LLM, ni boucle ni vision) :
+//   1) regex → en-tête (banque/RIB/soldes) + transactions ;
+//   2) si le regex n'a PAS lu tous les montants, UN appel mistral-large relit le
+//      markdown ; on garde le résultat qui lit LE PLUS de montants.
+// Renvoie { info, txs } — txs au format {reference,date_operation,date_valeur,
+// libelle,montant_debit,montant_credit}.
+async function extractReleveLean(
+  fullMarkdown: string,
+): Promise<{ info: { banque: string; rib: string; solde_initial: number; solde_final: number }; txs: any[]; usedLlm: boolean }> {
+  const { parseReleveMarkdown } = await import("./factures.utils");
+  const md = parseReleveMarkdown(fullMarkdown);
+  const info = { banque: md.banque, rib: md.rib, solde_initial: md.solde_initial, solde_final: md.solde_final };
+  const regexTxs = md.txs;
+  const withAmt = (l: any[]) => l.filter((t) => t.montant_debit != null || t.montant_credit != null).length;
+
+  // Regex a déjà lu TOUS les montants → rapide, pas d'appel LLM.
+  if (regexTxs.length > 0 && withAmt(regexTxs) === regexTxs.length) {
+    console.log(`[RELEVE] regex complet : ${regexTxs.length} tx, tous montants lus — pas d'appel LLM`);
+    return { info, txs: regexTxs, usedLlm: false };
+  }
+
+  // ── VOIE RAPIDE : récupération DÉTERMINISTE par DELTA de solde (SANS LLM) ──────
+  // Le dernier montant de chaque ligne est le solde courant. Donc pour chaque ligne :
+  //   montant = |solde[n] − solde[n−1]|, sens = signe (solde ↑ ⇒ crédit, ↓ ⇒ débit).
+  // C'est mathématiquement exact et instantané. On l'accepte SEULEMENT s'il ÉQUILIBRE
+  // (solde final calculé == solde final scanné) — garantie anti-erreur. Gère aussi la
+  // convention débiteur (solde initial signé −) pour BP. Élimine l'appel LLM (OCR rapide).
+  if (regexTxs.length > 0 && info.solde_initial > 0 && regexTxs.every((t) => t.solde_ligne != null)) {
+    const build = (si: number) => {
+      let prev = si;
+      return regexTxs.map((t) => {
+        const s = t.solde_ligne as number;
+        const delta = Math.round((s - prev) * 100) / 100;
+        prev = s;
+        return {
+          ...t,
+          montant_debit: delta < -0.005 ? Math.abs(delta) : null,
+          montant_credit: delta > 0.005 ? delta : null,
+        };
+      });
+    };
+    // Deux conventions de signe du solde initial (BP peut être débiteur, affiché +).
+    for (const si of [info.solde_initial, -info.solde_initial]) {
+      const recov = build(si);
+      if (releveEcart(info.solde_initial, info.solde_final, recov) <= 1) {
+        console.log(`[RELEVE] ✓ récupération DÉTERMINISTE par delta de solde (${recov.length} tx, ${withAmt(recov)} montants) — SANS LLM`);
+        return { info, txs: recov, usedLlm: false };
+      }
+    }
+    console.log("[RELEVE] delta de solde non équilibré — bascule extraction LLM");
+  }
+
+  if (!process.env.MISTRAL_API_KEY) return { info, txs: regexTxs, usedLlm: false };
+
+  console.log(`[RELEVE] regex incomplet (${withAmt(regexTxs)}/${regexTxs.length} montants) → 1 extraction LLM (mistral-large)`);
+  try {
+    const llm = await reconcileReleveTxs(fullMarkdown, info.solde_initial, info.solde_final);
+    if (llm && llm.length > 0 && withAmt(llm) >= withAmt(regexTxs)) {
+      console.log(`[RELEVE] ✓ LLM retenu : ${withAmt(llm)}/${llm.length} montants lus (regex: ${withAmt(regexTxs)}/${regexTxs.length})`);
+      return { info, txs: llm, usedLlm: true };
+    }
+    console.log(`[RELEVE] LLM pas meilleur (${llm ? withAmt(llm) : 0} montants) — on garde le regex`);
+  } catch (e: any) {
+    console.warn("[RELEVE] extraction LLM échouée:", e?.message ?? e);
+  }
+  // Un appel LLM A ÉTÉ tenté (coût engagé) même si on garde finalement le regex.
+  return { info, txs: regexTxs, usedLlm: true };
 }
 
 
@@ -544,7 +647,7 @@ ${lignesXml}
 
     if (conforme && Number(facture.montant_ttc) > 0) {
       const ref = facture.numero ?? facture.id;
-      const typeFacture = (facture as any).type_facture ?? "standard";
+      const typeFacture = (facture as any).type ?? "facture";
       if (typeFacture === "acompte") {
         await supabase.from("ecritures_comptables").insert([
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "3421",  date_ecriture: facture.date_facture, libelle: `Acompte ${ref}`,     debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
@@ -627,6 +730,47 @@ ${lignesXml}
     };
   });
 
+// ─── CACHE OCR DOCUMENT ──────────────────────────────────────────────────────
+// Empreinte stable d'un document scanné : on normalise le texte extrait (accents,
+// ponctuation et espaces retirés → MAJUSCULES) puis on le hashe. Deux scans du même
+// document (même fichier, ou re-saisie identique) produisent le MÊME hash → cache-hit
+// → le LLM est court-circuité. Si le texte est trop pauvre (PDF scanné image), on se
+// rabat sur le hash des octets image (un doublon de fichier reste détecté).
+function normalizeOcrText(text: string | null | undefined): string {
+  if (!text) return "";
+  return text
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")   // accents
+    .toUpperCase()
+    .replace(/[^0-9A-Z]+/g, "");       // ne garde que lettres + chiffres
+}
+function ocrInputHash(text: string, imageBase64?: string): string | null {
+  const norm = normalizeOcrText(text);
+  if (norm.length >= 200) return "t:" + createHash("sha256").update(norm).digest("hex");
+  if (imageBase64 && imageBase64.length > 100) return "i:" + createHash("sha256").update(imageBase64).digest("hex");
+  if (norm.length > 0) return "t:" + createHash("sha256").update(norm).digest("hex");
+  return null;
+}
+// Lecture du cache (best-effort : table absente / proxy → null, jamais bloquant).
+async function lookupOcrCache(sb: any, dossierId: string, hash: string): Promise<any | null> {
+  try {
+    const { data, error } = await sb.from("ocr_cache")
+      .select("result").eq("dossier_id", dossierId).eq("input_hash", hash).limit(1).maybeSingle();
+    if (error) { console.error("[ocr_cache] lookup ÉCHOUÉ:", error.message ?? error); return null; }
+    return (data as any)?.result ?? null;
+  } catch (e: any) { console.error("[ocr_cache] lookup EXCEPTION:", e?.message ?? e); return null; }
+}
+// Écriture du cache (upsert idempotent sur (dossier_id, input_hash)).
+async function storeOcrCache(sb: any, dossierId: string, hash: string, result: any): Promise<void> {
+  try {
+    const { error } = await sb.from("ocr_cache").upsert(
+      { dossier_id: dossierId, input_hash: hash, result, created_at: new Date().toISOString() },
+      { onConflict: "dossier_id,input_hash" },
+    );
+    if (error) console.error("[ocr_cache] store ÉCHOUÉ:", error.message ?? error);
+  } catch (e: any) { console.error("[ocr_cache] store EXCEPTION:", e?.message ?? e); }
+}
+
 // ─── ocrFacture ───────────────────────────────────────────────────────────────
 // FIX: Le texte extrait du PDF est passé côté serveur — le worker PDF.js
 
@@ -639,9 +783,22 @@ export const ocrFacture = createServerFn({ method: "POST" })
       image_base64: z.string().optional(),
       mime_type: z.string().default("image/jpeg"),
       dossier_id: z.string().uuid(),
+      // POC mémoire des tiers : "fournisseur" active le rappel avant LLM (émetteur).
+      sens_hint: z.enum(["client", "fournisseur"]).optional(),
     }).parse(input)
   )
   .handler(async ({ data }) => {
+    // Quota AVANT tout appel IA : un scan refusé ne doit rien coûter.
+    // Idempotent sur le contenu → un re-scan du même document ne redécompte pas.
+    // Le crédit est RENDU en fin de handler si le document n'a finalement
+    // déclenché aucun appel IA (cache OCR ou mémoire des tiers).
+    const scanQuota = {
+      dossier_id: data.dossier_id,
+      kind: "facture" as const,
+      contenu: data.image_base64 || data.extracted_text || "",
+    };
+    const decisionQuota = await guardScan(scanQuota);
+
     const supabase = getSupabase();
     const { data: dossier } = await supabase
       .from("dossiers" as any)
@@ -687,18 +844,54 @@ export const ocrFacture = createServerFn({ method: "POST" })
     let confidence: "high" | "medium" | "low" = rx.confidence;
     let method = "regex";
 
-    // ── Step 2: ALWAYS call AI for semantic fields (name, sens, type, lignes).
+    // ── POC MÉMOIRE (point 3) : rappel du tiers AVANT le LLM ───────────────────
+    // Si l'émetteur (fournisseur) est déjà connu (ICE exact = clé forte, ou libellé),
+    // on rappelle sa classification apprise. Un rappel FORT (ICE) + un total lisible
+    // par la regex permet de COURT-CIRCUITER l'appel IA (méthode = "memoire").
+    let memoire: Awaited<ReturnType<typeof rappelerMemoire>> = null;
+    let skipLLM = false;
+    if (data.sens_hint === "fournisseur" && (rx.emetteur_ice || rx.emetteur_nom)) {
+      memoire = await rappelerMemoire(supabase, {
+        dossier_id: data.dossier_id, sens: "fournisseur",
+        ice: rx.emetteur_ice, nom: rx.emetteur_nom,
+      });
+      if (memoire?.par_ice && rx.montant_ttc > 0) {
+        skipLLM = true;
+        console.log(`[OCR] Mémoire: fournisseur reconnu par ICE (${memoire.occurrences} usage(s)) → LLM court-circuité`);
+      }
+    }
+
+    // ── CACHE DOCUMENT : même facture déjà scannée → réutiliser le résultat OCR ─
+    // Empreinte du contenu (texte normalisé, sinon octets image). Un cache-hit
+    // court-circuite l'appel LLM (méthode = "cache", skip_llm = true dans l'usage).
+    const inputHash = ocrInputHash(text, data.image_base64);
+    if (!skipLLM && inputHash) {
+      const cached = await lookupOcrCache(supabase, data.dossier_id, inputHash);
+      if (cached) {
+        result = { ...result, ...cached };
+        confidence = "high";
+        method = "cache";
+        skipLLM = true;
+        console.log(`[OCR] Cache document (hash ${inputHash.slice(0, 10)}…) → LLM court-circuité`);
+      }
+    }
+
+    // ── Step 2: call AI for semantic fields (name, sens, type, lignes) — SAUF si
+    //    la mémoire a permis de court-circuiter (skipLLM).
     // Regex results are a fallback — PDF column layouts make positional text
     // extraction unreliable for company names. AI reads the full text semantically.
-    const prompt = buildOcrPrompt(dossierNom, dossierIce, text);
-
-    try {
+    if (!skipLLM) try {
       const useVision = _likelyScan && !!data.image_base64;
       console.log("[OCR] useVision:", useVision, "| textNonWs:", _textNonWs, "| hasImage:", !!data.image_base64, "| mime:", data.mime_type);
-      const aiResponse = useVision
-        ? await callAI(prompt, data.image_base64!, data.mime_type)
-        : await callAI(prompt);
-      const ai = JSON.parse(aiResponse);
+      const { ai, provider } = await extraireFactureIA({
+        dossierNom,
+        dossierIce,
+        text,
+        imageBase64: data.image_base64,
+        mimeType: data.mime_type,
+        useVision,
+      });
+      console.log("[OCR] extraction par:", provider);
 
       // AI wins for all fields; regex values are fallback for fields AI left empty/zero
       result = {
@@ -776,6 +969,9 @@ export const ocrFacture = createServerFn({ method: "POST" })
       if (result.date_facture && result.date_echeance && result.date_echeance < result.date_facture)
         result.date_echeance = null;
 
+      // ── Mémorise le résultat OCR pour ce document → prochain scan identique = cache-hit.
+      if (inputHash) await storeOcrCache(supabase, data.dossier_id, inputHash, result);
+
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       console.error("[OCR] IA échouée:", msg);
@@ -788,6 +984,22 @@ export const ocrFacture = createServerFn({ method: "POST" })
       method = "regex";
       if (isTlsOrNetwork) {
         console.warn("[OCR] Proxy SSL détecté — résultat partiel (regex). Ajoutez NODE_TLS_REJECT_UNAUTHORIZED=0 dans .env pour activer l'OCR vision.");
+      }
+    }
+
+    // ── POC MÉMOIRE : application de la classification apprise ─────────────────
+    // La mémoire fait autorité sur la TVA / compte / catégorie du tiers connu.
+    if (memoire) {
+      if (memoire.taux_tva != null) result.taux_tva = Number(memoire.taux_tva);
+      result.compte_pcm = memoire.compte_pcm ?? result.compte_pcm ?? null;
+      result.categorie_pcm = memoire.categorie_pcm ?? result.categorie_pcm ?? null;
+      if (skipLLM) {
+        // Aucun appel IA : on s'appuie sur la regex (montants) + la mémoire (classif).
+        method = "memoire";
+        confidence = "high";
+        result.emetteur_nom = result.emetteur_nom || rx.emetteur_nom;
+        result.emetteur_ice = result.emetteur_ice || rx.emetteur_ice;
+        result.sens_facture = "fournisseur";
       }
     }
 
@@ -805,7 +1017,7 @@ export const ocrFacture = createServerFn({ method: "POST" })
           designation: "Prestation (à préciser)",
           quantite: 1,
           prix_unitaire: result.montant_ht,
-          taux_tva: 20,
+          taux_tva: result.taux_tva ?? 20,
         },
       ];
     }
@@ -906,17 +1118,55 @@ export const ocrFacture = createServerFn({ method: "POST" })
       emetteur: result.emetteur_nom,
       ttc: result.montant_ttc,
     });
+    // ── Logging usage (best-effort) : facture via mémoire / IA / regex ────────
+    // Module = sens détecté (client/fournisseur), à défaut l'indice d'appel.
+    const factureModule =
+      result.sens_facture === "client" ? "facture_client"
+      : result.sens_facture === "fournisseur" ? "facture_fournisseur"
+      : data.sens_hint === "client" ? "facture_client" : "facture_fournisseur";
+    await logUsage(supabase, {
+      dossier_id: data.dossier_id,
+      sens: "facture",
+      method: skipLLM ? "memoire" : method === "ai" ? "llm" : "regex",
+      skip_llm: skipLLM,
+      cout_estime: estimerCoutIA("facture"),
+      module: factureModule,
+      phase: "ocr",
+      libelle: result.emetteur_nom ?? null,
+    });
+
+    // ── Quota : un document servi par le cache ou la mémoire n'a coûté AUCUN
+    // appel IA → on lui rend son crédit. Sur un rejeu (`replay`), le crédit est
+    // celui du scan d'origine, qui lui a bien payé l'IA : on n'y touche pas.
+    let quotaRendu = false;
+    if (skipLLM && !decisionQuota.replay && !decisionQuota.degraded) {
+      quotaRendu = await libererScan(scanQuota);
+    }
+
     return {
       result: {
         ...result,
         confidence,
         method,
+        // L'UI peut ainsi dire « scan non décompté » sur un cache/mémoire.
+        quota_non_decompte: quotaRendu || Boolean(decisionQuota.replay),
         client_id,
         client_action,
         client_trouve,
         fournisseur_id,
         fournisseur_action,
         fournisseur_trouve,
+        // POC mémoire : métadonnées de rappel (null si aucun rappel).
+        memoire: memoire
+          ? {
+              par_ice: memoire.par_ice,
+              occurrences: memoire.occurrences,
+              compte_pcm: memoire.compte_pcm,
+              categorie_pcm: memoire.categorie_pcm,
+              taux_tva: memoire.taux_tva,
+              llm_court_circuite: skipLLM,
+            }
+          : null,
       },
     };
   });
@@ -934,14 +1184,21 @@ export const marquerPayee = createServerFn({ method: "POST" })
     const supabase = getSupabase();
     const { data: f } = await supabase
       .from("factures")
-      .select("dossier_id,montant_ttc,numero,statut")
+      .select("dossier_id,montant_ttc,montant_paye,numero,statut")
       .eq("id", data.facture_id)
       .single();
     if (!f) throw new Error("Facture introuvable");
-    await supabase
-      .from("factures")
-      .update({ statut_paiement: "payee", date_paiement: data.date_paiement })
-      .eq("id", data.facture_id);
+    // Le règlement passe par un paiement `manuel` couvrant le reste dû ; le trigger
+    // recalcule montant_paye/montant_restant/statut. Le montant du paiement = solde
+    // restant (TTC − déjà payé), pour ne pas sur-payer une facture partiellement réglée.
+    const dejaPaye = Number((f as any).montant_paye ?? 0);
+    const solde = Math.max(0, Math.round((Number(f.montant_ttc) - dejaPaye) * 100) / 100);
+    if (solde > 0) {
+      await enregistrerPaiement(supabase, {
+        dossierId: f.dossier_id, table: "factures", factureId: data.facture_id,
+        montant: solde, date: data.date_paiement, origine: "manuel",
+      });
+    }
     const ref = f.numero ?? data.facture_id;
     await supabase.from("ecritures_comptables").insert([
       { dossier_id: f.dossier_id, journal_code: "BQ", compte_numero: "5141", date_ecriture: data.date_paiement, libelle: `Encaissement ${ref}`, debit: Number(f.montant_ttc), credit: 0, reference_piece: ref, facture_id: data.facture_id, valide: true },
@@ -1270,42 +1527,68 @@ export const ocrReleve = createServerFn({ method: "POST" })
       image_base64: z.string(),
       mime_type: z.string().default("image/jpeg"),
       solde_initial_override: z.number().optional(),
+      dossier_id: z.string().uuid().nullish(),  // pour attribuer l'usage IA (analytics)
+      // Clé au niveau DOCUMENT : un relevé multi-pages appelle ocrReleve une fois
+      // par page. Cette clé regroupe les pages pour ne décompter QU'UN scan
+      // (le quota se vend en documents/mois, pas en pages).
+      scan_key: z.string().nullish(),
     }).parse(input)
   )
   .handler(async ({ data }) => {
+    if (data.dossier_id) {
+      await guardScan({
+        dossier_id: data.dossier_id,
+        kind: "releve",
+        contenu: data.scan_key || data.image_base64,
+      });
+    }
+
     const { buildReleveImagePrompt } = await import("./factures.utils");
     const prompt = buildReleveImagePrompt();
     console.log("[OCR-RELEVE] mime:", data.mime_type, "| base64 KB:", Math.round(data.image_base64.length * 0.75 / 1024), data.solde_initial_override != null ? `| solde_override: ${data.solde_initial_override}` : "");
 
+    // ── CACHE DOCUMENT : même relevé rescanné → réutiliser l'extraction (skip OCR LLM).
+    // Clé = octets image + solde initial reporté (qui change le calcul multi-pages).
+    const releveHash = "r:" + createHash("sha256")
+      .update(data.image_base64).update("|" + (data.solde_initial_override ?? "")).digest("hex");
+    if (data.dossier_id) {
+      const cached = await lookupOcrCache(getSupabase(), data.dossier_id, releveHash);
+      if (cached?.txs) {
+        console.log(`[OCR-RELEVE] Cache document (hash ${releveHash.slice(0, 10)}…) → OCR LLM court-circuité (${cached.txs.length} tx)`);
+        await logUsage(getSupabase(), {
+          dossier_id: data.dossier_id, sens: "banque", method: "regex", skip_llm: true,
+          cout_estime: estimerCoutIA("releve_ocr"), module: "releve", phase: "ocr",
+          libelle: `OCR relevé (cache) — ${cached.txs.length} tx`,
+        });
+        return { txs: cached.txs, info: cached.info };
+      }
+    }
+
     const RELEVE_MAX_TOKENS = 8192;
     let parsed: any;
+    // Traçage usage IA (analytics) : quelle voie OCR + le LLM de relecture a-t-il été
+    // utilisé (llm) ou évité grâce au regex/delta de solde (regex → économie) ?
+    let ocrUsedLlm = false;      // relecture mistral-large réellement appelée
+    let ocrAiCalled = false;     // un appel OCR IA a bien eu lieu (Mistral OCR ou Groq vision)
 
     // ── OPTION PRINCIPALE : Mistral OCR (mistral-ocr-latest) — rapide & direct ─
     // Appelé EN PREMIER. S'il renvoie des transactions, on s'arrête là. Sinon
     // (clé absente, échec réseau, 0 transaction) → secours Groq vision.
     if (process.env.MISTRAL_API_KEY) {
       try {
-        const { parseReleveMarkdown } = await import("./factures.utils");
         const markdown = await callMistralOcr(data.image_base64, data.mime_type);
-        const md = parseReleveMarkdown(markdown);
-        const ctl = md.controle;
-        if (!ctl.controlable) {
-          console.warn(`[RELEVE CONTROLE] ⚠ contrôle impossible (solde initial/final illisible) — ${md.txs.length} tx`);
-        } else if (ctl.coherent) {
-          console.log(`[RELEVE CONTROLE] ✓ cohérent (${ctl.sens}) | calculé:${ctl.solde_final_calcule} = scanné:${ctl.solde_final_scanne} | écart:${ctl.ecart} MAD`);
-        } else {
-          console.warn(`[RELEVE CONTROLE] ✗ ÉCART ${ctl.ecart} MAD (${ctl.sens}) | calculé:${ctl.solde_final_calcule} ≠ scanné:${ctl.solde_final_scanne} | ${md.txs.length} tx — ligne(s) probablement manquante(s)/mal lue(s)`);
-        }
-        if (md.txs.length > 0) {
+        ocrAiCalled = true;   // appel Mistral OCR effectué
+        // Extraction LÉGÈRE : regex pour l'en-tête + 1 appel LLM si des montants
+        // manquent (robuste aux changements de format de mistral-ocr). Rapide.
+        const { info: mdInfo, txs: mdTxs, usedLlm } = await extractReleveLean(markdown);
+        ocrUsedLlm = usedLlm;
+        if (mdTxs.length > 0) {
           parsed = {
-            banque: md.banque,
-            rib: md.rib,
-            solde_initial: md.solde_initial,
-            solde_final: md.solde_final,
-            // Le sens débit/crédit vient déjà des colonnes du tableau Markdown :
-            // on le marque via `_side` pour que le pipeline le respecte sans
-            // re-deviner par mots-clés.
-            txs: md.txs.map((t) => ({
+            banque: mdInfo.banque,
+            rib: mdInfo.rib,
+            solde_initial: mdInfo.solde_initial,
+            solde_final: mdInfo.solde_final,
+            txs: mdTxs.map((t: any) => ({
               date_operation: t.date_operation,
               date_valeur: t.date_valeur,
               reference: t.reference,
@@ -1313,7 +1596,8 @@ export const ocrReleve = createServerFn({ method: "POST" })
               montant: t.montant_debit ?? t.montant_credit ?? null,
               montant_debit: t.montant_debit,
               montant_credit: t.montant_credit,
-              solde_courant: t.solde_courant,
+              solde_courant: t.solde_courant ?? null,
+              // Sens déjà déterminé (colonne regex ou LLM) → on le marque via `_side`.
               _side: t.montant_credit != null ? "credit" : t.montant_debit != null ? "debit" : undefined,
             })),
           };
@@ -1329,6 +1613,7 @@ export const ocrReleve = createServerFn({ method: "POST" })
     // ── SECOURS (uniquement si Mistral indisponible/échec) : Groq vision ──────
     if (!parsed) {
       const raw = await callAI(prompt, data.image_base64, data.mime_type, RELEVE_MAX_TOKENS);
+      ocrAiCalled = true; ocrUsedLlm = true;   // vision Groq = appel LLM complet
 
       try {
         const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -1506,6 +1791,28 @@ export const ocrReleve = createServerFn({ method: "POST" })
       `| écart: ${ecartOcr.toFixed(2)} MAD${ecartOcr > 5 ? " ⚠ ÉCART" : " ✓ OK"}`
     );
 
+    // ── Logging usage IA (best-effort) : OCR du relevé ────────────────────────
+    // Une ligne PAR scan de relevé. skip_llm = le LLM de relecture a été ÉVITÉ
+    // (regex/delta de solde ont suffi). Loggé même si le dossier n'enregistre pas
+    // le document — c'est l'appel IA qui compte, pas la persistance.
+    if (ocrAiCalled) {
+      await logUsage(getSupabase(), {
+        dossier_id: data.dossier_id ?? null,
+        sens: "banque",
+        method: ocrUsedLlm ? "llm" : "regex",
+        skip_llm: !ocrUsedLlm,
+        cout_estime: estimerCoutIA("releve_ocr"),
+        module: "releve",
+        phase: "ocr",
+        libelle: `OCR relevé ${info.banque || ""} — ${txs.length} tx`.trim(),
+      });
+    }
+
+    // Mémorise l'extraction → prochain scan identique = cache-hit (OCR LLM évité).
+    if (data.dossier_id && txs.length > 0) {
+      await storeOcrCache(getSupabase(), data.dossier_id, releveHash, { txs, info });
+    }
+
     return { txs, info };
   });
 
@@ -1636,9 +1943,8 @@ export const extraireTransactionsVision = createServerFn({ method: "POST" })
     // est absent, échoue, ou ne renvoie aucune transaction.
     if (process.env.MISTRAL_API_KEY) {
       try {
-        const { parseReleveMarkdown } = await import("./factures.utils");
-        // OCR → on accumule le Markdown COMPLET (toutes pages) pour permettre la
-        // réconciliation par équilibre sur l'ensemble du relevé.
+        // OCR → on accumule le Markdown COMPLET (toutes pages) pour permettre
+        // l'extraction sur l'ensemble du relevé.
         let fullMarkdown = "";
         if (data.pdf_base64) {
           fullMarkdown = await callMistralOcr(data.pdf_base64, "application/pdf");
@@ -1651,89 +1957,9 @@ export const extraireTransactionsVision = createServerFn({ method: "POST" })
         // le parsing local — pour vérifier ce que le modèle a réellement lu.
         console.log(`[MISTRAL OCR] ===== MARKDOWN BRUT COMPLET (${fullMarkdown.length} chars) =====\n${fullMarkdown}\n[MISTRAL OCR] ===== FIN MARKDOWN BRUT =====`);
 
-        const md = parseReleveMarkdown(fullMarkdown);
-        let mdTxs: any[] = md.txs;
-        const mdInfo = { banque: md.banque, rib: md.rib, solde_initial: md.solde_initial, solde_final: md.solde_final };
-
-        // Contrôle de cohérence reconstruit ligne par ligne (cf. controleSoldeReleve) :
-        // confronte le solde final RECONSTRUIT au « SOLDE A REPORTER » scanné. Un écart
-        // > tolérance ⇒ ligne(s) manquante(s) ou mal lue(s) par l'OCR.
-        const ctl = md.controle;
-        if (!ctl.controlable) {
-          console.warn(`[RELEVE CONTROLE] ⚠ contrôle impossible (solde initial ${ctl.solde_initial} / final ${ctl.solde_final_scanne} illisible) — ${mdTxs.length} tx`);
-        } else if (ctl.coherent) {
-          console.log(`[RELEVE CONTROLE] ✓ cohérent (${ctl.sens}) | SI:${ctl.solde_initial} +crédits:${ctl.total_credit} −débits:${ctl.total_debit} ⇒ calculé:${ctl.solde_final_calcule} = scanné:${ctl.solde_final_scanne} | écart:${ctl.ecart} MAD`);
-        } else {
-          console.warn(`[RELEVE CONTROLE] ✗ ÉCART ${ctl.ecart} MAD (${ctl.sens}) | SI:${ctl.solde_initial} +crédits:${ctl.total_credit} −débits:${ctl.total_debit} ⇒ calculé:${ctl.solde_final_calcule} ≠ scanné:${ctl.solde_final_scanne} | ${mdTxs.length} tx — ligne(s) probablement manquante(s)/mal lue(s) → réconciliation LLM`);
-        }
-
-        // ── CONTRÔLE D'ÉQUILIBRE + extraction LLM de secours ────────────────────
-        // Le parsing regex du tableau Markdown est fragile (cellules fusionnées,
-        // colonnes irrégulières) et peut oublier une transaction. On vérifie
-        // l'équilibre solde_initial + crédits − débits = solde_final :
-        //   • équilibré → on garde l'extraction regex (rapide, pas d'appel LLM) ;
-        //   • déséquilibré OU soldes illisibles → on relit le Markdown via
-        //     mistral-large (bien plus robuste) et on garde le meilleur résultat.
-        const haveSoldes = mdInfo.solde_initial > 0 && mdInfo.solde_final > 0;
-        const TOL = 1;                 // tolérance d'arrondi (MAD)
-        const MAX_RECONCILE = 5;       // garde-fou anti-boucle infinie
-        let ecart0 = haveSoldes ? releveEcart(mdInfo.solde_initial, mdInfo.solde_final, mdTxs) : Infinity;
-        console.log(`[RELEVE BALANCE] regex: ${mdTxs.length} tx | SI:${mdInfo.solde_initial} SF:${mdInfo.solde_final} | écart:${haveSoldes ? ecart0 + " MAD" : "soldes illisibles"}`);
-
-        if (haveSoldes && ecart0 <= TOL) {
-          console.log(`[RELEVE BALANCE] ✓ équilibré (écart ${ecart0} MAD, ${mdTxs.length} tx) — pas d'appel LLM`);
-        } else {
-          // ── BOUCLE DE RÉCONCILIATION ──────────────────────────────────────────
-          // On relance mistral-large TANT QUE solde calculé ≠ solde final scanné,
-          // en lui renvoyant à chaque tour son résultat précédent + l'écart restant,
-          // jusqu'à l'équilibre (écart ≤ tolérance) ou MAX_RECONCILE tentatives.
-          // On conserve toujours le meilleur résultat obtenu.
-          let best = mdTxs;
-          let bestEcart = ecart0;
-          let lastEcart = ecart0;       // écart de l'itération précédente (détection de stagnation)
-          let feedback: { prevTxs: any[]; prevEcart: number; attempt: number } | undefined;
-
-          for (let attempt = 1; attempt <= MAX_RECONCILE; attempt++) {
-            console.warn(`[RELEVE BALANCE] tentative ${attempt}/${MAX_RECONCILE} — ${haveSoldes ? `écart ${bestEcart} MAD` : "soldes inconnus"} → extraction LLM (mistral-large)`);
-            const llm = await reconcileReleveTxs(fullMarkdown, mdInfo.solde_initial, mdInfo.solde_final, feedback);
-            if (!llm || llm.length === 0) {
-              console.warn(`[RELEVE BALANCE] tentative ${attempt} : aucune transaction renvoyée — arrêt`);
-              break;
-            }
-
-            if (!haveSoldes) {
-              // Sans solde de contrôle, impossible de boucler sur l'équilibre :
-              // on prend le résultat LLM s'il est au moins aussi complet.
-              if (llm.length >= best.length) best = llm;
-              console.log(`[RELEVE BALANCE] ✓ LLM retenu (sans contrôle solde) : ${mdTxs.length}→${best.length} tx`);
-              break;
-            }
-
-            const ecartN = releveEcart(mdInfo.solde_initial, mdInfo.solde_final, llm);
-            console.log(`[RELEVE BALANCE] tentative ${attempt} : ${llm.length} tx, écart ${ecartN} MAD`);
-            if (ecartN < bestEcart) { best = llm; bestEcart = ecartN; }
-            if (ecartN <= TOL) {
-              console.log(`[RELEVE BALANCE] ✓ équilibre atteint à la tentative ${attempt} (écart ${ecartN} MAD, ${llm.length} tx)`);
-              break;
-            }
-            // Arrêt anticipé : si cette tentative n'améliore pas l'écart précédent,
-            // c'est que l'équilibre n'est pas atteignable à partir du texte réel
-            // (transaction réellement absente de l'OCR) → inutile d'insister, on
-            // évite d'inciter le modèle à inventer. L'écart sera signalé.
-            if (ecartN >= lastEcart) {
-              console.warn(`[RELEVE BALANCE] tentative ${attempt} sans progrès (écart ${ecartN} ≥ ${lastEcart}) — arrêt, écart probablement dû à une transaction absente de l'OCR`);
-              break;
-            }
-            lastEcart = ecartN;
-            // Pas encore équilibré mais en progrès → on renvoie le résultat courant pour correction.
-            feedback = { prevTxs: llm, prevEcart: ecartN, attempt };
-          }
-
-          if (haveSoldes && bestEcart > TOL) {
-            console.warn(`[RELEVE BALANCE] ⚠ équilibre NON atteint après ${MAX_RECONCILE} tentatives — meilleur écart ${bestEcart} MAD (${best.length} tx). Vérification manuelle requise.`);
-          }
-          mdTxs = best;
-        }
+        // Extraction LÉGÈRE : regex pour l'en-tête + 1 appel LLM si des montants
+        // manquent (robuste aux changements de format de mistral-ocr). Rapide.
+        const { info: mdInfo, txs: mdTxs } = await extractReleveLean(fullMarkdown);
 
         if (mdTxs.length > 0) {
           console.log(`[MISTRAL OCR] ✓ ${mdTxs.length} transactions (extraireTransactionsVision) | banque:${mdInfo.banque} SI:${mdInfo.solde_initial} SF:${mdInfo.solde_final}`);
@@ -1837,6 +2063,8 @@ Si la page ne contient aucune transaction, retourne [].`;
 export const analyserReleveIA = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z.object({
+      // Optionnel : requis pour activer la MÉMOIRE BANQUE (scoped par dossier).
+      dossier_id: z.string().uuid().optional(),
       transactions_brutes: z.array(z.any()),
       factures_client: z.array(z.any()),
       factures_fourn: z.array(z.any()),
@@ -1851,6 +2079,30 @@ export const analyserReleveIA = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const nbTx = data.transactions_brutes.length;
 
+    // ── CACHE DOCUMENT : même relevé + même contexte (factures/justificatifs) déjà
+    // analysé → réutiliser les analyses (skip TOUS les appels LLM de matching). La clé
+    // inclut les transactions ET l'empreinte du contexte : si tu enregistres une
+    // facture, le contexte change → cache manqué (ré-analyse), ce qui est correct.
+    const analyseHash = "a:" + createHash("sha256").update(JSON.stringify({
+      t: data.transactions_brutes.map((x: any) => [x.date_operation, x.libelle, x.montant_debit, x.montant_credit, x.reference]),
+      fc: (data.factures_client ?? []).map((f: any) => [f.id, f.montant_ttc]),
+      ff: (data.factures_fourn ?? []).map((f: any) => [f.id, f.montant_ttc]),
+      ju: (data.justificatifs ?? []).map((j: any) => [j.id, j.montant]),
+      r: data.remarques ?? "",
+    })).digest("hex");
+    if (data.dossier_id) {
+      const cached = await lookupOcrCache(getSupabase(), data.dossier_id, analyseHash);
+      if (cached?.analyses && Array.isArray(cached.analyses) && cached.analyses.length === nbTx) {
+        console.log(`[RELEVE AI] Cache document (hash ${analyseHash.slice(0, 10)}…) → analyse LLM court-circuitée (${nbTx} tx)`);
+        await logUsageBatch(getSupabase(), cached.analyses.map((_: any, idx: number) => ({
+          dossier_id: data.dossier_id!, sens: "banque" as const, method: "memoire" as const, skip_llm: true,
+          cout_estime: estimerCoutIA("banque"), module: "releve" as const, phase: "analyse" as const,
+          libelle: data.transactions_brutes[idx]?.libelle ?? null,
+        })));
+        return { analyses: cached.analyses };
+      }
+    }
+
     // Pré-matching déterministe (avant Groq) — extrait le tiers du libellé,
     // compare nom + montant ±2 MAD sur factures ET justificatifs.
     // Groq utilise ces suggestions comme NIVEAU 0 (priorité absolue).
@@ -1861,7 +2113,54 @@ export const analyserReleveIA = createServerFn({ method: "POST" })
       data.justificatifs,
     );
 
-    const txIndexed = data.transactions_brutes.map((tx: any, idx: number) => ({
+    // ── MÉMOIRE BANQUE (point 3) : rappel par transaction AVANT le LLM ─────────
+    // Pour chaque transaction, on interroge tiers_memoire (sens='banque') par
+    // pattern (libellé normalisé) exact ou similaire. Si occurrences >= 2 (tiers
+    // déjà validé au moins 2 fois → confiance ≥ 0.66), on AUTO-APPLIQUE sa
+    // classification apprise (compte/catégorie/type_tiers) + pré-lettrage
+    // déterministe, et on COURT-CIRCUITE l'appel IA (skipLLM) pour cette ligne.
+    const memHits = new Array<Awaited<ReturnType<typeof rappelerMemoire>>>(nbTx).fill(null);
+    const skipIdx = new Set<number>();
+    if (data.dossier_id) {
+      const sb = getSupabase();
+      await Promise.all(
+        data.transactions_brutes.map(async (tx: any, idx: number) => {
+          const libelle = tx.libelle ?? tx.nature_operation ?? "";
+          if (!libelle) return;
+          const hit = await rappelerMemoire(sb, {
+            dossier_id: data.dossier_id!, sens: "banque", nom: libelle,
+          });
+          if (!hit) return;
+          memHits[idx] = hit;
+          // `occurrences` = validations ANTÉRIEURES du tiers. Cette transaction
+          // est donc la (occurrences+1)-ième occurrence. On court-circuite le LLM
+          // dès la 2e occurrence au total (⇔ au moins 1 validation antérieure).
+          const occurrencesTotales = hit.occurrences + 1;
+          if (occurrencesTotales >= 2) {
+            skipIdx.add(idx);
+            const pm = preMatches[idx];
+            console.log(
+              `[RELEVE AI] MEMOIRE BANQUE HIT tx#${idx} « ${String(libelle).slice(0, 40)} » ` +
+              `→ ${hit.match_kind} (sim ${hit.similarity.toFixed(2)}, ${hit.occurrences} usages, ` +
+              `conf ${hit.confiance.toFixed(2)}) | ${hit.categorie_pcm ?? "?"}/${hit.compte_pcm ?? "?"}` +
+              `/${hit.type_tiers ?? "?"} | LLM SKIPPED` +
+              (pm?.facture_id || pm?.justificatif_id
+                ? ` | MATCH LETTRAGE ${pm.facture_num ?? pm.facture_id ?? pm.justificatif_id} (conf ${pm.confiance})`
+                : ""),
+            );
+          }
+        }),
+      );
+      console.log(
+        `[RELEVE AI] Mémoire banque : ${memHits.filter(Boolean).length}/${nbTx} rappels, ` +
+        `${skipIdx.size} LLM court-circuité(s)`,
+      );
+    }
+
+    const txIndexed = data.transactions_brutes
+      .map((tx: any, idx: number) => ({ tx, idx }))
+      .filter(({ idx }) => !skipIdx.has(idx))     // les tx mémorisées ne partent PAS au LLM
+      .map(({ tx, idx }) => ({
       _idx: idx,
       date: tx.date_operation,
       libelle: tx.libelle ?? tx.nature_operation ?? "",
@@ -1900,7 +2199,7 @@ ${JSON.stringify(
     montant_restant: Number(f.montant_restant || f.montant_ttc),
     mode_reglement: f.mode_reglement,
     echeance: f.date_echeance,
-    type: f.type_facture,
+    type: f.type,
   }))
 )}
 
@@ -1964,9 +2263,12 @@ ALGORITHME DE MATCHING (ordre strict)
   Tolérer abréviations/initiales → +35 points si identifié, 0 sinon.
   Note: IAM = MAROC TELECOM = ITISSALAT ; ORANGE = MEDITEL ; INWI = WANA
 
-  CRITÈRE B — MONTANT :
+  CRITÈRE B — MONTANT (⛔ OBLIGATOIRE, CONDITION ÉLIMINATOIRE) :
   montant_ttc ±2 MAD → +30 pts | montant_restant ±2 MAD → +30 pts
-  Si différence > 2 MAD → 0 pts (pas de match).
+  ⛔ Si le montant de la transaction ne correspond NI au montant_ttc NI au montant_restant
+  à ±2 MAD près → AUCUN LIEN POSSIBLE : facture_id = null, quel que soit le nom. Le nom
+  seul (sans montant qui colle) ne justifie JAMAIS un lien. Le montant identique est la
+  condition de base de tout rapprochement.
 
   CRITÈRE C — MODE RÈGLEMENT:
   Cohérent → +20 pts | Incohérent → -15 pts | Absent → 0 pt
@@ -1981,8 +2283,14 @@ ALGORITHME DE MATCHING (ordre strict)
   UNICITÉ ABSOLUE: Chaque facture_id une seule fois dans tout le JSON.
 
 [NIVEAU 2b] RAPPROCHEMENT JUSTIFICATIF (si pas de facture fournisseur correspondante):
-  Si un JUSTIFICATIF correspond au débit (tiers + montant ±2 MAD), retourner justificatif_id et laisser facture_id à null.
-  Ne pas retourner les deux en même temps.
+  On lie un JUSTIFICATIF à un débit UNIQUEMENT si LES DEUX conditions sont réunies :
+    (1) montant transaction = montant_ttc du justificatif à ±2 MAD (OBLIGATOIRE), ET
+    (2) nom du tiers cohérent (le nom du justificatif apparaît, même abrégé, dans le libellé).
+  ⛔ INTERDIT de lier sur la seule SIMILARITÉ DE CATÉGORIE : un reçu de restaurant NE se lie
+  PAS à un paiement de restaurant si le MONTANT diffère ou si le NOM du restaurant diffère.
+  « tous les deux = restaurant » n'est PAS un critère de lien. Sans montant identique ET nom
+  cohérent → justificatif_id = null, necessite_remarque = true. Mieux vaut AUCUN lien qu'un
+  FAUX lien. Ne jamais retourner facture_id et justificatif_id en même temps.
 
 [NIVEAU 3] CATÉGORISATION PAR NATURE (si pas de match facture):
 
@@ -2047,15 +2355,28 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
     // (prompt + sortie réservée) reste sous TPM_BUDGET tokens.
     const estimateTokens = (s: string) => Math.ceil(s.length / 4);
     const headerTokens = estimateTokens(buildPrompt([])) + 50; // prompt fixe (algo + contexte), hors transactions
-    const TPM_BUDGET = 11000;  // marge sous la limite 12000
+    // Mistral a des limites TPM bien plus hautes que Groq → gros lots possibles
+    // = MOINS de lots = moins d'appels enchaînés = plus rapide. Côté Groq de
+    // secours, gpt-oss-120b plafonne à 8000 TPM (tier gratuit) — bien moins que
+    // les 12000 de llama-3.3-70b : le budget des lots baisse en conséquence.
+    const useMistralChat = !!process.env.MISTRAL_API_KEY;
+    const TPM_BUDGET = useMistralChat ? 60000 : 7500;
     const OUT_PER_TX = 200;    // tokens de sortie réservés par transaction
+    // LATENCE : le temps de génération est ~proportionnel aux tokens de SORTIE. Un gros
+    // lot génère son JSON en SÉRIE ; plusieurs PETITS lots le génèrent EN PARALLÈLE.
+    // → on plafonne à ~12 tx/lot (Mistral) et on monte la concurrence : latence divisée.
+    const MAX_TX_PER_BATCH = useMistralChat ? 12 : 40;
 
     const batches: any[][] = [];
     let cur: any[] = [];
     const fits = (arr: any[]) => {
+      if (arr.length > MAX_TX_PER_BATCH) return false;
       const inTok = headerTokens + estimateTokens(JSON.stringify(arr));
-      const outTok = arr.length * OUT_PER_TX + 400;
-      return inTok + outTok <= TPM_BUDGET;
+      // Réserve fixe : sur Groq, gpt-oss-120b brûle ~1000 tokens de raisonnement
+      // avant d'écrire le JSON — sans cette marge la réponse est tronquée.
+      const outTok = arr.length * OUT_PER_TX + (useMistralChat ? 400 : 1200);
+      // Plafonné aussi par la limite de SORTIE du modèle (~8192 tokens/réponse).
+      return outTok <= 8000 && inTok + outTok <= TPM_BUDGET;
     };
     for (const tx of txIndexed) {
       if (cur.length && !fits([...cur, tx])) { batches.push(cur); cur = []; }
@@ -2066,11 +2387,14 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
 
     // Catégorisation + matching : Mistral (mistral-large-latest) en priorité,
     // repli automatique sur Groq (callAI) si MISTRAL_API_KEY absente ou en échec.
-    const useMistralChat = !!process.env.MISTRAL_API_KEY;
     const callCategorize = async (p: string, maxOut: number): Promise<string> => {
       if (useMistralChat) {
         try {
-          return await callMistralChat(p, maxOut);
+          // mistral-LARGE : le RAPPROCHEMENT facture/justificatif exige du raisonnement
+          // (comparer noms + montants, scoring, unicité). mistral-small bâclait → liens
+          // ratés OU faux (lie sur la catégorie sans vérifier montant/nom). La vitesse
+          // vient des petits lots PARALLÈLES, pas d'un modèle plus faible.
+          return await callMistralChat(p, maxOut, "mistral-large-latest");
         } catch (e: any) {
           console.warn("[RELEVE AI] Mistral chat échoué — fallback Groq:", e?.message ?? e);
         }
@@ -2081,29 +2405,39 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
     // FIX 2 : Reconstruction du tableau par _idx réel — fusion de tous les lots.
     // callAI (Groq) gère proxy SSL et undici fallback. Un lot en échec laisse
     // ses transactions prendre l'analyse par défaut plus bas.
-    const analyseByIdx = new Map<number, any>();
-    for (let b = 0; b < batches.length; b++) {
-      const batch = batches[b];
+    // Traite un lot (appel + parse) → renvoie ses analyses ([] si échec/JSON KO).
+    const runBatch = async (batch: any[], b: number): Promise<any[]> => {
       const maxOut = Math.min(8000, batch.length * OUT_PER_TX + 400);
       let content: string;
       try {
         content = await callCategorize(buildPrompt(batch), maxOut);
       } catch (e: any) {
         console.warn(`[RELEVE AI] lot ${b + 1}/${batches.length} (${batch.length} tx) — échec appel:`, e?.message ?? e);
-        continue;
+        return [];
       }
-      let parsed: { analyses: any[] };
       try {
-        parsed = JSON.parse(content) as { analyses: any[] };
+        return (JSON.parse(content) as { analyses: any[] }).analyses ?? [];
       } catch (parseErr) {
         console.warn(`[RELEVE AI] lot ${b + 1}/${batches.length} — JSON invalide:`, String(parseErr).slice(0, 120));
-        continue;
+        return [];
       }
-      for (const a of parsed.analyses ?? []) {
-        // Groq retourne _idx ; fallback sur i pour compatibilité ancienne version
-        const idx = a._idx ?? a.i;
-        if (typeof idx === "number" && idx >= 0 && idx < nbTx) {
-          analyseByIdx.set(idx, a);
+    };
+
+    // Lots exécutés EN PARALLÈLE (concurrence bornée) — les API Mistral/Groq
+    // acceptent des requêtes concurrentes : la latence passe de N×appel à ~1×appel
+    // par vague de CONCURRENCY. C'était le principal goulot (lots enchaînés).
+    const analyseByIdx = new Map<number, any>();
+    // Concurrence élevée sur Mistral (limites généreuses) → tous les petits lots
+    // partent quasi ensemble. Groq (TPM serré) reste prudent.
+    const CONCURRENCY = useMistralChat ? 8 : 2;
+    for (let start = 0; start < batches.length; start += CONCURRENCY) {
+      const wave = batches.slice(start, start + CONCURRENCY);
+      const results = await Promise.all(wave.map((batch, k) => runBatch(batch, start + k)));
+      for (const analyses of results) {
+        for (const a of analyses) {
+          // Groq/Mistral retournent _idx ; fallback sur i pour compat ancienne version.
+          const idx = a._idx ?? a.i;
+          if (typeof idx === "number" && idx >= 0 && idx < nbTx) analyseByIdx.set(idx, a);
         }
       }
     }
@@ -2132,8 +2466,44 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
       };
     };
 
+    // Analyse dérivée de la MÉMOIRE BANQUE (pas d'appel IA pour cette ligne).
+    // On s'appuie sur la classif apprise + le pré-lettrage déterministe (montant
+    // + nom tiers) déjà calculé dans preMatches.
+    const analyseMemoire = (idx: number): any => {
+      const hit = memHits[idx]!;
+      const tx = data.transactions_brutes[idx];
+      const montant = (tx?.montant_debit ?? 0) || (tx?.montant_credit ?? 0);
+      const isCredit = (tx?.montant_credit ?? 0) > 0;
+      const taux = hit.taux_tva != null ? Number(hit.taux_tva) : 0;
+      const ht = taux > 0 && montant > 0 ? Math.round((montant / (1 + taux / 100)) * 100) / 100 : montant;
+      const tva = taux > 0 && montant > 0 ? Math.round((montant - ht) * 100) / 100 : 0;
+      const pm = preMatches[idx];
+      const categorie = hit.categorie_pcm
+        ?? (isCredit ? "encaissement_client" : "paiement_fournisseur");
+      const code_pcm = hit.compte_pcm ?? (isCredit ? "3421" : "4411");
+      return {
+        _idx: idx,
+        categorie,
+        code_pcm,
+        type_tiers: hit.type_tiers ?? null,
+        tiers_nom: null,
+        facture_num: pm?.facture_num ?? null,
+        facture_id: pm?.facture_id ?? null,
+        justificatif_id: pm?.justificatif_id ?? null,
+        montant_ht: ht,
+        montant_tva: tva,
+        taux_tva: taux,
+        confiance: Math.max(90, Math.round(hit.confiance * 100)),
+        etape_rapprochement: pm?.facture_id || pm?.justificatif_id ? "memoire+lettrage" : "memoire_banque",
+        source: "memoire",
+        alerte: null,
+        necessite_remarque: false,
+        message_pour_comptable: `Reconnu par la mémoire banque (${hit.occurrences} usages, confiance ${hit.confiance.toFixed(2)}).`,
+      };
+    };
+
     const analyseFinale: any[] = Array.from({ length: nbTx }, (_, idx) =>
-      analyseByIdx.get(idx) ?? analyseDefaut(idx)
+      skipIdx.has(idx) ? analyseMemoire(idx) : (analyseByIdx.get(idx) ?? analyseDefaut(idx))
     );
 
     // Passe 0 : forcer les pré-matches serveur si Groq les a ignorés
@@ -2158,17 +2528,90 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
       }
     }
 
+    // Passe 0.5 : VALIDATION SERVEUR des liens — GARDE-FOU anti-faux-lien.
+    // Un lien facture/justificatif proposé par le LLM n'est VALIDE que si le montant
+    // du document = montant de la transaction (±2 MAD). Le montant identique est la
+    // condition sine qua non d'un rapprochement fiable. Sinon on ANNULE le lien (le
+    // LLM a lié sur le nom/la catégorie sans vérifier le montant → faux lien).
+    // Les liens du PRÉ-MATCH serveur sont déjà validés (nom+montant) → on les garde.
+    const facMontantById = new Map<string, number>();
+    for (const f of (data.factures_fourn ?? [])) facMontantById.set(f.id, Number(f.montant_restant ?? f.montant_ttc ?? 0));
+    for (const f of (data.factures_client ?? [])) facMontantById.set(f.id, Number(f.montant_restant ?? f.montant_ttc ?? 0));
+    const jusMontantById = new Map<string, number>();
+    for (const j of (data.justificatifs ?? [])) jusMontantById.set(j.id, Number(j.montant_ttc ?? 0));
+    for (let idx = 0; idx < nbTx; idx++) {
+      const a = analyseFinale[idx];
+      if (!a.facture_id && !a.justificatif_id) continue;
+      const pm = preMatches[idx];
+      const estPreMatch = !!pm && ((pm.facture_id && pm.facture_id === a.facture_id) || (pm.justificatif_id && pm.justificatif_id === a.justificatif_id));
+      if (estPreMatch) continue; // pré-match déterministe = fiable
+      const tx = data.transactions_brutes[idx];
+      const montant = (tx?.montant_debit ?? 0) || (tx?.montant_credit ?? 0);
+      const linkMontant = a.facture_id ? facMontantById.get(a.facture_id) : jusMontantById.get(a.justificatif_id);
+      if (linkMontant === undefined || Math.abs(montant - linkMontant) > 2) {
+        console.warn(`[RELEVE AI] LIEN REJETÉ tx#${idx} : montant tx ${montant} ≠ document ${linkMontant ?? "introuvable"} (>2 MAD) — faux lien LLM annulé`);
+        a.facture_id = null; a.facture_num = null; a.justificatif_id = null;
+        a.necessite_remarque = true;
+        a.alerte = `Lien annulé automatiquement : le montant de la transaction (${montant}) ne correspond pas au document (${linkMontant ?? "?"}).`;
+      }
+    }
+
     // Post-traitement : overrides mots-clés + déduplication best-match-wins
     const withOverrides = applyKeywordOverrides(analyseFinale, data.transactions_brutes);
     const withDedup    = deduplicateAnalyses(withOverrides);
     for (let idx = 0; idx < nbTx; idx++) analyseFinale[idx] = withDedup[idx];
 
+    // Autorité finale de la MÉMOIRE BANQUE : la classif apprise (compte/catégorie/
+    // type_tiers/TVA) prime sur les overrides mots-clés pour les tx court-circuitées.
+    // Le pré-lettrage (facture/justificatif) reste celui retenu par la Passe 0.
+    for (const idx of skipIdx) {
+      const hit = memHits[idx]!;
+      const a = analyseFinale[idx];
+      if (hit.categorie_pcm) a.categorie = hit.categorie_pcm;
+      if (hit.compte_pcm) a.code_pcm = hit.compte_pcm;
+      if (hit.type_tiers) a.type_tiers = hit.type_tiers;
+      if (hit.taux_tva != null) a.taux_tva = Number(hit.taux_tva);
+      a.source = "memoire";
+      a.confiance = Math.max(a.confiance ?? 0, 90);
+      a.necessite_remarque = false;
+      if (a.facture_id || a.justificatif_id) {
+        console.log(
+          `[RELEVE AI] MATCH LETTRAGE tx#${idx} (mémoire) → ` +
+          `${a.facture_num ?? a.facture_id ?? a.justificatif_id} (conf ${a.confiance})`,
+        );
+      }
+    }
+
     const nbMatchees = analyseFinale.filter(
       (a) => a.facture_id !== null
     ).length;
     console.log(
-      `[RELEVE AI] Groq OK — ${analyseFinale.length}/${nbTx} analyses, ${nbMatchees} matchées`
+      `[RELEVE AI] OK — ${analyseFinale.length}/${nbTx} analyses, ${nbMatchees} matchées, ` +
+      `${skipIdx.size} via mémoire (LLM SKIPPED)`
     );
+
+    // ── Logging usage (best-effort, 1 seul insert groupé → rapide) ────────────
+    if (data.dossier_id) {
+      const coutTx = estimerCoutIA("banque");
+      await logUsageBatch(
+        getSupabase(),
+        analyseFinale.map((_a, idx) => ({
+          dossier_id: data.dossier_id!,
+          sens: "banque" as const,
+          method: skipIdx.has(idx) ? ("memoire" as const) : ("llm" as const),
+          skip_llm: skipIdx.has(idx),
+          cout_estime: coutTx,
+          module: "releve" as const,
+          phase: "analyse" as const,
+          libelle: data.transactions_brutes[idx]?.libelle ?? data.transactions_brutes[idx]?.nature_operation ?? null,
+        })),
+      );
+    }
+
+    // Mémorise l'analyse → prochain scan identique (même contexte) = cache-hit total.
+    if (data.dossier_id) {
+      await storeOcrCache(getSupabase(), data.dossier_id, analyseHash, { analyses: analyseFinale });
+    }
 
     return { analyses: analyseFinale };
   });
@@ -2195,6 +2638,7 @@ export const analyserTransactions = createServerFn({ method: "POST" })
     // Délègue à analyserReleveIA (même logique, prompt unique, sans doublon)
     return analyserReleveIA({
       data: {
+        dossier_id: data.dossier_id,
         transactions_brutes: data.transactions_brutes,
         factures_client: data.factures_client,
         factures_fourn: data.factures_fourn,

@@ -58,6 +58,36 @@ def test_classifier_hardcoded_cnss():
     print("[OK] classifier hardcoded CNSS ->", doc.compte_pcm, doc.date_document)
 
 
+def test_classifier_hardcoded_cnss_nom_complet():
+    """Le nom officiel complet doit aussi forcer le 6174 (charges sociales)."""
+    svc = DocumentClassifierService(FakeAliasRepo({}), FakeTiersRepo([]))
+    raw = RawExtraction(
+        nom_tiers="CAISSE NATIONALE DE SECURITE SOCIALE",
+        montant_ttc=Decimal("8000.00"),
+        dates_detectees=[DetectedDate(valeur=date(2026, 4, 30), role="emission")],
+    )
+    doc = svc.classify(raw)
+    assert doc.compte_pcm == "6174", doc
+    assert doc.categorie_pcm == "Charges Sociales", doc
+    assert doc.origine_mapping == MatchOrigin.HARDCODED, doc
+    print("[OK] classifier hardcoded CNSS (nom complet) ->", doc.compte_pcm)
+
+
+def test_classifier_cnca_not_cnss():
+    """Garde anti-faux-positif : la CAISSE NATIONALE DE CRÉDIT AGRICOLE (banque)
+    NE doit PAS être classée en charges sociales 6174."""
+    svc = DocumentClassifierService(FakeAliasRepo({}), FakeTiersRepo([]))
+    raw = RawExtraction(
+        nom_tiers="CAISSE NATIONALE DE CREDIT AGRICOLE",
+        montant_ttc=Decimal("1500.00"),
+        dates_detectees=[DetectedDate(valeur=date(2026, 4, 30), role="emission")],
+    )
+    doc = svc.classify(raw)
+    assert doc.compte_pcm != "6174", doc
+    assert doc.origine_mapping != MatchOrigin.HARDCODED, doc
+    print("[OK] classifier CNCA != CNSS ->", doc.compte_pcm or "non mappe")
+
+
 def test_classifier_fuzzy():
     tiers = [TiersRecord(tiers_id="T1", libelle="Société MARJANE HOLDING", compte_pcm="6111")]
     svc = DocumentClassifierService(FakeAliasRepo({}), FakeTiersRepo(tiers))
@@ -98,6 +128,8 @@ def test_partial_payments():
 
 if __name__ == "__main__":
     test_classifier_hardcoded_cnss()
+    test_classifier_hardcoded_cnss_nom_complet()
+    test_classifier_cnca_not_cnss()
     test_classifier_fuzzy()
     test_partial_payments()
     print("\nTous les smoke-tests sont passes [OK]")
