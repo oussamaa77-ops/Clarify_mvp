@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { listPlans, activerPlanChoisi } from "@/server/billing.functions";
+import { notifierInscriptionEnAttente } from "@/server/approval.functions";
 import { logAudit } from "@/lib/audit";
 import { PlansTarifaires } from "@/components/PlansTarifaires";
 import type { Plan } from "@/lib/quota";
@@ -61,14 +62,59 @@ function AuthPage() {
     if (!loading && user && !submitting) navigate({ to: "/dossiers" });
   }, [user, loading, submitting, navigate]);
 
+  // Retour de /api/approve-user : l'admin vient de cliquer le lien d'approbation
+  // et atterrit ici. On le lit une seule fois puis on nettoie l'URL, sinon le
+  // message ressurgit à chaque rechargement.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const resultat = params.get("approbation");
+    if (!resultat) return;
+
+    if (resultat === "ok") toast.success("Compte approuvé. L'utilisateur peut désormais se connecter.");
+    else if (resultat === "invalide") toast.error("Lien d'approbation invalide ou expiré.");
+    else if (resultat === "introuvable") toast.error("Compte introuvable : il a peut-être été supprimé.");
+
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
-    const { error } = await supabase.auth.signInWithPassword({ email: loginEmail, password: loginPwd });
+    const { data: auth, error } = await supabase.auth.signInWithPassword({ email: loginEmail, password: loginPwd });
     if (error) {
       setSubmitting(false);
       toast.error(error.message);
       return;
+    }
+
+    // ── Barrage des comptes non approuvés ────────────────────────────────────
+    // ⚠️ Ce contrôle est du CONFORT, pas de la sécurité : à ce stade le JWT est
+    // déjà émis et resterait valide même si on n'affichait rien. Le vrai verrou
+    // est en base — get_user_cabinet() ne renvoie pas de cabinet à un compte non
+    // approuvé, donc la RLS ne lui laisse voir aucune ligne, y compris en
+    // appelant l'API directement. Ici on se contente de le déconnecter et de lui
+    // expliquer la situation, au lieu de le laisser sur une application vide.
+    // La lecture ci-dessous passe grâce à la branche `id = auth.uid()` de la
+    // policy view_own_profile.
+    const uid = auth.user?.id;
+    if (uid) {
+      // `as any` sur la table : les types Supabase générés ignorent encore
+      // is_approved (régénération bloquée par le proxy TLS, cf. types.ts).
+      const { data: prof } = await (supabase as any)
+        .from("profiles")
+        .select("is_approved")
+        .eq("id", uid)
+        .maybeSingle();
+
+      // `prof === null` (profil illisible/absent) ne bloque pas : ce serait
+      // verrouiller un compte sur une erreur transitoire, alors que la RLS
+      // protège déjà les données de toute façon.
+      if (prof && prof.is_approved === false) {
+        await supabase.auth.signOut();
+        setSubmitting(false);
+        toast.error("Compte en attente d'approbation par l'administrateur. Vous recevrez l'accès une fois votre inscription validée.");
+        return;
+      }
     }
 
     // Tracé d'audit : connexion réussie.
@@ -111,20 +157,36 @@ function AuthPage() {
   // Étape 2 : le plan choisi déclenche la création du compte.
   const choisirPlanEtCreerCompte = async (planCode: string) => {
     setPlanEnCours(planCode);
-    const { error } = await supabase.auth.signUp({
+    const { data: inscrit, error } = await supabase.auth.signUp({
       email, password: pwd,
       options: {
         emailRedirectTo: `${window.location.origin}/auth`,
         data: { nom, prenom, cabinet_nom: cabinetNom || "Mon Cabinet", plan_code: planCode },
       },
     });
-    setPlanEnCours(null);
 
     if (error) {
+      setPlanEnCours(null);
       toast.error(error.message);
       return;
     }
-    toast.success("Compte créé ! Confirmez votre email, puis connectez-vous : votre plan sera activé.");
+
+    // Prévient l'administrateur qu'un compte attend son approbation. On ne passe
+    // que l'userId : le serveur relit lui-même l'e-mail et le cabinet avec la clé
+    // de service, pour qu'on ne puisse pas lui dicter le contenu du message.
+    // Best-effort : le compte EST créé (en attente) même si le mail échoue —
+    // l'admin peut toujours approuver à la main en base. Bloquer ici laisserait
+    // l'utilisateur croire que son inscription a échoué alors qu'elle a réussi.
+    if (inscrit.user?.id) {
+      try {
+        await notifierInscriptionEnAttente({ data: { userId: inscrit.user.id } });
+      } catch (err: any) {
+        console.warn("[auth] notification d'approbation non envoyée:", err?.message ?? err);
+      }
+    }
+    setPlanEnCours(null);
+
+    toast.success("Compte créé ! Votre inscription doit être approuvée par l'administrateur. Vous pourrez vous connecter une fois validée.");
     setEtape("infos");
     setLoginEmail(email);
     setPwd("");

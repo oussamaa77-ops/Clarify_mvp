@@ -199,7 +199,8 @@
       "WebFetch(domain:clarifymvp-production.up.railway.app)",
       "Bash(node -e \"const p=require\\('./package.json'\\);const all={...p.dependencies,...p.devDependencies};for\\(const k of ['canvas','bullmq','ioredis','sharp','pdfjs-dist','bcrypt','node-canvas']\\)if\\(all[k]\\)console.log\\(k,'=',all[k]\\);\")",
       "Bash(pkill -f \"server.mjs\")",
-      "Bash(HOST=0.0.0.0 PORT=8081 NODE_ENV=production node server.mjs)"
+      "Bash(HOST=0.0.0.0 PORT=8081 NODE_ENV=production node server.mjs)",
+      "Bash(node -e \"const p=require\\('./package.json'\\);for\\(const[k,v]of Object.entries\\({...p.dependencies,...p.devDependencies}\\)\\)if\\(/tanstack/.test\\(k\\)\\)console.log\\(k,v\\);\")"
     ]
   }
 }

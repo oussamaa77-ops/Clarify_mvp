@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiApproveUserRouteImport } from './routes/api/approve-user'
 import { Route as AppDossiersRouteImport } from './routes/_app/dossiers'
 import { Route as AppAbonnementRouteImport } from './routes/_app/abonnement'
 import { Route as AppDossiersDossierIdIndexRouteImport } from './routes/_app/dossiers.$dossierId.index'
@@ -44,6 +45,11 @@ const AppRoute = AppRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiApproveUserRoute = ApiApproveUserRouteImport.update({
+  id: '/api/approve-user',
+  path: '/api/approve-user',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppDossiersRoute = AppDossiersRouteImport.update({
@@ -163,6 +169,7 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
+  '/api/approve-user': typeof ApiApproveUserRoute
   '/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
@@ -186,6 +193,7 @@ export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
   '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
+  '/api/approve-user': typeof ApiApproveUserRoute
   '/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
@@ -211,6 +219,7 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/_app/abonnement': typeof AppAbonnementRoute
   '/_app/dossiers': typeof AppDossiersRouteWithChildren
+  '/api/approve-user': typeof ApiApproveUserRoute
   '/_app/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/_app/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/_app/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
@@ -236,6 +245,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/abonnement'
     | '/dossiers'
+    | '/api/approve-user'
     | '/dossiers/$dossierId/analytics'
     | '/dossiers/$dossierId/audit'
     | '/dossiers/$dossierId/banque'
@@ -259,6 +269,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/abonnement'
     | '/dossiers'
+    | '/api/approve-user'
     | '/dossiers/$dossierId/analytics'
     | '/dossiers/$dossierId/audit'
     | '/dossiers/$dossierId/banque'
@@ -283,6 +294,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/_app/abonnement'
     | '/_app/dossiers'
+    | '/api/approve-user'
     | '/_app/dossiers/$dossierId/analytics'
     | '/_app/dossiers/$dossierId/audit'
     | '/_app/dossiers/$dossierId/banque'
@@ -306,6 +318,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AppRoute: typeof AppRouteWithChildren
   AuthRoute: typeof AuthRoute
+  ApiApproveUserRoute: typeof ApiApproveUserRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -329,6 +342,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/approve-user': {
+      id: '/api/approve-user'
+      path: '/api/approve-user'
+      fullPath: '/api/approve-user'
+      preLoaderRoute: typeof ApiApproveUserRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_app/dossiers': {
@@ -556,6 +576,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AppRoute: AppRouteWithChildren,
   AuthRoute: AuthRoute,
+  ApiApproveUserRoute: ApiApproveUserRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
