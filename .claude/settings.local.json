@@ -190,7 +190,12 @@
       "Bash(PORT=8080 NODE_ENV=production node server.mjs)",
       "Bash(echo \"pid=$!\")",
       "Bash(unset PORT)",
-      "Bash(NODE_ENV=production node server.mjs)"
+      "Bash(NODE_ENV=production node server.mjs)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git config *)",
+      "Bash(env)",
+      "Bash(command -v railway)"
     ]
   }
 }
