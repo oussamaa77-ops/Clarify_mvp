@@ -36,6 +36,10 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/server.mjs ./server.mjs
-# Pas d'ENV PORT ici : server.mjs écoute sur $PORT (injecté par Railway) → 3000 par défaut.
-EXPOSE 3000
+# Le proxy Railway cible 8080. On fixe PORT=8080 par défaut dans l'image plutôt
+# que de compter sur une injection au runtime : si la variable est absente,
+# server.mjs retombe sur 3000 et le proxy tape dans le vide (« Application failed
+# to respond »). Une variable PORT définie sur le service écrase cette valeur.
+ENV PORT=8080
+EXPOSE 8080
 CMD ["node", "server.mjs"]

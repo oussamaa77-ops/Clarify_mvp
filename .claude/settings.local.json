@@ -186,7 +186,11 @@
       "PowerShell($env:PW_NO_SERVER=\"1\"; $env:E2E_BASE_URL=\"http://localhost:3001\"; npx playwright test e2e/tests/onboarding-quota.spec.ts --grep \"inscription en 2\" --reporter=line 2>&1 | Select-String -Pattern \"navigateur|serveur|e2e\\\\]\" | Select-Object -First 12)",
       "PowerShell($env:PW_NO_SERVER=\"1\"; $env:E2E_BASE_URL=\"http://localhost:3001\"; npx playwright test e2e/tests/onboarding-quota.spec.ts --grep \"inscription en 2\" --reporter=line 2>&1 | Select-String -Pattern \"serverFn|navigateur|serveur \" | Select-Object -First 12)",
       "PowerShell($env:PW_NO_SERVER=\"1\"; $env:E2E_BASE_URL=\"http://localhost:3001\"; npx playwright test e2e/tests/onboarding-quota.spec.ts --grep \"inscription en 2\" --reporter=line 2>&1 | Select-String -Pattern \"navigateur|serveur 5|Received|Expected|passed|failed|e2e\\\\]\" | Select-Object -First 10)",
-      "PowerShell(foreach \\($p in 3000,3001\\) { $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue; \"port $p : serveur arrêté \\(pid $\\($c.OwningProcess\\)\\)\" } else { \"port $p : libre\" } })"
+      "PowerShell(foreach \\($p in 3000,3001\\) { $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue; \"port $p : serveur arrêté \\(pid $\\($c.OwningProcess\\)\\)\" } else { \"port $p : libre\" } })",
+      "Bash(PORT=8080 NODE_ENV=production node server.mjs)",
+      "Bash(echo \"pid=$!\")",
+      "Bash(unset PORT)",
+      "Bash(NODE_ENV=production node server.mjs)"
     ]
   }
 }
