@@ -82,6 +82,11 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`▶ HisabPro en écoute sur http://0.0.0.0:${PORT}`);
+// IMPORTANT (Railway/Fly…) : on n'impose PAS l'hôte. Node bind alors sur `::`
+// (IPv6 dual-stack) qui accepte AUSSI l'IPv4. Un bind explicite "0.0.0.0" est
+// IPv4-only : comme Railway route son trafic interne en IPv6, le conteneur
+// devient injoignable → « Application failed to respond » alors que le serveur
+// tourne. Écouter sans hôte règle ce cas tout en restant compatible IPv4.
+server.listen(PORT, () => {
+  console.log(`▶ HisabPro en écoute sur le port ${PORT}`);
 });
