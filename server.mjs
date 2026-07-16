@@ -99,13 +99,13 @@ server.on("request", (req) => {
   console.log(`[REQ] ${req.method} ${req.url}`);
 });
 
-// HOST pilotable sans rebuild, car le bon bind sur Railway est contesté :
-//   - "0.0.0.0" (défaut ici) : IPv4 uniquement.
-//   - "::"      : dual-stack, accepte IPv4 ET IPv6 — strictement plus permissif.
-// Un commentaire précédent affirmait que "0.0.0.0" rendait le conteneur
-// injoignable (Railway routant en IPv6) ; l'hypothèse inverse est testée ici.
-// En cas de « Application failed to respond », essayer HOST=:: avant tout.
-const HOST = process.env.HOST || "0.0.0.0";
+// Bind sur "::" (dual-stack : accepte IPv4 ET IPv6). NE PAS remettre "0.0.0.0" :
+// il n'écoute qu'en IPv4, or le proxy Railway atteint le conteneur en IPv6. La
+// connexion est alors refusée AVANT d'arriver à Node → 502 sur toutes les routes
+// alors que le serveur tourne et logge « en écoute ». Constaté le 2026-07-16 :
+// bind 0.0.0.0, log d'écoute présent, et zéro trace [REQ] malgré les requêtes.
+// Surchargeable par la variable HOST pour un test ponctuel.
+const HOST = process.env.HOST || "::";
 server.listen(PORT, HOST, () => {
   console.log(`▶ HisabPro en écoute sur ${HOST}:${PORT}`);
 });
