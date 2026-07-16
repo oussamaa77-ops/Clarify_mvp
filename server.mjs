@@ -37,6 +37,15 @@ async function readBody(req) {
 
 const server = createServer(async (req, res) => {
   try {
+    // Sonde de vivacité : répond AVANT tout travail (statique, SSR, TanStack).
+    // Discriminateur de diagnostic : si /ping répond mais que le reste pend,
+    // Node et le réseau sont sains et le blocage est dans le rendu applicatif.
+    if (req.url === "/ping") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("pong");
+      return;
+    }
+
     const pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
 
     // 1) Fichier statique de dist/client (jamais pour "/", qui est rendu par le SSR).
@@ -82,11 +91,21 @@ const server = createServer(async (req, res) => {
   }
 });
 
-// IMPORTANT (Railway/Fly…) : on n'impose PAS l'hôte. Node bind alors sur `::`
-// (IPv6 dual-stack) qui accepte AUSSI l'IPv4. Un bind explicite "0.0.0.0" est
-// IPv4-only : comme Railway route son trafic interne en IPv6, le conteneur
-// devient injoignable → « Application failed to respond » alors que le serveur
-// tourne. Écouter sans hôte règle ce cas tout en restant compatible IPv4.
-server.listen(PORT, () => {
-  console.log(`▶ HisabPro en écoute sur le port ${PORT}`);
+// Trace de diagnostic : listener 'request' supplémentaire (celui de createServer
+// en est déjà un). Il ne répond pas, il journalise seulement — on voit ainsi si
+// une requête atteint Node, ce qui distingue « le proxy n'arrive pas jusqu'ici »
+// de « la requête arrive mais le rendu ne rend jamais la main ».
+server.on("request", (req) => {
+  console.log(`[REQ] ${req.method} ${req.url}`);
+});
+
+// HOST pilotable sans rebuild, car le bon bind sur Railway est contesté :
+//   - "0.0.0.0" (défaut ici) : IPv4 uniquement.
+//   - "::"      : dual-stack, accepte IPv4 ET IPv6 — strictement plus permissif.
+// Un commentaire précédent affirmait que "0.0.0.0" rendait le conteneur
+// injoignable (Railway routant en IPv6) ; l'hypothèse inverse est testée ici.
+// En cas de « Application failed to respond », essayer HOST=:: avant tout.
+const HOST = process.env.HOST || "0.0.0.0";
+server.listen(PORT, HOST, () => {
+  console.log(`▶ HisabPro en écoute sur ${HOST}:${PORT}`);
 });
