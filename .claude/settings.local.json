@@ -195,7 +195,9 @@
       "Bash(git push *)",
       "Bash(git config *)",
       "Bash(env)",
-      "Bash(command -v railway)"
+      "Bash(command -v railway)",
+      "WebFetch(domain:clarifymvp-production.up.railway.app)",
+      "Bash(node -e \"const p=require\\('./package.json'\\);const all={...p.dependencies,...p.devDependencies};for\\(const k of ['canvas','bullmq','ioredis','sharp','pdfjs-dist','bcrypt','node-canvas']\\)if\\(all[k]\\)console.log\\(k,'=',all[k]\\);\")"
     ]
   }
 }
