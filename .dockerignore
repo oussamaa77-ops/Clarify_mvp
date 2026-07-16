@@ -1,0 +1,29 @@
+# Ne PAS envoyer ces dossiers dans le contexte de build Docker (image plus légère
+# et build plus rapide). Le front-end Node n'a besoin ni du backend Python ni des
+# artefacts locaux.
+node_modules
+dist
+.output
+.vercel
+.git
+.github
+.vscode
+.idea
+
+# Backend Python (déployé séparément sur Railway) et environnements virtuels
+donut-service
+ia_services
+**/.venv
+**/__pycache__
+*.pyc
+
+# Tests / rapports / divers
+e2e
+allure-results
+allure-report
+playwright-report
+test-results
+*.log
+.env
+.env.*
+!.env.example
