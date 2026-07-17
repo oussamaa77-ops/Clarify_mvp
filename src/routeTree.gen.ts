@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiDiagMailRouteImport } from './routes/api/diag-mail'
 import { Route as ApiApproveUserRouteImport } from './routes/api/approve-user'
 import { Route as AppDossiersRouteImport } from './routes/_app/dossiers'
 import { Route as AppAbonnementRouteImport } from './routes/_app/abonnement'
@@ -45,6 +46,11 @@ const AppRoute = AppRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiDiagMailRoute = ApiDiagMailRouteImport.update({
+  id: '/api/diag-mail',
+  path: '/api/diag-mail',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiApproveUserRoute = ApiApproveUserRouteImport.update({
@@ -170,6 +176,7 @@ export interface FileRoutesByFullPath {
   '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
   '/api/approve-user': typeof ApiApproveUserRoute
+  '/api/diag-mail': typeof ApiDiagMailRoute
   '/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
@@ -194,6 +201,7 @@ export interface FileRoutesByTo {
   '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
   '/api/approve-user': typeof ApiApproveUserRoute
+  '/api/diag-mail': typeof ApiDiagMailRoute
   '/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
@@ -220,6 +228,7 @@ export interface FileRoutesById {
   '/_app/abonnement': typeof AppAbonnementRoute
   '/_app/dossiers': typeof AppDossiersRouteWithChildren
   '/api/approve-user': typeof ApiApproveUserRoute
+  '/api/diag-mail': typeof ApiDiagMailRoute
   '/_app/dossiers/$dossierId/analytics': typeof AppDossiersDossierIdAnalyticsRoute
   '/_app/dossiers/$dossierId/audit': typeof AppDossiersDossierIdAuditRoute
   '/_app/dossiers/$dossierId/banque': typeof AppDossiersDossierIdBanqueRouteWithChildren
@@ -246,6 +255,7 @@ export interface FileRouteTypes {
     | '/abonnement'
     | '/dossiers'
     | '/api/approve-user'
+    | '/api/diag-mail'
     | '/dossiers/$dossierId/analytics'
     | '/dossiers/$dossierId/audit'
     | '/dossiers/$dossierId/banque'
@@ -270,6 +280,7 @@ export interface FileRouteTypes {
     | '/abonnement'
     | '/dossiers'
     | '/api/approve-user'
+    | '/api/diag-mail'
     | '/dossiers/$dossierId/analytics'
     | '/dossiers/$dossierId/audit'
     | '/dossiers/$dossierId/banque'
@@ -295,6 +306,7 @@ export interface FileRouteTypes {
     | '/_app/abonnement'
     | '/_app/dossiers'
     | '/api/approve-user'
+    | '/api/diag-mail'
     | '/_app/dossiers/$dossierId/analytics'
     | '/_app/dossiers/$dossierId/audit'
     | '/_app/dossiers/$dossierId/banque'
@@ -319,6 +331,7 @@ export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
   AuthRoute: typeof AuthRoute
   ApiApproveUserRoute: typeof ApiApproveUserRoute
+  ApiDiagMailRoute: typeof ApiDiagMailRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -342,6 +355,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/diag-mail': {
+      id: '/api/diag-mail'
+      path: '/api/diag-mail'
+      fullPath: '/api/diag-mail'
+      preLoaderRoute: typeof ApiDiagMailRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/approve-user': {
@@ -577,6 +597,7 @@ const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
   AuthRoute: AuthRoute,
   ApiApproveUserRoute: ApiApproveUserRoute,
+  ApiDiagMailRoute: ApiDiagMailRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
