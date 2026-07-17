@@ -33,6 +33,9 @@ const dispatcher = new Agent({ connect: { rejectUnauthorized: false } });
 const email = `verify-ban-${Date.now()}@example.com`;
 const pwd = "Verify!Passw0rd123";
 let uid = null;
+// process.exit() couperait le nettoyage asynchrone du finally : on mémorise le
+// code et on laisse Node sortir de lui-même, une fois le compte supprimé.
+let code = 0;
 
 try {
   // Inscription DIRECTE, sans le front — comme le ferait un script tiers.
@@ -44,6 +47,25 @@ try {
   const suB = await su.json();
   uid = suB.user?.id ?? suB.id;
   if (!uid) { console.error(`inscription impossible : ${JSON.stringify(suB).slice(0, 200)}`); process.exit(2); }
+
+  // Le trigger banne pendant l'INSERT, mais GoTrue crée la session juste après :
+  // il se peut qu'un jeton soit tout de même renvoyé. On le signale sans en faire
+  // un échec — ce jeton n'ouvre aucune donnée (RLS), on le VÉRIFIE ci-dessous.
+  if (suB.access_token) {
+    const vu = await uf(`${url}/rest/v1/dossiers?select=id&limit=1`, {
+      dispatcher, headers: { apikey: anon, authorization: `Bearer ${suB.access_token}` },
+    });
+    const lignes = await vu.text();
+    console.log(`ℹ️  signUp a renvoyé une session malgré le ban (elle expirera seule).`);
+    if (lignes.trim() === "[]") {
+      console.log(`   Elle n'ouvre AUCUNE donnée : dossiers → [] (RLS).`);
+    } else {
+      console.log(`❌ GRAVE : cette session lit des données → ${lignes.slice(0, 120)}`);
+      code = 3;
+    }
+  } else {
+    console.log(`✅ signUp n'a renvoyé aucune session.`);
+  }
 
   // La connexion DOIT être refusée : le trigger a dû bannir le compte.
   const li = await uf(`${url}/auth/v1/token?grant_type=password`, {
@@ -57,21 +79,29 @@ try {
     console.log("❌ TROU : un compte inscrit hors du front se connecte SANS approbation.");
     console.log("   → appliquer supabase/migrations/20260717120000_ban_a_inscription.sql");
     console.log("     dans le dashboard Supabase (SQL editor), puis relancer ce script.");
-    process.exit(3);
-  }
-  if (!/banned/i.test(liB)) {
-    console.log(`⚠️ connexion refusée (HTTP ${li.status}) mais pas pour cause de bannissement :`);
+    code = 3;
+  } else if (!/banned/i.test(liB)) {
+    // Refusée, mais pour une autre raison (mot de passe, rate-limit…) : le test
+    // ne prouve alors rien sur le bannissement.
+    console.log(`⚠️ connexion refusée (HTTP ${li.status}) mais PAS pour cause de bannissement :`);
     console.log(`   ${liB.slice(0, 200)}`);
-    process.exit(3);
+    code = 3;
+  } else {
+    console.log(`✅ connexion refusée avant approbation (HTTP ${li.status}, user_banned).`);
+    console.log("   Le verrou tient même sans passer par l'application.");
   }
-  console.log(`✅ connexion refusée avant approbation (HTTP ${li.status}, user_banned).`);
-  console.log("   Le verrou tient même sans passer par l'application.");
-  process.exit(0);
 } finally {
+  // Nettoyage : supprimer le compte auth retire en cascade profil et rôle, mais
+  // PAS le cabinet créé par le trigger — d'où sa suppression explicite.
   if (uid) {
-    await uf(`${url}/auth/v1/admin/users/${uid}`, {
-      method: "DELETE", dispatcher,
-      headers: { apikey: svc, authorization: `Bearer ${svc}` },
-    }).catch(() => {});
+    const H = { apikey: svc, authorization: `Bearer ${svc}` };
+    const prof = await uf(`${url}/rest/v1/profiles?select=cabinet_id&id=eq.${uid}`, { dispatcher, headers: H })
+      .then((r) => r.json()).catch(() => []);
+    const cabinetId = prof?.[0]?.cabinet_id;
+    await uf(`${url}/auth/v1/admin/users/${uid}`, { method: "DELETE", dispatcher, headers: H }).catch(() => {});
+    if (cabinetId) {
+      await uf(`${url}/rest/v1/cabinets?id=eq.${cabinetId}`, { method: "DELETE", dispatcher, headers: H }).catch(() => {});
+    }
   }
 }
+process.exit(code);
