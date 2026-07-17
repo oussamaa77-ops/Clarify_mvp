@@ -16,7 +16,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { listPlans, activerPlanChoisi } from "@/server/billing.functions";
-import { notifierInscriptionEnAttente } from "@/server/approval.functions";
+import { inscrireEnAttente } from "@/server/approval.functions";
 import { logAudit } from "@/lib/audit";
 import { PlansTarifaires } from "@/components/PlansTarifaires";
 import type { Plan } from "@/lib/quota";
@@ -163,42 +163,34 @@ function AuthPage() {
   };
 
   // Étape 2 : le plan choisi déclenche la création du compte.
+  //
+  // On n'appelle PAS supabase.auth.signUp ici : la confirmation d'e-mail étant
+  // désactivée, il renverrait une session immédiatement et l'inscrit entrerait
+  // dans l'application sans approbation (l'effet ci-dessus le pousserait même
+  // vers /dossiers). La création passe donc par le serveur, qui utilise la clé
+  // de service : aucun jeton n'atteint le navigateur, et le compte naît banni
+  // jusqu'au clic de l'administrateur.
   const choisirPlanEtCreerCompte = async (planCode: string) => {
     setPlanEnCours(planCode);
-    const { data: inscrit, error } = await supabase.auth.signUp({
-      email, password: pwd,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth`,
-        data: { nom, prenom, cabinet_nom: cabinetNom || "Mon Cabinet", plan_code: planCode },
-      },
-    });
-
-    if (error) {
+    try {
+      const res = await inscrireEnAttente({
+        data: {
+          email, password: pwd, nom, prenom,
+          cabinet_nom: cabinetNom || "Mon Cabinet",
+          plan_code: planCode,
+        },
+      });
+      if (!res.mailEnvoye) {
+        // L'inscription a bien abouti : le compte est créé et verrouillé. Seul
+        // l'avertissement de l'admin a échoué — il faut le dire, sinon
+        // l'utilisateur attendra une approbation que personne n'a demandée.
+        toast.warning("Compte créé, mais l'administrateur n'a pas pu être prévenu automatiquement. Contactez-le pour activer votre accès.");
+      }
+    } catch (err: any) {
       setPlanEnCours(null);
-      toast.error(error.message);
+      toast.error(err?.message ?? "Inscription impossible");
       return;
     }
-
-    // Prévient l'administrateur qu'un compte attend son approbation. On ne passe
-    // que l'userId : le serveur relit lui-même l'e-mail et le cabinet avec la clé
-    // de service, pour qu'on ne puisse pas lui dicter le contenu du message.
-    // Best-effort : le compte EST créé (en attente) même si le mail échoue —
-    // l'admin peut toujours approuver à la main en base. Bloquer ici laisserait
-    // l'utilisateur croire que son inscription a échoué alors qu'elle a réussi.
-    if (inscrit.user?.id) {
-      try {
-        await notifierInscriptionEnAttente({ data: { userId: inscrit.user.id } });
-      } catch (err: any) {
-        console.warn("[auth] notification d'approbation non envoyée:", err?.message ?? err);
-      }
-    }
-    // La confirmation d'e-mail étant désactivée côté Supabase, signUp ouvre
-    // directement une session. Sans ce signOut, le nouvel inscrit est connecté
-    // alors qu'il n'est pas approuvé : _app ne garde que sur `user`, il verrait
-    // donc une application vide (la RLS lui refuse tout) au lieu du message
-    // ci-dessous. On le déconnecte pour qu'il repasse par handleLogin, seul
-    // endroit qui sait expliquer l'attente d'approbation.
-    await supabase.auth.signOut();
     setPlanEnCours(null);
 
     toast.success("Compte créé ! Votre inscription doit être approuvée par l'administrateur. Vous pourrez vous connecter une fois validée.");

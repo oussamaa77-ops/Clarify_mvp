@@ -85,41 +85,102 @@ async function bannirEnAttente(sb: SupabaseClient, userId: string): Promise<void
   if (error) throw new Error(`Bannissement en attente d'approbation impossible : ${error.message}`);
 }
 
-export const notifierInscriptionEnAttente = createServerFn({ method: "POST" })
-  .inputValidator((input: unknown) => z.object({ userId: z.string().uuid() }).parse(input))
+/**
+ * Crée un compte EN ATTENTE, sans jamais ouvrir de session.
+ *
+ * Pourquoi ne pas utiliser supabase.auth.signUp() côté navigateur : la
+ * confirmation d'e-mail étant désactivée, signUp renvoie immédiatement un
+ * access_token. Le compte a beau être banni dans la foulée (le trigger
+ * handle_new_user s'en charge dès l'INSERT), le navigateur détient déjà une
+ * session valide et entre dans l'application — c'est précisément ce qu'on
+ * refuse. Un signOut() après coup ne suffit pas : la redirection se déclenche
+ * avant, et surtout ce serait un rideau purement cosmétique.
+ *
+ * Ici la création passe par la clé de SERVICE : aucun jeton n'est émis, le
+ * client ne reçoit qu'un booléen. La seule façon d'obtenir une session devient
+ * signInWithPassword — que le bannissement refuse tant que l'admin n'a pas
+ * approuvé.
+ */
+export const inscrireEnAttente = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z.object({
+      email: z.string().email(),
+      password: z.string().min(6, "Le mot de passe doit faire au moins 6 caractères."),
+      nom: z.string().max(120).optional(),
+      prenom: z.string().max(120).optional(),
+      cabinet_nom: z.string().max(200).optional(),
+      plan_code: z.string().max(40).optional(),
+    }).parse(input)
+  )
   .handler(async ({ data }) => {
     const sb = getSupabaseAdmin();
 
-    const { data: prof, error } = await sb
-      .from("profiles")
-      .select("id, email, nom, prenom, cabinet_id, is_approved")
-      .eq("id", data.userId)
-      .maybeSingle();
+    // email_confirm: true — la confirmation d'e-mail est désactivée côté
+    // Supabase ; sans ça le compte resterait « non confirmé » et refuserait de
+    // se connecter même une fois approuvé.
+    const { data: cree, error } = await sb.auth.admin.createUser({
+      email: data.email,
+      password: data.password,
+      email_confirm: true,
+      user_metadata: {
+        nom: data.nom ?? null,
+        prenom: data.prenom ?? null,
+        cabinet_nom: data.cabinet_nom || "Mon Cabinet",
+        plan_code: data.plan_code ?? null,
+      },
+    });
 
-    if (error) throw new Error(`Lecture du profil impossible : ${error.message}`);
-    // Silencieux plutôt qu'erreur : ni un userId inconnu ni un compte déjà
-    // approuvé ne doivent renseigner l'appelant ou spammer l'admin.
-    if (!prof) return { envoye: false as const, raison: "profil introuvable" };
-    if ((prof as any).is_approved) return { envoye: false as const, raison: "déjà approuvé" };
-
-    const p = prof as any;
-
-    // Verrouiller AVANT de prévenir l'admin : si l'envoi du mail échoue, le
-    // compte doit rester inaccessible. L'inverse laisserait une fenêtre où le
-    // compte est joignable sans que personne ne l'ait approuvé.
-    await bannirEnAttente(sb, p.id);
-    const nomComplet = [p.prenom, p.nom].filter(Boolean).join(" ") || "(nom non renseigné)";
-
-    // Nom du cabinet — informatif seulement, on ne bloque pas l'envoi s'il manque.
-    let cabinetNom = "(cabinet inconnu)";
-    if (p.cabinet_id) {
-      const { data: cab } = await sb.from("cabinets").select("nom").eq("id", p.cabinet_id).maybeSingle();
-      if (cab) cabinetNom = (cab as any).nom ?? cabinetNom;
+    if (error) {
+      // Message tel quel : « User already registered » doit remonter à
+      // l'utilisateur, c'est une information utile et non sensible.
+      throw new Error(error.message);
     }
+    const userId = cree.user!.id;
 
-    const lien = `${getAppUrl()}/api/approve-user?userId=${encodeURIComponent(p.id)}&token=${signApprovalToken(p.id)}`;
+    // Le trigger handle_new_user a normalement déjà posé banned_until. On le
+    // repose explicitement : si la migration n'a pas été appliquée sur cet
+    // environnement, le compte serait connectable. Ceinture et bretelles, sur
+    // le seul point qui compte vraiment.
+    await bannirEnAttente(sb, userId);
 
-    const html = `
+    // Prévenir l'admin. Best-effort : le compte EST créé et VERROUILLÉ même si
+    // le mail échoue — l'admin peut toujours approuver à la main. Échouer ici
+    // laisserait croire à l'utilisateur que son inscription n'a pas abouti.
+    try {
+      await envoyerDemandeApprobation(sb, userId);
+    } catch (err: any) {
+      console.warn("[inscription] mail d'approbation non envoyé:", err?.message ?? err);
+      return { cree: true as const, mailEnvoye: false as const };
+    }
+    return { cree: true as const, mailEnvoye: true as const };
+  });
+
+/** Envoie à l'admin la demande d'approbation d'un compte. Le contenu est relu en
+ *  base avec la clé de service : l'appelant ne peut rien dicter du message.
+ *  Lève si le profil est introuvable — appelée après création, il doit exister. */
+async function envoyerDemandeApprobation(sb: SupabaseClient, userId: string): Promise<void> {
+  const { data: prof, error } = await sb
+    .from("profiles")
+    .select("id, email, nom, prenom, cabinet_id, is_approved")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Lecture du profil impossible : ${error.message}`);
+  if (!prof) throw new Error("profil introuvable");
+
+  const p = prof as any;
+  const nomComplet = [p.prenom, p.nom].filter(Boolean).join(" ") || "(nom non renseigné)";
+
+  // Nom du cabinet — informatif seulement, on ne bloque pas l'envoi s'il manque.
+  let cabinetNom = "(cabinet inconnu)";
+  if (p.cabinet_id) {
+    const { data: cab } = await sb.from("cabinets").select("nom").eq("id", p.cabinet_id).maybeSingle();
+    if (cab) cabinetNom = (cab as any).nom ?? cabinetNom;
+  }
+
+  const lien = `${getAppUrl()}/api/approve-user?userId=${encodeURIComponent(p.id)}&token=${signApprovalToken(p.id)}`;
+
+  const html = `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px">
         <h2 style="margin:0 0 4px">Nouvelle inscription à approuver</h2>
         <p style="color:#555;margin:0 0 20px">Ce compte ne peut accéder à aucune donnée tant qu'il n'est pas approuvé.</p>
@@ -139,11 +200,9 @@ export const notifierInscriptionEnAttente = createServerFn({ method: "POST" })
         </p>
       </div>`;
 
-    await sendMail({
-      to: getAdminEmail(),
-      subject: `Inscription à approuver — ${nomComplet} (${p.email})`,
-      html,
-    });
-
-    return { envoye: true as const };
+  await sendMail({
+    to: getAdminEmail(),
+    subject: `Inscription à approuver — ${nomComplet} (${p.email})`,
+    html,
   });
+}
