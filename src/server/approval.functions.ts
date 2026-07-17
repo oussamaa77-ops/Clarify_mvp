@@ -60,6 +60,31 @@ export function getAppUrl(): string {
   return "http://localhost:3000";
 }
 
+/** Durée du bannissement posé en attendant l'approbation : ~100 ans, soit un
+ *  refus permanent en pratique. Supabase n'expose pas de durée infinie ; le
+ *  débannissement est de toute façon explicite (cf. /api/approve-user). */
+const BAN_EN_ATTENTE = "876000h";
+
+/**
+ * Refuse toute authentification au compte tant qu'il n'est pas approuvé.
+ *
+ * C'est LE verrou de connexion, et il est côté serveur d'auth : un compte banni
+ * ne peut obtenir aucun jeton, même en appelant l'API Supabase directement, en
+ * contournant totalement le front. La RLS (get_user_cabinet) reste le second
+ * rideau sur les DONNÉES ; le signOut du client, lui, n'est que du confort.
+ *
+ * La confirmation d'e-mail étant désactivée, signUp a déjà émis une session
+ * quand on arrive ici. Le ban empêche tout nouveau jeton et invalide le
+ * rafraîchissement, mais l'access_token en cours reste valide jusqu'à son
+ * expiration — d'où le signOut() côté client juste après l'inscription, et la
+ * RLS qui, elle, ne laisse rien lire à un non-approuvé de toute façon.
+ * (Pas d'admin.signOut ici : il attend un JWT, pas un userId.)
+ */
+async function bannirEnAttente(sb: SupabaseClient, userId: string): Promise<void> {
+  const { error } = await sb.auth.admin.updateUserById(userId, { ban_duration: BAN_EN_ATTENTE });
+  if (error) throw new Error(`Bannissement en attente d'approbation impossible : ${error.message}`);
+}
+
 export const notifierInscriptionEnAttente = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => z.object({ userId: z.string().uuid() }).parse(input))
   .handler(async ({ data }) => {
@@ -78,6 +103,11 @@ export const notifierInscriptionEnAttente = createServerFn({ method: "POST" })
     if ((prof as any).is_approved) return { envoye: false as const, raison: "déjà approuvé" };
 
     const p = prof as any;
+
+    // Verrouiller AVANT de prévenir l'admin : si l'envoi du mail échoue, le
+    // compte doit rester inaccessible. L'inverse laisserait une fenêtre où le
+    // compte est joignable sans que personne ne l'ait approuvé.
+    await bannirEnAttente(sb, p.id);
     const nomComplet = [p.prenom, p.nom].filter(Boolean).join(" ") || "(nom non renseigné)";
 
     // Nom du cabinet — informatif seulement, on ne bloque pas l'envoi s'il manque.

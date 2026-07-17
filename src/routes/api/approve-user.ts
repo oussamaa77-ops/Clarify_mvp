@@ -60,6 +60,12 @@ export const Route = createFileRoute("/api/approve-user")({
           if (error) throw new Error(error.message);
           if (!data) return redirige("/auth?approbation=introuvable");
 
+          // Lever le bannissement posé à l'inscription : sans ça, is_approved
+          // aurait beau être true, le serveur d'auth continuerait de refuser
+          // tout jeton et le compte resterait inutilisable.
+          const { error: debanErr } = await sb.auth.admin.updateUserById(userId, { ban_duration: "none" });
+          if (debanErr) throw new Error(`compte approuvé mais toujours banni : ${debanErr.message}`);
+
           console.log(`[approve-user] compte approuvé : ${(data as any).email}`);
           return redirige("/auth?approbation=ok");
         } catch (err: any) {

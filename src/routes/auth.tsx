@@ -83,7 +83,15 @@ function AuthPage() {
     const { data: auth, error } = await supabase.auth.signInWithPassword({ email: loginEmail, password: loginPwd });
     if (error) {
       setSubmitting(false);
-      toast.error(error.message);
+      // Un compte en attente d'approbation est banni côté serveur d'auth : le
+      // refus arrive donc ici, et Supabase le formule « User is banned », ce qui
+      // ne veut rien dire pour l'intéressé. On le traduit.
+      const banni = /banned|ban_duration/i.test(error.message);
+      toast.error(
+        banni
+          ? "Compte en attente d'approbation par l'administrateur. Vous recevrez l'accès une fois votre inscription validée."
+          : error.message
+      );
       return;
     }
 
@@ -184,6 +192,13 @@ function AuthPage() {
         console.warn("[auth] notification d'approbation non envoyée:", err?.message ?? err);
       }
     }
+    // La confirmation d'e-mail étant désactivée côté Supabase, signUp ouvre
+    // directement une session. Sans ce signOut, le nouvel inscrit est connecté
+    // alors qu'il n'est pas approuvé : _app ne garde que sur `user`, il verrait
+    // donc une application vide (la RLS lui refuse tout) au lieu du message
+    // ci-dessous. On le déconnecte pour qu'il repasse par handleLogin, seul
+    // endroit qui sait expliquer l'attente d'approbation.
+    await supabase.auth.signOut();
     setPlanEnCours(null);
 
     toast.success("Compte créé ! Votre inscription doit être approuvée par l'administrateur. Vous pourrez vous connecter une fois validée.");

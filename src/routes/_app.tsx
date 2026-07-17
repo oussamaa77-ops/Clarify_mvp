@@ -21,7 +21,20 @@ function AppLayout() {
     if (!loading && !user) navigate({ to: "/auth" });
   }, [user, loading, navigate]);
 
-  if (loading || !user) {
+  // Dernier rideau côté client pour un compte non approuvé. Le vrai refus est
+  // ailleurs — bannissement au niveau du serveur d'auth (aucun jeton délivré) et
+  // RLS qui ne rend aucune ligne. Mais la session ouverte d'office par signUp
+  // reste valide jusqu'à expiration : sans ceci, son porteur atterrirait sur une
+  // application vide au lieu d'être renvoyé vers l'écran d'attente.
+  // `is_approved` non chargé (profil null/en vol) ne déclenche RIEN : verrouiller
+  // sur une lecture manquée éjecterait des comptes légitimes.
+  useEffect(() => {
+    if (profile?.is_approved === false) {
+      signOut().finally(() => navigate({ to: "/auth" }));
+    }
+  }, [profile, signOut, navigate]);
+
+  if (loading || !user || profile?.is_approved === false) {
     return <div className="flex min-h-screen items-center justify-center text-muted-foreground">Chargement…</div>;
   }
 

@@ -9,6 +9,10 @@ interface Profile {
   nom: string | null;
   prenom: string | null;
   cabinet_id: string | null;
+  // Un compte non approuvé est banni côté serveur d'auth et ne voit rien via la
+  // RLS ; _app s'en sert pour l'éjecter avec un message plutôt que de le laisser
+  // devant une application vide. `select("*")` la ramène déjà.
+  is_approved: boolean | null;
 }
 
 interface AuthContextType {
