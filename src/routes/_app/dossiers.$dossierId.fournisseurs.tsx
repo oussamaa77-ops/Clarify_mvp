@@ -35,6 +35,7 @@ import { TiersReporting } from "@/components/TiersReporting";
 import { BalanceAgee } from "@/components/BalanceAgee";
 import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/components/EcheancesInput";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
+import { DocumentsAssocies } from "@/components/DocumentsAssocies";
 import { logAudit } from "@/lib/audit";
 import { Scale } from "lucide-react";
 
@@ -95,6 +96,24 @@ const CATEG_PCM_LBL: Record<string, string> = {
   frais_representation: "Restaurant", transport: "Transport", tva_import: "TVA import",
   charges_sociales: "Charges Sociales",
 };
+
+/**
+ * Échéance d'une facture fournisseur. Le retard n'est signalé que s'il reste
+ * effectivement quelque chose à régler — une facture soldée en retard de
+ * paiement n'a plus à alerter.
+ */
+function EcheanceCell({ f }: { f: FactureF }) {
+  if (!f.date_echeance) return <span className="text-muted-foreground text-sm">—</span>;
+  const restant = Number(f.montant_restant ?? f.montant_ttc);
+  const enRetard =
+    f.statut_paiement !== "payee" && restant > 0 && new Date(f.date_echeance) < new Date();
+  return (
+    <span className={`text-sm ${enRetard ? "text-red-600 font-semibold" : ""}`}
+      title={enRetard ? "Échéance dépassée" : undefined}>
+      {new Date(f.date_echeance).toLocaleDateString("fr-MA")}
+    </span>
+  );
+}
 
 function statutBadge(f: FactureF) {
   const restant = Number(f.montant_restant ?? f.montant_ttc);
@@ -872,6 +891,7 @@ function FournisseursPage() {
                     <TableHead>Fournisseur</TableHead>
                     <TableHead>N°</TableHead>
                     <TableHead>Date</TableHead>
+                    <TableHead>Échéance</TableHead>
                     <TableHead className="text-right">HT</TableHead>
                     <TableHead className="text-right">TTC</TableHead>
                     <TableHead className="text-right">Restant</TableHead>
@@ -882,13 +902,13 @@ function FournisseursPage() {
                 <TableBody>
                   {loading ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-center py-8">
+                      <TableCell colSpan={9} className="text-center py-8">
                         <Loader2 className="h-5 w-5 animate-spin mx-auto" />
                       </TableCell>
                     </TableRow>
                   ) : factures.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-center py-12 text-muted-foreground">
+                      <TableCell colSpan={9} className="text-center py-12 text-muted-foreground">
                         <Inbox className="h-8 w-8 mx-auto mb-2 opacity-30" />
                         Aucune facture — scannez un PDF ou faites une saisie manuelle
                       </TableCell>
@@ -905,6 +925,7 @@ function FournisseursPage() {
                               ? new Date(f.date_facture).toLocaleDateString("fr-MA")
                               : "—"}
                           </TableCell>
+                          <TableCell><EcheanceCell f={f} /></TableCell>
                           <TableCell className="font-mono text-sm text-right">
                             {fmt(Number(f.montant_ht))}
                           </TableCell>
@@ -1595,53 +1616,7 @@ function FournisseursPage() {
                         </div>
                       )}
 
-                      <Card>
-                        <CardContent className="p-0">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>Type</TableHead>
-                                <TableHead>Catégorie PCM</TableHead>
-                                <TableHead>N° pièce</TableHead>
-                                <TableHead className="text-right">TTC</TableHead>
-                                <TableHead>Date</TableHead>
-                                <TableHead>Statut</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {justifsFourn.length === 0 ? (
-                                <TableRow>
-                                  <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                                    <FileText className="h-6 w-6 mx-auto mb-1 opacity-30" />
-                                    Aucun document associé à ce fournisseur
-                                  </TableCell>
-                                </TableRow>
-                              ) : justifsFourn.map(j => (
-                                <TableRow key={j.id}>
-                                  <TableCell>
-                                    <Badge variant="outline" className="text-xs whitespace-nowrap">
-                                      {TYPE_DOC_LBL[j.type_document] ?? j.type_document ?? "—"}
-                                    </Badge>
-                                  </TableCell>
-                                  <TableCell className="text-xs text-muted-foreground">
-                                    {CATEG_PCM_LBL[j.categorie_pcm] ?? j.categorie_pcm ?? "—"}
-                                  </TableCell>
-                                  <TableCell className="font-mono text-xs">{j.numero_piece ?? "—"}</TableCell>
-                                  <TableCell className="text-right font-mono text-xs font-semibold">
-                                    {fmt(Number(j.montant_ttc || 0))}
-                                  </TableCell>
-                                  <TableCell className="text-xs">{j.date_document ?? "—"}</TableCell>
-                                  <TableCell>
-                                    {j.statut === "rapproche"
-                                      ? <Badge className="bg-green-100 text-green-700 text-xs">✅ Rapproché</Badge>
-                                      : <Badge className="bg-orange-100 text-orange-700 text-xs">⏳ En attente</Badge>}
-                                  </TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        </CardContent>
-                      </Card>
+                      <DocumentsAssocies justificatifs={justifsFourn} flux="achat" onVoir={setDocView} />
                     </TabsContent>
 
                     {/* Factures list for selected supplier */}
@@ -1746,68 +1721,9 @@ function FournisseursPage() {
           </div>
         </TabsContent>
 
-        {/* ── Documents associés (achats) ── */}
+        {/* ── Documents associés (achats) : détails essentiels par type ── */}
         <TabsContent value="documents" className="mt-4">
-          <Card>
-            <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Tiers</TableHead>
-                    <TableHead>Date</TableHead>
-                    <TableHead className="text-right">Montant TTC</TableHead>
-                    <TableHead>Statut</TableHead>
-                    <TableHead>Lié à</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {justificatifsAchat.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-center py-12 text-muted-foreground">
-                        <FileText className="h-8 w-8 mx-auto mb-2 opacity-30" />
-                        Aucun document d'achat — scannez un BL, BC ou reçu
-                      </TableCell>
-                    </TableRow>
-                  ) : justificatifsAchat.map(j => {
-                    const TYPE_LBL: Record<string, string> = {
-                      recu: "Reçu", bon_commande: "Bon de commande",
-                      bon_livraison: "Bon de livraison", note_frais: "Note de frais", addition: "Addition",
-                    };
-                    const lie = j.bon_commande_id
-                      ? justificatifsAchat.find((x: any) => x.id === j.bon_commande_id)
-                      : j.devis_id
-                      ? justificatifsAchat.find((x: any) => x.id === j.devis_id)
-                      : null;
-                    return (
-                      <TableRow key={j.id}>
-                        <TableCell>
-                          <Badge variant="outline" className="text-xs whitespace-nowrap">
-                            {TYPE_LBL[j.type_document] ?? j.type_document}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-sm font-medium max-w-[160px] truncate">
-                          {j.nom_tiers ?? "—"}
-                        </TableCell>
-                        <TableCell className="text-sm">{j.date_document ?? "—"}</TableCell>
-                        <TableCell className="text-right font-mono text-sm font-semibold">
-                          {fmt(Number(j.montant_ttc))}
-                        </TableCell>
-                        <TableCell>
-                          {j.statut === "rapproche"
-                            ? <Badge className="bg-green-100 text-green-700 text-xs">✅ Rapproché</Badge>
-                            : <Badge className="bg-orange-100 text-orange-700 text-xs">⏳ En attente</Badge>}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground font-mono">
-                          {lie ? (lie.numero_piece ?? lie.nom_tiers ?? lie.id.slice(0, 8)) : "—"}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
+          <DocumentsAssocies justificatifs={justificatifsAchat} flux="achat" onVoir={setDocView} />
         </TabsContent>
 
         {/* ── Balance âgée : reste à payer des dettes, ventilé par ancienneté ── */}

@@ -26,8 +26,9 @@ async function openFactureDialog(page: import("@playwright/test").Page): Promise
   const carte = page.getByText(dossierNom, { exact: false }).first();
   if (await carte.count()) await carte.click().catch(() => {});
 
-  await page.goto(`/dossiers/${dossierId}/factures`);
-  await expect(page.getByRole("heading", { name: /Factures clients/i })).toBeVisible();
+  // Les factures clients sont désormais un onglet de la section Clients.
+  await page.goto(`/dossiers/${dossierId}/clients?vue=factures`);
+  await expect(page.getByRole("heading", { name: /^Clients$/i })).toBeVisible();
 
   await page.getByRole("button", { name: /Nouvelle facture/i }).click();
   const dialog = page.getByRole("dialog");

@@ -9,18 +9,30 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, Pencil, Trash2, Users, X, FileText, Download, Wand2, BarChart2, Scale } from "lucide-react";
+import { Plus, Pencil, Trash2, Users, X, FileText, Download, Wand2, BarChart2, Scale, Receipt } from "lucide-react";
 import { toast } from "sonner";
 import { logAudit } from "@/lib/audit";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
 import { TiersReporting } from "@/components/TiersReporting";
 import { BalanceAgee } from "@/components/BalanceAgee";
+import { FacturesClientsPanel } from "@/components/FacturesClientsPanel";
+import { DocumentsAssocies } from "@/components/DocumentsAssocies";
+import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 
-export const Route = createFileRoute("/_app/dossiers/$dossierId/clients")({ component: ClientsPage });
+// `vue` porte l'onglet actif : la redirection depuis l'ancienne route /factures
+// atterrit ainsi directement sur l'onglet Factures.
+type Vue = "factures" | "annuaire" | "documents" | "balance" | "reporting";
+const VUES: Vue[] = ["factures", "annuaire", "documents", "balance", "reporting"];
+
+export const Route = createFileRoute("/_app/dossiers/$dossierId/clients")({
+  validateSearch: (s: Record<string, unknown>): { vue?: Vue } =>
+    ({ vue: VUES.includes(s.vue as Vue) ? (s.vue as Vue) : undefined }),
+  component: ClientsPage,
+});
 
 export function TiersPage({ table, titre }: { table: "clients" | "fournisseurs"; titre: string }) {
   const { dossierId } = Route.useParams ? Route.useParams() : { dossierId: "" };
@@ -65,13 +77,15 @@ function statutLabel(f: Facture): { label: string; cls: string } {
 function ClientsPage() {
   const { dossierId } = Route.useParams();
   const navigate = Route.useNavigate();
+  const { vue } = Route.useSearch();
   const [items, setItems] = useState<Tiers[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Tiers | null>(null);
   const [form, setForm] = useState(EMPTY);
   const [search, setSearch] = useState("");
-  const [view, setView] = useState<"annuaire" | "balance" | "reporting">("annuaire");
+  const [view, setView] = useState<Vue>(vue ?? "factures");
+  const [docView, setDocView] = useState<DocumentViewerSource | null>(null);
   const [selectedClient, setSelectedClient] = useState<Tiers | null>(null);
   const [detailTab, setDetailTab] = useState<"kpis" | "factures" | "justificatifs">("kpis");
   const [factures, setFactures] = useState<Facture[]>([]);
@@ -102,6 +116,9 @@ function ClientsPage() {
   };
 
   useEffect(() => { load(); }, [dossierId]);
+  // Une arrivée par lien (?vue=factures, notamment depuis l'ancienne route
+  // /factures) doit ouvrir l'onglet demandé même si la page est déjà montée.
+  useEffect(() => { if (vue) setView(vue); }, [vue]);
   useEffect(() => {
     if (selectedClient) loadFactures(selectedClient.id);
     else setFactures([]);
@@ -263,7 +280,9 @@ function ClientsPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold">Clients</h1>
-          <p className="text-muted-foreground mt-1">{items.length} client{items.length !== 1 ? "s" : ""}</p>
+          <p className="text-muted-foreground mt-1">
+            {items.length} client{items.length !== 1 ? "s" : ""} · Facturation, documents et recouvrement
+          </p>
         </div>
         {view === "annuaire" && (
         <div className="flex gap-2">
@@ -307,12 +326,27 @@ function ClientsPage() {
         )}
       </div>
 
-      <Tabs value={view} onValueChange={(v) => setView(v as "annuaire" | "balance" | "reporting")}>
+      <Tabs value={view} onValueChange={(v) => setView(v as Vue)}>
         <TabsList className="mb-4">
+          <TabsTrigger value="factures"><Receipt className="h-3 w-3 mr-1" />Factures</TabsTrigger>
           <TabsTrigger value="annuaire"><Users className="h-3 w-3 mr-1" />Annuaire ({items.length})</TabsTrigger>
+          <TabsTrigger value="documents">
+            <FileText className="h-3 w-3 mr-1" />
+            Documents associés ({justificatifsVente.length})
+          </TabsTrigger>
           <TabsTrigger value="balance"><Scale className="h-3 w-3 mr-1" />Balance âgée</TabsTrigger>
           <TabsTrigger value="reporting"><BarChart2 className="h-3 w-3 mr-1" />Reporting</TabsTrigger>
         </TabsList>
+
+        {/* ── Factures clients (ex-section « Factures ») ── */}
+        <TabsContent value="factures">
+          <FacturesClientsPanel dossierId={dossierId} />
+        </TabsContent>
+
+        {/* ── Documents associés : détails essentiels propres à chaque type ── */}
+        <TabsContent value="documents">
+          <DocumentsAssocies justificatifs={justificatifsVente} flux="vente" onVoir={setDocView} />
+        </TabsContent>
 
         <TabsContent value="annuaire">
       <Input className="mb-4 max-w-sm" placeholder="Rechercher…" value={search} onChange={e => setSearch(e.target.value)} />
@@ -573,47 +607,7 @@ function ClientsPage() {
                     </div>
                   )}
 
-                  <Card><CardContent className="p-0">
-                    <Table>
-                      <TableHeader><TableRow>
-                        <TableHead>Type</TableHead>
-                        <TableHead>Catégorie PCM</TableHead>
-                        <TableHead>N° pièce</TableHead>
-                        <TableHead className="text-right">TTC</TableHead>
-                        <TableHead>Date</TableHead>
-                        <TableHead>Statut</TableHead>
-                      </TableRow></TableHeader>
-                      <TableBody>
-                        {justisClient.length === 0
-                          ? <TableRow><TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                              <FileText className="h-6 w-6 mx-auto mb-1 opacity-30" />
-                              Aucun document associé à ce client
-                            </TableCell></TableRow>
-                          : justisClient.map(j => (
-                            <TableRow key={j.id}>
-                              <TableCell>
-                                <Badge variant="outline" className="text-xs whitespace-nowrap">
-                                  {TYPE_DOC_LBL[j.type_document] ?? j.type_document ?? "—"}
-                                </Badge>
-                              </TableCell>
-                              <TableCell className="text-xs text-muted-foreground">
-                                {CATEG_PCM_LBL[j.categorie_pcm] ?? j.categorie_pcm ?? "—"}
-                              </TableCell>
-                              <TableCell className="font-mono text-xs">{j.numero_piece ?? "—"}</TableCell>
-                              <TableCell className="text-right font-mono text-xs font-semibold">
-                                {fmt(Number(j.montant_ttc || 0))}
-                              </TableCell>
-                              <TableCell className="text-xs">{j.date_document ?? "—"}</TableCell>
-                              <TableCell>
-                                {j.statut === "rapproche"
-                                  ? <Badge className="bg-green-100 text-green-700 text-xs">✅ Rapproché</Badge>
-                                  : <Badge className="bg-orange-100 text-orange-700 text-xs">⏳ En attente</Badge>}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                      </TableBody>
-                    </Table>
-                  </CardContent></Card>
+                  <DocumentsAssocies justificatifs={justisClient} flux="vente" onVoir={setDocView} />
                 </TabsContent>
               </Tabs>
             )}
@@ -648,6 +642,9 @@ function ClientsPage() {
           <TiersReporting dossierId={dossierId} kind="clients" />
         </TabsContent>
       </Tabs>
+
+      {/* Aperçu du justificatif original (panneau latéral droit) */}
+      <DocumentViewer open={!!docView} onOpenChange={(o) => { if (!o) setDocView(null); }} source={docView} />
     </div>
   );
 }

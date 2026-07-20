@@ -178,25 +178,39 @@ async function envoyerDemandeApprobation(sb: SupabaseClient, userId: string): Pr
     if (cab) cabinetNom = (cab as any).nom ?? cabinetNom;
   }
 
-  const lien = `${getAppUrl()}/api/approve-user?userId=${encodeURIComponent(p.id)}&token=${signApprovalToken(p.id)}`;
+  // Un seul jeton pour les deux actions : qui détient le mail décide des deux.
+  const jeton = signApprovalToken(p.id);
+  const base = `${getAppUrl()}`;
+  const lienOui = `${base}/api/approve-user?userId=${encodeURIComponent(p.id)}&token=${jeton}`;
+  const lienNon = `${base}/api/reject-user?userId=${encodeURIComponent(p.id)}&token=${jeton}`;
 
   const html = `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px">
         <h2 style="margin:0 0 4px">Nouvelle inscription à approuver</h2>
-        <p style="color:#555;margin:0 0 20px">Ce compte ne peut accéder à aucune donnée tant qu'il n'est pas approuvé.</p>
+        <p style="color:#555;margin:0 0 20px">Ce compte ne peut ni se connecter ni accéder à la moindre donnée tant qu'il n'est pas approuvé.</p>
         <table style="border-collapse:collapse;width:100%;margin-bottom:24px">
           <tr><td style="padding:6px 0;color:#666">Nom</td><td style="padding:6px 0"><strong>${nomComplet}</strong></td></tr>
           <tr><td style="padding:6px 0;color:#666">E-mail</td><td style="padding:6px 0"><strong>${p.email}</strong></td></tr>
           <tr><td style="padding:6px 0;color:#666">Cabinet</td><td style="padding:6px 0"><strong>${cabinetNom}</strong></td></tr>
         </table>
-        <a href="${lien}" style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;font-weight:600">
-          Approuver ce compte
-        </a>
+        <table style="border-collapse:separate;border-spacing:0"><tr>
+          <td style="padding-right:12px">
+            <a href="${lienOui}" style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;font-weight:600">
+              Approuver
+            </a>
+          </td>
+          <td>
+            <a href="${lienNon}" style="display:inline-block;background:#fff;color:#dc2626;border:1px solid #dc2626;text-decoration:none;padding:11px 21px;border-radius:6px;font-weight:600">
+              Refuser
+            </a>
+          </td>
+        </tr></table>
         <p style="color:#888;font-size:12px;margin-top:24px">
-          Si le bouton ne fonctionne pas, copiez ce lien :<br>${lien}
+          Approuver : <br>${lienOui}<br><br>
+          Refuser (demande une confirmation) : <br>${lienNon}
         </p>
         <p style="color:#888;font-size:12px">
-          Vous n'attendiez pas cette demande ? Ne cliquez pas : sans approbation, le compte reste sans accès.
+          Vous n'attendiez pas cette demande ? Ne cliquez sur rien : sans approbation, le compte reste sans accès.
         </p>
       </div>`;
 

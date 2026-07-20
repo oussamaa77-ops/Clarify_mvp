@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import {
-  LayoutDashboard, FileText, Users, Building2, BookOpen, Landmark,
+  LayoutDashboard, Users, Building2, BookOpen, Landmark,
   FolderArchive, History, LogOut, Briefcase, Receipt, Users2, FileSearch,
   Paperclip, Sparkles, CreditCard,
 } from "lucide-react";
@@ -43,7 +43,8 @@ function AppLayout() {
 
   const navItems = dossierId ? [
     { to: "/dossiers/$dossierId/dashboard",     label: "Dashboard",       icon: LayoutDashboard },
-    { to: "/dossiers/$dossierId/factures",      label: "Factures",        icon: FileText        },
+    // Les factures clients vivent dans la section Clients (onglet Factures),
+    // symétriquement aux factures fournisseurs dans la section Fournisseurs.
     { to: "/dossiers/$dossierId/clients",       label: "Clients",         icon: Users           },
     { to: "/dossiers/$dossierId/fournisseurs",  label: "Fournisseurs",    icon: Building2       },
     { to: "/dossiers/$dossierId/comptabilite",  label: "Comptabilité",    icon: BookOpen        },

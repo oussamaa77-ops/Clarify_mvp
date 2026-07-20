@@ -200,7 +200,22 @@
       "Bash(node -e \"const p=require\\('./package.json'\\);const all={...p.dependencies,...p.devDependencies};for\\(const k of ['canvas','bullmq','ioredis','sharp','pdfjs-dist','bcrypt','node-canvas']\\)if\\(all[k]\\)console.log\\(k,'=',all[k]\\);\")",
       "Bash(pkill -f \"server.mjs\")",
       "Bash(HOST=0.0.0.0 PORT=8081 NODE_ENV=production node server.mjs)",
-      "Bash(node -e \"const p=require\\('./package.json'\\);for\\(const[k,v]of Object.entries\\({...p.dependencies,...p.devDependencies}\\)\\)if\\(/tanstack/.test\\(k\\)\\)console.log\\(k,v\\);\")"
+      "Bash(node -e \"const p=require\\('./package.json'\\);for\\(const[k,v]of Object.entries\\({...p.dependencies,...p.devDependencies}\\)\\)if\\(/tanstack/.test\\(k\\)\\)console.log\\(k,v\\);\")",
+      "Bash(node *)",
+      "Bash(sed 's/\\\\\\(SMTP_USER=..\\\\\\).*/\\\\1***/')",
+      "Bash(git merge *)",
+      "Bash(command -v psql)",
+      "Read(//c/Users/o.karmaoui/.supabase/**)",
+      "PowerShell($out = & npx supabase projects list 2>&1 | Select-Object -First 8; $out; \"exit=$LASTEXITCODE\")",
+      "Bash(cp \"C:/Users/O6C96~1.KAR/AppData/Local/Temp/claude/C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main/ce33c524-0a04-419b-82a7-ef058551a1c0/scratchpad/list_users.mjs\" \"C:/Users/o.karmaoui/Downloads/deploi-app-last/deploie-app-main/tmp_list_users.mjs\")",
+      "Bash(rm -f \"C:/Users/o.karmaoui/Downloads/deploi-app-last/deploie-app-main/tmp_list_users.mjs\")",
+      "Bash(netstat -ano)",
+      "PowerShell(cd \"C:\\\\Users\\\\o.karmaoui\\\\Downloads\\\\deploi-app-last\\\\deploie-app-main\"; npx tsc --noEmit 2>&1 | Select-String -Pattern \"FacturesClientsPanel|DocumentsAssocies|justificatif-details|clients\\\\.tsx|fournisseurs\\\\.tsx|factures\\\\.tsx|_app\\\\.tsx\"; Write-Output \"--- total ---\"; \\(npx tsc --noEmit 2>&1 | Measure-Object -Line\\).Lines)",
+      "PowerShell($u=\"http://localhost:3000/dossiers/11111111-1111-1111-1111-111111111111/factures\"; try { $r=Invoke-WebRequest -Uri $u -MaximumRedirection 0 -ErrorAction Stop; \"status=$\\($r.StatusCode\\)\" } catch { $resp=$_.Exception.Response; \"status=$\\([int]$resp.StatusCode\\)\"; \"location=$\\($resp.Headers['Location']\\)\" })",
+      "PowerShell($u=\"http://localhost:3000/dossiers/11111111-1111-1111-1111-111111111111/factures\"; $h=[System.Net.Http.HttpClientHandler]::new\\(\\); $h.AllowAutoRedirect=$false; $c=[System.Net.Http.HttpClient]::new\\($h\\); $r=$c.GetAsync\\($u\\).Result; \"status=$\\([int]$r.StatusCode\\)\"; \"location=$\\($r.Headers.Location\\)\")",
+      "PowerShell(cd \"C:\\\\Users\\\\o.karmaoui\\\\Downloads\\\\deploi-app-last\\\\deploie-app-main\"; \\(Get-Content package.json | ConvertFrom-Json\\).devDependencies | Format-List)",
+      "Bash(kill %b40k6m1fr)",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force; \"dev server arrêté \\(pid $\\($c.OwningProcess\\)\\)\" } else { \"port 3000 libre\" })"
     ]
   }
 }

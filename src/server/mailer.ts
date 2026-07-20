@@ -69,6 +69,14 @@ function getTransporter(cfg: ReturnType<typeof readConfig>): Transporter {
     auth: cfg.user ? { user: cfg.user, pass: cfg.pass } : undefined,
     pool: true,
     maxConnections: 3,
+    // Timeouts courts et EXPLICITES. Sans ça, nodemailer attend ses défauts
+    // (connectionTimeout ~2 min) avant d'abandonner quand le port SMTP est
+    // filtré — ce qui figeait l'inscription : l'envoi du mail d'approbation est
+    // best-effort mais reste `await`é, donc son blocage bloque tout le parcours.
+    // On préfère un échec rapide (→ « admin non prévenu ») à un formulaire figé.
+    connectionTimeout: 10_000,
+    greetingTimeout: 8_000,
+    socketTimeout: 15_000,
     tls: {
       rejectUnauthorized: cfg.rejectUnauthorized,
       // SNI correct = certains serveurs refusent sinon.
