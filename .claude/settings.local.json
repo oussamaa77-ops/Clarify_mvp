@@ -215,7 +215,13 @@
       "PowerShell($u=\"http://localhost:3000/dossiers/11111111-1111-1111-1111-111111111111/factures\"; $h=[System.Net.Http.HttpClientHandler]::new\\(\\); $h.AllowAutoRedirect=$false; $c=[System.Net.Http.HttpClient]::new\\($h\\); $r=$c.GetAsync\\($u\\).Result; \"status=$\\([int]$r.StatusCode\\)\"; \"location=$\\($r.Headers.Location\\)\")",
       "PowerShell(cd \"C:\\\\Users\\\\o.karmaoui\\\\Downloads\\\\deploi-app-last\\\\deploie-app-main\"; \\(Get-Content package.json | ConvertFrom-Json\\).devDependencies | Format-List)",
       "Bash(kill %b40k6m1fr)",
-      "PowerShell($c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force; \"dev server arrêté \\(pid $\\($c.OwningProcess\\)\\)\" } else { \"port 3000 libre\" })"
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force; \"dev server arrêté \\(pid $\\($c.OwningProcess\\)\\)\" } else { \"port 3000 libre\" })",
+      "PowerShell(git show *)",
+      "PowerShell(node \"C:\\\\Users\\\\O6C96~1.KAR\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main\\\\9badd5c3-b2b2-4662-b3f3-e4184dad8318\\\\scratchpad\\\\probe_ff.mjs\")",
+      "PowerShell(node probe_ff.mjs)",
+      "PowerShell(git log *)",
+      "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String \"dossiers.\\\\`$dossierId.fournisseurs.tsx\"; Write-Output \"--- total ---\"; \\(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String \"error TS\" | Measure-Object\\).Count)",
+      "PowerShell(Remove-Item *)"
     ]
   }
 }

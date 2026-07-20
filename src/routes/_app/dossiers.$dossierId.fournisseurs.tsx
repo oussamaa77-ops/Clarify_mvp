@@ -64,6 +64,7 @@ interface FactureF {
   fichier_original_url: string | null;
   fichier_original_nom: string | null;
   fichier_original_type: string | null;
+  lignes?: any[] | null;
 }
 
 interface Fournisseur {
@@ -133,7 +134,7 @@ function FournisseursPage() {
   const memoriserFn = useServerFn(memoriserTiers);
   const annulerPaiementFn = useServerFn(annulerPaiementFacture);
 
-  const [tab, setTab] = useState<"factures" | "saisie" | "tiers" | "documents" | "balance" | "reporting">("factures");
+  const [tab, setTab] = useState<"factures" | "saisie" | "tiers" | "balance" | "reporting">("factures");
   const [justificatifsAchat, setJustificatifsAchat] = useState<any[]>([]);
   const [factures, setFactures] = useState<FactureF[]>([]);
   const [fournisseurs, setFournisseurs] = useState<Fournisseur[]>([]);
@@ -149,6 +150,8 @@ function FournisseursPage() {
   // afin de pouvoir le RE-consulter ensuite (aperçu GED / bouton Voir).
   const [scanFile, setScanFile] = useState<File | null>(null);
   const [docView, setDocView] = useState<DocumentViewerSource | null>(null);
+  // Facture affichée en détail quand aucun fichier original n'est archivé.
+  const [factureDetail, setFactureDetail] = useState<FactureF | null>(null);
   const [pdfPages, setPdfPages] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -576,15 +579,20 @@ function FournisseursPage() {
           const ext = scanFile.name.split(".").pop() || "bin";
           const path = `${dossierId}/ff_${factureId}.${ext}`;
           const { error: upErr } = await supabase.storage.from("factures-originales").upload(path, scanFile, { upsert: true });
-          if (!upErr) {
-            const { data: urlData } = supabase.storage.from("factures-originales").getPublicUrl(path);
-            await (supabase.from("factures_fournisseurs") as any).update({
-              fichier_original_url: urlData?.publicUrl ?? null,
-              fichier_original_nom: scanFile.name,
-              fichier_original_type: scanFile.type,
-            }).eq("id", factureId);
-          }
-        } catch { /* archivage best-effort — ne bloque pas l'enregistrement */ }
+          if (upErr) throw upErr;
+          const { data: urlData } = supabase.storage.from("factures-originales").getPublicUrl(path);
+          await (supabase.from("factures_fournisseurs") as any).update({
+            fichier_original_url: urlData?.publicUrl ?? null,
+            fichier_original_nom: scanFile.name,
+            fichier_original_type: scanFile.type,
+          }).eq("id", factureId);
+        } catch (e: any) {
+          // Archivage best-effort : la facture reste enregistrée. Mais on le DIT,
+          // sinon le bouton « Voir » n'ouvrira jamais l'original sans qu'on sache
+          // pourquoi (c'est ce silence qui a masqué l'absence de tout scan archivé).
+          console.error("Archivage du scan échoué", e);
+          toast.warning("Facture enregistrée, mais le scan n'a pas pu être archivé — le bouton « Voir » affichera le détail saisi.");
+        }
       }
 
       // Accounting entries ACH — reference_piece = factureId for clean cascade delete
@@ -867,10 +875,6 @@ function FournisseursPage() {
             <Building2 className="h-3 w-3 mr-1" />
             Fournisseurs ({fournisseurs.length})
           </TabsTrigger>
-          <TabsTrigger value="documents">
-            <FileText className="h-3 w-3 mr-1" />
-            Documents associés ({justificatifsAchat.length})
-          </TabsTrigger>
           <TabsTrigger value="balance">
             <Scale className="h-3 w-3 mr-1" />
             Balance âgée
@@ -944,18 +948,24 @@ function FournisseursPage() {
                           </TableCell>
                           <TableCell>
                             <div className="flex gap-1">
-                              {/* Voir le document original scanné (panneau latéral). */}
-                              {f.fichier_original_url && (
-                                <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  className="h-7 w-7"
-                                  onClick={() => setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })}
-                                  title="Voir le document"
-                                >
-                                  <Eye className="h-3.5 w-3.5" />
-                                </Button>
-                              )}
+                              {/* Visualiser la facture — TOUJOURS proposé :
+                                  • fichier original archivé → aperçu du scan (panneau latéral) ;
+                                  • sinon (factures saisies avant l'archivage, ou saisie
+                                    manuelle sans scan) → détail de la facture telle qu'elle
+                                    est enregistrée, plutôt qu'un bouton absent. */}
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-7 w-7"
+                                onClick={() =>
+                                  f.fichier_original_url
+                                    ? setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })
+                                    : setFactureDetail(f)
+                                }
+                                title={f.fichier_original_url ? "Voir le document original" : "Voir le détail (aucun document scanné archivé)"}
+                              >
+                                <Eye className={`h-3.5 w-3.5 ${f.fichier_original_url ? "" : "opacity-50"}`} />
+                              </Button>
                               {/* Annuler le paiement : actif seulement si la facture est payée. */}
                               <Button
                                 size="icon"
@@ -1683,6 +1693,20 @@ function FournisseursPage() {
                                       </TableCell>
                                       <TableCell>
                                         <div className="flex gap-1">
+                                          {/* Même visualisation que la liste générale. */}
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-7 w-7"
+                                            onClick={() =>
+                                              f.fichier_original_url
+                                                ? setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })
+                                                : setFactureDetail(f)
+                                            }
+                                            title={f.fichier_original_url ? "Voir le document original" : "Voir le détail (aucun document scanné archivé)"}
+                                          >
+                                            <Eye className={`h-3.5 w-3.5 ${f.fichier_original_url ? "" : "opacity-50"}`} />
+                                          </Button>
                                           <Button
                                             size="icon"
                                             variant="ghost"
@@ -1719,11 +1743,6 @@ function FournisseursPage() {
               </div>
             )}
           </div>
-        </TabsContent>
-
-        {/* ── Documents associés (achats) : détails essentiels par type ── */}
-        <TabsContent value="documents" className="mt-4">
-          <DocumentsAssocies justificatifs={justificatifsAchat} flux="achat" onVoir={setDocView} />
         </TabsContent>
 
         {/* ── Balance âgée : reste à payer des dettes, ventilé par ancienneté ── */}
@@ -1955,6 +1974,78 @@ function FournisseursPage() {
 
       {/* Aperçu du document original (panneau latéral droit) */}
       <DocumentViewer open={!!docView} onOpenChange={(o) => { if (!o) setDocView(null); }} source={docView} />
+
+      {/* ── Détail d'une facture sans document scanné ──────────────────────────
+          Repli du bouton « Voir » : on restitue la facture telle qu'enregistrée
+          (en-tête, montants, lignes) au lieu de laisser l'utilisateur sans rien.
+          Les factures saisies avant l'archivage du scan n'ont pas de fichier. */}
+      <Dialog open={!!factureDetail} onOpenChange={(o) => { if (!o) setFactureDetail(null); }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>
+              Facture {factureDetail?.numero ?? "—"} · {factureDetail?.fournisseur_nom ?? "—"}
+            </DialogTitle>
+          </DialogHeader>
+          {factureDetail && (
+            <div className="space-y-4">
+              <div className="flex items-start gap-2 rounded-md bg-muted/60 p-3 text-xs text-muted-foreground">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-px" />
+                <span>
+                  Aucun document scanné n'est archivé pour cette facture — voici son
+                  contenu enregistré. Les factures scannées depuis la mise en place de
+                  l'archivage ouvrent directement l'original.
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+                {[
+                  ["Date facture", factureDetail.date_facture ? new Date(factureDetail.date_facture).toLocaleDateString("fr-MA") : "—"],
+                  ["Échéance", factureDetail.date_echeance ? new Date(factureDetail.date_echeance).toLocaleDateString("fr-MA") : "—"],
+                  ["Mode de règlement", factureDetail.mode_reglement ?? "—"],
+                  ["Montant HT", fmt(Number(factureDetail.montant_ht))],
+                  ["TVA", fmt(Number(factureDetail.montant_tva))],
+                  ["Montant TTC", fmt(Number(factureDetail.montant_ttc))],
+                  ["Payé", fmt(Number(factureDetail.montant_paye ?? 0))],
+                  ["Restant dû", fmt(Number(factureDetail.montant_restant ?? factureDetail.montant_ttc))],
+                  ["Statut", statutBadge(factureDetail).label],
+                ].map(([label, value]) => (
+                  <div key={label as string}>
+                    <p className="text-xs text-muted-foreground">{label}</p>
+                    <p className="font-medium">{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {Array.isArray(factureDetail.lignes) && factureDetail.lignes.length > 0 && (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Désignation</TableHead>
+                      <TableHead className="text-right">Qté</TableHead>
+                      <TableHead className="text-right">P.U.</TableHead>
+                      <TableHead className="text-right">TVA</TableHead>
+                      <TableHead className="text-right">Total HT</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {factureDetail.lignes.map((l: any, i: number) => (
+                      <TableRow key={i}>
+                        <TableCell className="text-sm">{l.designation || "—"}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{l.quantite ?? "—"}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{fmt(Number(l.prix_unitaire ?? 0))}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{l.taux_tva ?? 0} %</TableCell>
+                        <TableCell className="text-right font-mono text-xs font-medium">
+                          {fmt(Number(l.quantite ?? 0) * Number(l.prix_unitaire ?? 0))}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
