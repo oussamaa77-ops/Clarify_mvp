@@ -221,7 +221,8 @@
       "PowerShell(node probe_ff.mjs)",
       "PowerShell(git log *)",
       "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String \"dossiers.\\\\`$dossierId.fournisseurs.tsx\"; Write-Output \"--- total ---\"; \\(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String \"error TS\" | Measure-Object\\).Count)",
-      "PowerShell(Remove-Item *)"
+      "PowerShell(Remove-Item *)",
+      "Bash(grep -rniE \"\\\\\"?\\(vir|chq|prlv|tpe\\)\\\\\\\\\\\\\\\\?b|virement|cheque\" src/lib/*.ts)"
     ]
   }
 }

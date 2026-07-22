@@ -790,12 +790,75 @@ Ces règles l'emportent sur toute autre déduction. Ne JAMAIS les contredire.
   → compte_pcm = "61251".
 - Eau / Électricité (Lydec, Amendis, ONEE, ONEP, Redal, Radeema, Radeef…)
   → compte_pcm = "61252".
-- CNSS / Sécurité Sociale — émetteur = "CAISSE NATIONALE DE SÉCURITÉ SOCIALE",
-  ou mention "CNSS" / "Bordereau de paiement CNSS" / "Déclaration CNSS" /
-  "Sécurité Sociale" / "cotisations sociales" → compte_pcm = "6174"
-  ET categorie_pcm = "charges_sociales". PRIORITÉ ABSOLUE : ne JAMAIS classer
-  la CNSS en 6147, en "assurance" (6161) ni en frais bancaires.
-  ⚠️ La "CAISSE NATIONALE DE CRÉDIT AGRICOLE" (CNCA) est une BANQUE, PAS la CNSS.
+- CNSS / AMO / CIMR / DGI → voir la section [ORGANISMES SOCIAUX ET PUBLICS]
+  ci-dessous, qui l'emporte sur toute autre règle de compte.
+
+[ORGANISMES SOCIAUX ET PUBLICS — CNSS / DGI / CIMR / AMO]
+Un bordereau, une attestation de télé-règlement ou une déclaration émise par un
+organisme social ou public N'EST PAS une facture commerciale. Ces six règles
+priment sur toutes les autres.
+
+1. TYPE DE DOCUMENT
+   · Si le document contient "CAISSE NATIONALE DE SECURITE SOCIALE",
+     "CAISSE NATIONALE DE SÉCURITÉ SOCIALE", "CNSS", "ATTESTATION DE
+     TELE-REGLEMENT DES COTISATIONS", "TÉLÉ-RÈGLEMENT", "BORDEREAU DE PAIEMENT",
+     "DÉCLARATION DES SALAIRES", "AMO", "CIMR", ou tout libellé d'organisme
+     social → type_document_justificatif = "quittance_cnss"
+     (JAMAIS "recu", JAMAIS "facture").
+   · Si le document émane de la DGI / "DIRECTION GÉNÉRALE DES IMPÔTS" /
+     "TRÉSORERIE GÉNÉRALE DU ROYAUME" / "TGR" / "SIMPL" (quittance d'IS, d'IR,
+     de TVA, de taxe professionnelle) → type_document_justificatif =
+     "quittance_dgi".
+
+2. TIERS (FOURNISSEUR)
+   · emetteur_nom = L'ORGANISME, toujours : "CNSS" (ou "Caisse Nationale de
+     Sécurité Sociale"), "CIMR", "DGI", "TGR".
+   · ⚠️ Le bloc "IDENTIFICATION DE L'EMPLOYEUR" / "Raison sociale" /
+     "N° d'affiliation" désigne la société gérée ("${dossierNom}") : c'est le
+     CLIENT (client_nom), JAMAIS l'émetteur. Ne jamais mettre ce nom dans
+     emetteur_nom.
+   · sens_facture = "fournisseur" (c'est une dépense de la société gérée).
+
+3. TVA — HORS CHAMP
+   · Cotisations sociales et taxes publiques ne portent AUCUNE TVA :
+     montant_tva = 0 ET taux_tva = 0.
+   · montant_ht = montant_ttc = "MONTANT TOTAL DES COTISATIONS" (à défaut
+     "Montant total à payer" / "Net à payer" / "Montant du télé-règlement").
+   · Ne JAMAIS reconstituer une TVA (20/14/10/7 %) sur ce type de document.
+
+4. LIGNES DU TABLEAU DES COTISATIONS
+   Une ligne par ligne du tableau (ex : "Prestations Familiales", "Prestations
+   Sociales Plafonnées", "Prestations Sociales Non Plafonnées", "AMO",
+   "Taxe de Formation Professionnelle" / "TFP") :
+   · description = intitulé EXACT de la colonne "Nature de la Cotisation"
+   · quantite = 1
+   · total_ht = prix_unitaire_ht = valeur de la colonne "TOTAL DÛ" / "Total dû"
+     (= part ouvrière + part patronale). NE PAS prendre l'assiette (base de
+     calcul), ni le taux, ni une seule des deux parts.
+   · taux_tva = 0
+   · La somme des lignes doit égaler le montant total des cotisations.
+   · Les valeurs "assiette", "part ouvrière" et "part patronale" restent des
+     informations de contexte : elles ne remplacent JAMAIS le total dû.
+
+5. PLAN COMPTABLE MAROCAIN
+   · CNSS / AMO / CIMR → categorie_pcm = "charges_sociales" ET compte_pcm =
+     "6174" (cotisations aux caisses de retraite et de prévoyance sociale ;
+     61741 = CNSS).
+   · INTERDIT pour la CNSS et l'AMO : 6134 et 6161 ("assurance"), 6147 (frais
+     bancaires), 6141. L'AMO est une cotisation sociale, PAS une assurance privée.
+   · DGI / TGR → categorie_pcm = "taxe_professionnelle" ET compte_pcm = "6313"
+     pour la taxe professionnelle et les taxes locales, sinon compte_pcm =
+     "4456" (État, TVA due).
+
+6. DATES ET RÉFÉRENCES
+   · date = "Date de Transmission", à défaut "Date d'Exécution du Prélèvement",
+     à défaut la date d'émission de l'attestation.
+   · numero = numéro de mandat / de déclaration / de télé-règlement
+     (ex : "CNSS-DECE-2025-XXXX"), à défaut le "N° d'affiliation".
+   · periode = "Période de Cotisation" / "Mois de déclaration", telle qu'écrite
+     (ex : "12/2025", "Décembre 2025").
+
+⚠️ La "CAISSE NATIONALE DE CRÉDIT AGRICOLE" (CNCA) est une BANQUE, PAS la CNSS.
 ═══════════════════════════════════════════════════════════════════════════
 
 RÈGLES:
@@ -808,7 +871,7 @@ RÈGLES:
     SI le libellé mentionne une remise d'effet, une LCN ou un chèque (ex: "REMISE LCN N° 630238", "CHÈQUE N° 12345") → IGNORE le numéro d'avis interne de la banque et retourne le numéro de la LCN ou du chèque dans "numero" — c'est CE numéro qui apparaît sur le relevé bancaire du client et sert au rapprochement bancaire.
     SINON → retourne le "N° d'opération" / "N° opération" / "N° d'avis" / "N° avis" dans "numero"
 - type_facture: "acompte" si mots acompte/avance/accompte présents, "avoir" si avoir/remboursement, "standard" sinon
-- type_document_justificatif: "avis_debit" si le document contient "DROIT DE TIMBRE" / "DROITS DE TIMBRE" / "REMISE LCN" / "LETTRE DE CHANGE" / "TIMBRE FISCAL" / "AVIS DE DÉBIT" / "AVIS DE DEBIT", "dum" si "DÉCLARATION UNIQUE DES MARCHANDISES" / "DUM" / "QUITTANCE DOUANIÈRE" / "BUREAU DE DOUANE", "bon_livraison" si titre = "BON DE LIVRAISON" / "BL" / "Delivery Note", "bon_commande" si "BON DE COMMANDE" / "BC" / "Purchase Order", "note_frais" si "NOTE DE FRAIS" / "NDF", "addition" si "ADDITION" / "TICKET DE CAISSE" / "TICKET RESTO" / "TICKET RESTAURANT", "quittance_elec" si "FACTURE ELECTRICITE" / "FACTURE ÉLECTRICITÉ" / "CONSOMMATION ELECTRIQUE" / "CONSOMMATION ÉLECTRIQUE" (même si l'émetteur est ONEE/LYDEC/REDAL/AMENDIS/RADEEMA), "quittance_eau" si émetteur = "ONEE" / "LYDEC" / "REDAL" / "AMENDIS" / "RADEEMA" ou si "FACTURE EAU" / "CONSOMMATION EAU", "quittance_loyer" si "LOYER" / "BAILLEUR" / "LOCATAIRE" / "QUITTANCE DE LOYER" / "AVIS D'ÉCHÉANCE", "recu" si "REÇU" / "RECU" / "RECEIPT" / "REÇU DE CAISSE" / "QUITTANCE" / "REÇU DE PAIEMENT" / "REÇU N°", "facture" sinon
+- type_document_justificatif: "quittance_cnss" si "CNSS" / "CAISSE NATIONALE DE SÉCURITÉ SOCIALE" / "ATTESTATION DE TÉLÉ-RÈGLEMENT DES COTISATIONS" / "BORDEREAU DE PAIEMENT" / "DÉCLARATION DES SALAIRES" / "AMO" / "CIMR" (voir section ORGANISMES SOCIAUX ET PUBLICS — priorité absolue), "quittance_dgi" si "DIRECTION GÉNÉRALE DES IMPÔTS" / "DGI" / "TRÉSORERIE GÉNÉRALE DU ROYAUME" / "TGR" / "SIMPL", "avis_debit" si le document contient "DROIT DE TIMBRE" / "DROITS DE TIMBRE" / "REMISE LCN" / "LETTRE DE CHANGE" / "TIMBRE FISCAL" / "AVIS DE DÉBIT" / "AVIS DE DEBIT", "dum" si "DÉCLARATION UNIQUE DES MARCHANDISES" / "DUM" / "QUITTANCE DOUANIÈRE" / "BUREAU DE DOUANE", "bon_livraison" si titre = "BON DE LIVRAISON" / "BL" / "Delivery Note", "bon_commande" si "BON DE COMMANDE" / "BC" / "Purchase Order", "note_frais" si "NOTE DE FRAIS" / "NDF", "addition" si "ADDITION" / "TICKET DE CAISSE" / "TICKET RESTO" / "TICKET RESTAURANT", "quittance_elec" si "FACTURE ELECTRICITE" / "FACTURE ÉLECTRICITÉ" / "CONSOMMATION ELECTRIQUE" / "CONSOMMATION ÉLECTRIQUE" (même si l'émetteur est ONEE/LYDEC/REDAL/AMENDIS/RADEEMA), "quittance_eau" si émetteur = "ONEE" / "LYDEC" / "REDAL" / "AMENDIS" / "RADEEMA" ou si "FACTURE EAU" / "CONSOMMATION EAU", "quittance_loyer" si "LOYER" / "BAILLEUR" / "LOCATAIRE" / "QUITTANCE DE LOYER" / "AVIS D'ÉCHÉANCE", "recu" si "REÇU" / "RECU" / "RECEIPT" / "REÇU DE CAISSE" / "QUITTANCE" / "REÇU DE PAIEMENT" / "REÇU N°", "facture" sinon
 - categorie_pcm: déduire OBLIGATOIREMENT depuis le nom de l'émetteur, les articles/désignations et la description du document. Utiliser exactement l'une de ces valeurs :
   · "frais_representation" → restaurant, café, brasserie, pizzeria, snack, fast-food, hôtel (repas/resto), réception, traiteur, pâtisserie, salon de thé — ou si les articles sont des plats/boissons/repas
   · "gasoil" → station-service, gasoil, carburant, essence, diesel, Shell, Total, Afriquia, Ziz, Winxo, Petrom — ou si articles = carburant/lubrifiants
@@ -817,11 +880,12 @@ RÈGLES:
   · "eau_electricite" → ONEE, LYDEC, RADEEF, RADEM, RADEEM, eau, électricité, énergie — ou articles = consommation eau/électricité
   · "loyers" → loyer, location, bail, gérance, loyer commercial
   · "assurance" → assurance, Wafa Assurance, AXA, RMA, Allianz, SAHAM, police, prime d'assurance
-  · "charges_sociales" → CNSS, Caisse Nationale de Sécurité Sociale, Sécurité Sociale, cotisations sociales, bordereau / déclaration CNSS (compte 6174). NE PAS confondre avec "assurance" (compagnie privée) ni avec la CNCA (banque)
+  · "charges_sociales" → CNSS, Caisse Nationale de Sécurité Sociale, Sécurité Sociale, AMO, CIMR, cotisations sociales, bordereau / déclaration / attestation de télé-règlement CNSS (compte 6174). NE PAS confondre avec "assurance" (compagnie privée : l'AMO n'en est pas une) ni avec la CNCA (banque)
   · "entretien" → maintenance, réparation, pièces détachées, atelier, garage, dépannage, révision
   · "frais_bancaires" → banque, commission bancaire, frais de tenue, CIH, Attijariwafa, BMCE, BMCI, Banque Populaire, CFG, frais bancaires
   · "encaissement_client" → uniquement si sens_facture = "client" (on émet la facture)
   · "tva_import" → DUM, déclaration douanière, importation, quittance douanière, dédouanement
+  · "taxe_professionnelle" → DGI, Direction Générale des Impôts, TGR, Trésorerie Générale du Royaume, SIMPL, quittance d'impôt, taxe professionnelle, taxes locales (compte 6313) — hors champ TVA
   · "droits_timbre" → DROIT DE TIMBRE / DROITS DE TIMBRE / REMISE LCN / LETTRE DE CHANGE / TIMBRE FISCAL — taxe fiscale, hors TVA, hors EDI DGI (compte 61671)
   · "acompte_fournisseur" → bon de commande, acompte, avance fournisseur (type_document = "bon_commande")
   · "paiement_fournisseur" → achat de marchandises, fournitures, matières premières, prestation générale non classifiable ci-dessus
@@ -831,9 +895,10 @@ RÈGLES:
   · "quittance_elec" → "61252" ET taux_tva = 14
   · "recu" → selon la nature de la dépense : "6147" si restaurant/café/repas, "61251" si carburant/station-service, "6141" sinon
   · frais/commissions bancaires (émetteur = banque : BP, ATW, BMCE, CIH…) → "6147"
-  · CNSS / Sécurité Sociale (categorie_pcm = "charges_sociales") → "6174" (RÈGLE STRICTE, priorité absolue)
+  · "quittance_cnss" — CNSS / AMO / CIMR (categorie_pcm = "charges_sociales") → "6174" ET taux_tva = 0 (RÈGLE STRICTE, priorité absolue ; jamais 6134/6161/6147)
+  · "quittance_dgi" — DGI / TGR → "6313" (taxe professionnelle et taxes locales) sinon "4456" (État, TVA due) ET taux_tva = 0
   · tout autre type → null
-- periode / numero_compteur (UNIQUEMENT pour quittance_eau et quittance_elec) : extraire OBLIGATOIREMENT le montant, la période de consommation (label "Période", "Mois", ex: "01/2025", "Janvier 2025" — retourner telle quelle) et le numéro de compteur (label "N° Compteur", "Compteur", "N° Contrat") → null si absents
+- periode / numero_compteur (UNIQUEMENT pour quittance_eau, quittance_elec et quittance_cnss) : extraire OBLIGATOIREMENT le montant et la période (label "Période", "Mois", "Période de Cotisation", ex: "01/2025", "Janvier 2025" — retourner telle quelle) ; le numéro de compteur (label "N° Compteur", "Compteur", "N° Contrat", eau/élec uniquement) → null si absents
 - DATES — deux champs distincts à identifier OBLIGATOIREMENT pour les BL et BC :
 
   CHAMP "date" (= date d'émission du document) :

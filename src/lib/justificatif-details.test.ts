@@ -15,9 +15,17 @@ describe("resolveJustificatifKind", () => {
       .toBe("quittance_loyer");
   });
 
-  it("reconnaît une quittance CNSS par sa catégorie ou son compte 6174", () => {
+  it("reconnaît une quittance CNSS par son type, sa catégorie ou son compte 6174", () => {
+    expect(resolveJustificatifKind({ type_document: "quittance_cnss" })).toBe("cnss");
     expect(resolveJustificatifKind({ type_document: "recu", categorie_pcm: "cnss_amo" })).toBe("cnss");
-    expect(resolveJustificatifKind({ type_document: "recu", compte_pcm: "6174" })).toBe("cnss");
+    expect(resolveJustificatifKind({ type_document: "recu", categorie_pcm: "charges_sociales" })).toBe("cnss");
+    expect(resolveJustificatifKind({ type_document: "recu", compte_pcm: "61741" })).toBe("cnss");
+  });
+
+  it("reconnaît une quittance DGI / TGR sans la confondre avec un reçu", () => {
+    expect(resolveJustificatifKind({ type_document: "quittance_dgi" })).toBe("dgi");
+    expect(resolveJustificatifKind({ type_document: "recu", categorie_pcm: "taxe_professionnelle" })).toBe("dgi");
+    expect(resolveJustificatifKind({ type_document: "recu", compte_pcm: "6313" })).toBe("dgi");
   });
 
   it("distingue bon de livraison, bon de commande et DUM", () => {
@@ -81,6 +89,17 @@ describe("justificatifDetails", () => {
     expect(d.kind).toBe("cnss");
     expect(d.chips.map(c => c.label)).toContain("Période de cotisation");
     expect(d.chips.map(c => c.label)).toContain("N° affiliation");
+    expect(d.note).toMatch(/hors champ TVA/i);
+  });
+
+  it("affiche l'organisme et le hors champ TVA pour une quittance DGI", () => {
+    const d = justificatifDetails({
+      type_document: "quittance_dgi", nom_tiers: "DGI", numero_piece: "SIMPL-2026-4471",
+      montant_ttc: 31200, montant_ht: 31200, date_document: "2026-03-31",
+    });
+    expect(d.kind).toBe("dgi");
+    expect(d.label).toBe("Quittance DGI");
+    expect(d.chips.map(c => c.label)).toContain("N° quittance");
     expect(d.note).toMatch(/hors champ TVA/i);
   });
 

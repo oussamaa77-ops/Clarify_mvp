@@ -1177,7 +1177,7 @@ export const marquerPayee = createServerFn({ method: "POST" })
     z.object({
       facture_id: z.string().uuid(),
       date_paiement: z.string(),
-      mode: z.string().default("virement"),
+      mode: z.string().default("especes"),
     }).parse(input)
   )
   .handler(async ({ data }) => {
@@ -1188,6 +1188,13 @@ export const marquerPayee = createServerFn({ method: "POST" })
       .eq("id", data.facture_id)
       .single();
     if (!f) throw new Error("Facture introuvable");
+    // Ce bouton est le règlement COMPTANT du guichet : les espèces passent par la
+    // caisse (journal CAI / 5143, comme l'encaissement manuel de la page Banque),
+    // tout autre mode par la banque (BQ / 5141). Sans ce couple, le libellé du
+    // bouton dirait « espèces » pendant que l'écriture débiterait la banque.
+    const especes = data.mode === "especes";
+    const journal = especes ? "CAI" : "BQ";
+    const compteTresorerie = especes ? "5143" : "5141";
     // Le règlement passe par un paiement `manuel` couvrant le reste dû ; le trigger
     // recalcule montant_paye/montant_restant/statut. Le montant du paiement = solde
     // restant (TTC − déjà payé), pour ne pas sur-payer une facture partiellement réglée.
@@ -1201,9 +1208,14 @@ export const marquerPayee = createServerFn({ method: "POST" })
     }
     const ref = f.numero ?? data.facture_id;
     await supabase.from("ecritures_comptables").insert([
-      { dossier_id: f.dossier_id, journal_code: "BQ", compte_numero: "5141", date_ecriture: data.date_paiement, libelle: `Encaissement ${ref}`, debit: Number(f.montant_ttc), credit: 0, reference_piece: ref, facture_id: data.facture_id, valide: true },
-      { dossier_id: f.dossier_id, journal_code: "BQ", compte_numero: "3421", date_ecriture: data.date_paiement, libelle: `Règlement client ${ref}`, debit: 0, credit: Number(f.montant_ttc), reference_piece: ref, facture_id: data.facture_id, valide: true },
+      { dossier_id: f.dossier_id, journal_code: journal, compte_numero: compteTresorerie, date_ecriture: data.date_paiement, libelle: `Encaissement ${especes ? "espèces " : ""}${ref}`, debit: Number(f.montant_ttc), credit: 0, reference_piece: ref, facture_id: data.facture_id, valide: true },
+      { dossier_id: f.dossier_id, journal_code: journal, compte_numero: "3421", date_ecriture: data.date_paiement, libelle: `Règlement client ${ref}`, debit: 0, credit: Number(f.montant_ttc), reference_piece: ref, facture_id: data.facture_id, valide: true },
     ]);
+    // Estampille du mode réellement employé : c'est elle que lit la colonne
+    // « Mode de paiement » quand aucune pièce bancaire n'explique le règlement
+    // (cf. src/lib/mode-paiement.ts). Sans elle, la facture réglée au comptant
+    // afficherait le mode PRÉVU lu par l'OCR à la création.
+    await supabase.from("factures").update({ mode_reglement: data.mode }).eq("id", data.facture_id);
     return { ok: true };
   });
 

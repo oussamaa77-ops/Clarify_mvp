@@ -327,6 +327,52 @@ describe("buildOcrPrompt — règles présentes (intégration)", () => {
     expect(promptText).toContain("prix_unitaire_ht");
   });
 
+  // Bordereaux et attestations d'organismes sociaux / publics (CNSS, DGI, CIMR, AMO) :
+  // sans ces règles, l'OCR classe le document en "recu", prend l'employeur pour le
+  // tiers et reconstitue une TVA de 20 % sur des cotisations qui en sont exonérées.
+  it("classe les documents d'organismes sociaux en quittance_cnss, jamais en reçu/facture", () => {
+    expect(promptText).toContain("ORGANISMES SOCIAUX ET PUBLICS");
+    expect(promptText).toContain("ATTESTATION DE\n     TELE-REGLEMENT DES COTISATIONS");
+    expect(promptText).toContain('type_document_justificatif = "quittance_cnss"');
+    expect(promptText).toContain('(JAMAIS "recu", JAMAIS "facture")');
+    expect(promptText).toContain('"quittance_dgi"');
+  });
+
+  it("impose l'organisme comme tiers et interdit le nom de l'employeur", () => {
+    expect(promptText).toContain("IDENTIFICATION DE L'EMPLOYEUR");
+    expect(promptText).toContain("JAMAIS l'émetteur");
+    expect(promptText).toContain('sens_facture = "fournisseur"');
+  });
+
+  it("impose l'absence de TVA et HT = TTC sur les cotisations", () => {
+    expect(promptText).toContain("montant_tva = 0 ET taux_tva = 0");
+    expect(promptText).toContain('montant_ht = montant_ttc = "MONTANT TOTAL');
+    expect(promptText).toContain("Ne JAMAIS reconstituer une TVA");
+  });
+
+  it("impose la colonne « Total dû » pour les lignes de cotisation", () => {
+    expect(promptText).toContain('colonne "TOTAL DÛ"');
+    expect(promptText).toContain("part ouvrière + part patronale");
+    expect(promptText).toContain("NE PAS prendre l'assiette");
+  });
+
+  it("impose le compte 6174 et interdit les comptes d'assurance pour CNSS / AMO", () => {
+    expect(promptText).toContain('categorie_pcm = "charges_sociales" ET compte_pcm =\n     "6174"');
+    expect(promptText).toContain("INTERDIT pour la CNSS et l'AMO");
+    expect(promptText).toContain("L'AMO est une cotisation sociale, PAS une assurance privée");
+  });
+
+  it("priorise la date de transmission et le n° de mandat", () => {
+    expect(promptText).toContain('date = "Date de Transmission"');
+    expect(promptText).toContain("Date d'Exécution du Prélèvement");
+    expect(promptText).toContain("CNSS-DECE-2025-XXXX");
+    expect(promptText).toContain("Période de Cotisation");
+  });
+
+  it("distingue toujours la CNCA (banque) de la CNSS", () => {
+    expect(promptText).toContain('La "CAISSE NATIONALE DE CRÉDIT AGRICOLE" (CNCA) est une BANQUE');
+  });
+
   it("mentionne la société gérée dans le prompt", () => {
     expect(promptText).toContain("Dossier SA");
     expect(promptText).toContain("123456789012345");

@@ -37,6 +37,10 @@ import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/componen
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { DocumentsAssocies } from "@/components/DocumentsAssocies";
 import { logAudit } from "@/lib/audit";
+import {
+  indexerModesPaiement, modePaiementFacture,
+  MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
+} from "@/lib/mode-paiement";
 import { Scale } from "lucide-react";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/fournisseurs")({
@@ -116,6 +120,21 @@ function EcheanceCell({ f }: { f: FactureF }) {
   );
 }
 
+/**
+ * Mode de règlement constaté d'une facture d'achat. Une facture non réglée n'en
+ * a pas : la cellule reste vide plutôt que d'afficher le mode simplement PRÉVU
+ * à la saisie (`mode_reglement`, pré-rempli à « virement »), qui laisserait
+ * croire que le décaissement a eu lieu.
+ */
+function ModePaiementCell({ mode }: { mode: ModePaiement | null }) {
+  if (!mode) return <span className="text-muted-foreground text-xs">—</span>;
+  return (
+    <span className={`text-[11px] px-2 py-0.5 rounded-full border font-medium ${MODE_PAIEMENT_CLS[mode]}`}>
+      {MODE_PAIEMENT_LABEL[mode]}
+    </span>
+  );
+}
+
 function statutBadge(f: FactureF) {
   const restant = Number(f.montant_restant ?? f.montant_ttc);
   if (restant <= 0 || f.statut_paiement === "payee")
@@ -137,6 +156,7 @@ function FournisseursPage() {
   const [tab, setTab] = useState<"factures" | "saisie" | "tiers" | "balance" | "reporting">("factures");
   const [justificatifsAchat, setJustificatifsAchat] = useState<any[]>([]);
   const [factures, setFactures] = useState<FactureF[]>([]);
+  const [modes, setModes] = useState<Map<string, ModePaiement>>(new Map());
   const [fournisseurs, setFournisseurs] = useState<Fournisseur[]>([]);
   const [dossier, setDossier] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -203,7 +223,11 @@ function FournisseursPage() {
 
   const load = async () => {
     setLoading(true);
-    const [{ data: ff }, { data: fs }, { data: dos }, { data: jj }] = await Promise.all([
+    // Les deux dernières requêtes portent les PIÈCES de règlement (ligne de relevé
+    // lettrée, décaissement saisi) : c'est d'elles que se déduit le mode de paiement
+    // réellement constaté — cf. src/lib/mode-paiement.ts.
+    const [{ data: ff }, { data: fs }, { data: dos }, { data: jj }, { data: tx }, { data: enc }] =
+      await Promise.all([
       (supabase.from("factures_fournisseurs") as any)
         .select("*")
         .eq("dossier_id", dossierId)
@@ -215,11 +239,18 @@ function FournisseursPage() {
         .eq("dossier_id", dossierId)
         .eq("flux_type", "achat")
         .order("created_at", { ascending: false }),
+      (supabase.from("transactions_bancaires") as any)
+        .select("facture_id,document_type,libelle,reference")
+        .eq("dossier_id", dossierId).not("facture_id", "is", null),
+      (supabase.from("encaissements") as any)
+        .select("facture_fournisseur_id,type")
+        .eq("dossier_id", dossierId).not("facture_fournisseur_id", "is", null),
     ]);
     setFactures((ff ?? []) as FactureF[]);
     setFournisseurs((fs ?? []) as Fournisseur[]);
     setDossier(dos);
     setJustificatifsAchat(jj ?? []);
+    setModes(indexerModesPaiement("fournisseur", { transactions: tx ?? [], encaissements: enc ?? [] }));
     setLoading(false);
   };
 
@@ -784,6 +815,11 @@ function FournisseursPage() {
     setMontantTtc(0);
     setModeReglement("virement");
     if (!keepPreview) { setPdfPreviewUrl(null); setPreviewFileType(null); setPdfPages([]); }
+    // Le fichier scanné meurt avec le formulaire. Sans cette ligne il survivait à
+    // l'enregistrement : une saisie MANUELLE enchaînée après un scan archivait le
+    // PDF de la facture précédente sur la nouvelle — un document faux, attaché
+    // silencieusement. handleOcr rappelle setScanFile juste après son resetForm(true).
+    setScanFile(null);
     setNewFournPending(null);
     setLignes([{ designation: "", quantite: 1, prix_unitaire: 0, taux_tva: 20 }]);
     setEcheances([]);
@@ -900,19 +936,20 @@ function FournisseursPage() {
                     <TableHead className="text-right">TTC</TableHead>
                     <TableHead className="text-right">Restant</TableHead>
                     <TableHead>Statut</TableHead>
+                    <TableHead>Mode de paiement</TableHead>
                     <TableHead className="w-10"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {loading ? (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center py-8">
+                      <TableCell colSpan={10} className="text-center py-8">
                         <Loader2 className="h-5 w-5 animate-spin mx-auto" />
                       </TableCell>
                     </TableRow>
                   ) : factures.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center py-12 text-muted-foreground">
+                      <TableCell colSpan={10} className="text-center py-12 text-muted-foreground">
                         <Inbox className="h-8 w-8 mx-auto mb-2 opacity-30" />
                         Aucune facture — scannez un PDF ou faites une saisie manuelle
                       </TableCell>
@@ -946,25 +983,39 @@ function FournisseursPage() {
                               {s.label}
                             </span>
                           </TableCell>
+                          <TableCell><ModePaiementCell mode={modePaiementFacture(f, modes)} /></TableCell>
                           <TableCell>
                             <div className="flex gap-1">
-                              {/* Visualiser la facture — TOUJOURS proposé :
-                                  • fichier original archivé → aperçu du scan (panneau latéral) ;
-                                  • sinon (factures saisies avant l'archivage, ou saisie
-                                    manuelle sans scan) → détail de la facture telle qu'elle
-                                    est enregistrée, plutôt qu'un bouton absent. */}
+                              {/* Deux lectures distinctes, comme côté clients :
+                                  • le DÉTAIL de la facture telle qu'enregistrée — toujours
+                                    disponible, y compris sur une saisie manuelle ;
+                                  • le DOCUMENT ORIGINAL — seulement si un scan est archivé
+                                    (les factures antérieures à l'archivage n'en ont pas). */}
                               <Button
                                 size="icon"
                                 variant="ghost"
                                 className="h-7 w-7"
-                                onClick={() =>
-                                  f.fichier_original_url
-                                    ? setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })
-                                    : setFactureDetail(f)
-                                }
-                                title={f.fichier_original_url ? "Voir le document original" : "Voir le détail (aucun document scanné archivé)"}
+                                onClick={() => setFactureDetail(f)}
+                                title="Voir le détail de la facture"
                               >
-                                <Eye className={`h-3.5 w-3.5 ${f.fichier_original_url ? "" : "opacity-50"}`} />
+                                <Eye className="h-3.5 w-3.5" />
+                              </Button>
+                              {/* TOUJOURS rendu, désactivé quand rien n'est archivé : un
+                                  bouton conditionnel disparaîtrait ici pour TOUTES les
+                                  factures antérieures à l'archivage du scan, et passerait
+                                  pour une fonction absente. Le panneau d'aperçu offre le
+                                  téléchargement et l'ouverture dans un onglet. */}
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                disabled={!f.fichier_original_url}
+                                className="h-7 w-7"
+                                onClick={() => setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })}
+                                title={f.fichier_original_url
+                                  ? "Voir / télécharger le document original"
+                                  : "Aucun document original archivé — rescannez la facture pour l'attacher"}
+                              >
+                                <FileText className="h-3.5 w-3.5" />
                               </Button>
                               {/* Annuler le paiement : actif seulement si la facture est payée. */}
                               <Button
@@ -1642,6 +1693,7 @@ function FournisseursPage() {
                                 <TableHead className="text-right">TTC</TableHead>
                                 <TableHead className="text-right">Restant</TableHead>
                                 <TableHead>Statut</TableHead>
+                                <TableHead>Mode de paiement</TableHead>
                                 <TableHead className="w-10"></TableHead>
                               </TableRow>
                             </TableHeader>
@@ -1649,7 +1701,7 @@ function FournisseursPage() {
                               {facturesFourn.length === 0 ? (
                                 <TableRow>
                                   <TableCell
-                                    colSpan={7}
+                                    colSpan={8}
                                     className="text-center py-10 text-muted-foreground"
                                   >
                                     <FileText className="h-6 w-6 mx-auto mb-1 opacity-30" />
@@ -1691,6 +1743,7 @@ function FournisseursPage() {
                                           {s.label}
                                         </span>
                                       </TableCell>
+                                      <TableCell><ModePaiementCell mode={modePaiementFacture(f, modes)} /></TableCell>
                                       <TableCell>
                                         <div className="flex gap-1">
                                           {/* Même visualisation que la liste générale. */}
@@ -1698,14 +1751,22 @@ function FournisseursPage() {
                                             size="icon"
                                             variant="ghost"
                                             className="h-7 w-7"
-                                            onClick={() =>
-                                              f.fichier_original_url
-                                                ? setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })
-                                                : setFactureDetail(f)
-                                            }
-                                            title={f.fichier_original_url ? "Voir le document original" : "Voir le détail (aucun document scanné archivé)"}
+                                            onClick={() => setFactureDetail(f)}
+                                            title="Voir le détail de la facture"
                                           >
-                                            <Eye className={`h-3.5 w-3.5 ${f.fichier_original_url ? "" : "opacity-50"}`} />
+                                            <Eye className="h-3.5 w-3.5" />
+                                          </Button>
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            disabled={!f.fichier_original_url}
+                                            className="h-7 w-7"
+                                            onClick={() => setDocView({ title: `Facture ${f.numero ?? ""}`.trim(), url: f.fichier_original_url, fileName: f.fichier_original_nom, mimeType: f.fichier_original_type })}
+                                            title={f.fichier_original_url
+                                              ? "Voir / télécharger le document original"
+                                              : "Aucun document original archivé — rescannez la facture pour l'attacher"}
+                                          >
+                                            <FileText className="h-3.5 w-3.5" />
                                           </Button>
                                           <Button
                                             size="icon"
@@ -1975,10 +2036,10 @@ function FournisseursPage() {
       {/* Aperçu du document original (panneau latéral droit) */}
       <DocumentViewer open={!!docView} onOpenChange={(o) => { if (!o) setDocView(null); }} source={docView} />
 
-      {/* ── Détail d'une facture sans document scanné ──────────────────────────
-          Repli du bouton « Voir » : on restitue la facture telle qu'enregistrée
-          (en-tête, montants, lignes) au lieu de laisser l'utilisateur sans rien.
-          Les factures saisies avant l'archivage du scan n'ont pas de fichier. */}
+      {/* ── Détail d'une facture ───────────────────────────────────────────────
+          Restitue la facture telle qu'enregistrée (en-tête, montants, lignes).
+          Toujours accessible : le document original, lui, ouvre le scan archivé
+          quand il existe — les factures saisies avant l'archivage n'en ont pas. */}
       <Dialog open={!!factureDetail} onOpenChange={(o) => { if (!o) setFactureDetail(null); }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
@@ -1988,20 +2049,26 @@ function FournisseursPage() {
           </DialogHeader>
           {factureDetail && (
             <div className="space-y-4">
-              <div className="flex items-start gap-2 rounded-md bg-muted/60 p-3 text-xs text-muted-foreground">
-                <AlertCircle className="h-4 w-4 shrink-0 mt-px" />
-                <span>
-                  Aucun document scanné n'est archivé pour cette facture — voici son
-                  contenu enregistré. Les factures scannées depuis la mise en place de
-                  l'archivage ouvrent directement l'original.
-                </span>
-              </div>
+              {/* Signalé seulement quand rien n'est archivé : sinon le bouton
+                  « document original » de la ligne ouvre déjà le scan. */}
+              {!factureDetail.fichier_original_url && (
+                <div className="flex items-start gap-2 rounded-md bg-muted/60 p-3 text-xs text-muted-foreground">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-px" />
+                  <span>
+                    Aucun document scanné n'est archivé pour cette facture — voici son
+                    contenu enregistré. Les factures scannées depuis la mise en place de
+                    l'archivage ouvrent directement l'original.
+                  </span>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
                 {[
                   ["Date facture", factureDetail.date_facture ? new Date(factureDetail.date_facture).toLocaleDateString("fr-MA") : "—"],
                   ["Échéance", factureDetail.date_echeance ? new Date(factureDetail.date_echeance).toLocaleDateString("fr-MA") : "—"],
-                  ["Mode de règlement", factureDetail.mode_reglement ?? "—"],
+                  // Le mode CONSTATÉ (pièce de règlement), pas le mode prévu à la
+                  // saisie — même lecture que la colonne « Mode de paiement ».
+                  ["Mode de paiement", (() => { const m = modePaiementFacture(factureDetail, modes); return m ? MODE_PAIEMENT_LABEL[m] : "—"; })()],
                   ["Montant HT", fmt(Number(factureDetail.montant_ht))],
                   ["TVA", fmt(Number(factureDetail.montant_tva))],
                   ["Montant TTC", fmt(Number(factureDetail.montant_ttc))],

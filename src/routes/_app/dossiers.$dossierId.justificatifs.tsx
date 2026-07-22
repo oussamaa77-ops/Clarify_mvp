@@ -121,6 +121,7 @@ type FiscalRule = {
   tva_non_deductible: boolean; // TVA non récupérable → montant_ht aligné sur TTC
   edi_bloque:         boolean; // eligible_edi forcé à false
   tva_zero_doc:       boolean; // TVA nulle sur le document lui-même (BC, BL)
+  ht_egal_ttc?:       boolean; // Hors champ TVA (cotisations, impôts) → HT = TTC
   alerte?:            string;  // Message affiché dans l'UI
 };
 
@@ -176,7 +177,15 @@ const FISCAL_RULES: Partial<Record<string, FiscalRule>> = {
     tva_non_deductible: false,
     edi_bloque:         true,
     tva_zero_doc:       true,
-    alerte: "ℹ️ CNSS / Sécurité Sociale — Charges sociales imputées au compte 6174. Hors champ TVA, à exclure du relevé de déduction EDI DGI.",
+    ht_egal_ttc:        true,
+    alerte: "ℹ️ CNSS / AMO / CIMR — Cotisations sociales imputées au compte 6174. Hors champ TVA (HT = TTC), à exclure du relevé de déduction EDI DGI.",
+  },
+  taxe_professionnelle: {
+    tva_non_deductible: false,
+    edi_bloque:         true,
+    tva_zero_doc:       true,
+    ht_egal_ttc:        true,
+    alerte: "ℹ️ DGI / TGR — Impôt ou taxe (6313). Hors champ TVA (HT = TTC), à exclure du relevé de déduction EDI DGI.",
   },
 };
 
@@ -193,7 +202,7 @@ const applyFiscalRules = (
   const overrides: Partial<typeof EMPTY_FORM> = {
     eligible_edi: rule ? !rule.edi_bloque : currentForm.eligible_edi,
   };
-  if (rule?.tva_non_deductible) overrides.montant_ht = ttc;
+  if (rule?.tva_non_deductible || rule?.ht_egal_ttc) overrides.montant_ht = ttc;
   if (rule?.tva_zero_doc || isBL) overrides.taux_tva = 0;
   return overrides;
 };
@@ -264,6 +273,21 @@ const EMPTY_FORM = {
   eligible_edi:    false,
 };
 
+// ─── Organisme social / public émetteur ───────────────────────────────────────
+// Sur un bordereau ou une attestation de télé-règlement CNSS, le bloc
+// « IDENTIFICATION DE L'EMPLOYEUR » porte la raison sociale du dossier lui-même :
+// l'OCR le prend souvent pour l'émetteur et le tiers devient la société gérée.
+// Le vrai tiers est l'organisme, qu'on relit directement dans le document.
+const ORGANISMES: [RegExp, string][] = [
+  [/caisse\s+nationale\s+de\s+s[ée]curit[ée]\s+sociale|\bcnss\b/i, "CNSS"],
+  [/caisse\s+interprofessionnelle\s+marocaine\s+de\s+retraite|\bcimr\b/i, "CIMR"],
+  [/direction\s+g[ée]n[ée]rale\s+des\s+imp[ôo]ts|\bdgi\b|\bsimpl\b/i, "DGI"],
+  [/tr[ée]sorerie\s+g[ée]n[ée]rale\s+du\s+royaume|\btgr\b/i, "TGR"],
+];
+
+const organismeEmetteur = (texte: string): string | null =>
+  ORGANISMES.find(([re]) => re.test(texte))?.[1] ?? null;
+
 // ─── Détection catégorie PCM par mots-clés (fallback local) ──────────────────
 
 const inferCatFromContent = (nomTiers: string, lignes: { designation?: string }[], docType: string): string | null => {
@@ -271,6 +295,16 @@ const inferCatFromContent = (nomTiers: string, lignes: { designation?: string }[
     nomTiers,
     ...lignes.map(l => l.designation ?? ""),
   ].join(" ").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+  // Organismes sociaux — priorité absolue : « Assurance Maladie Obligatoire »
+  // déclenche sinon la règle assurance plus bas et part en 6161, alors qu'une
+  // cotisation sociale relève du 6174. La CNCA (Crédit Agricole) est une banque,
+  // et « AMO » / « TFP » seuls sont écartés : ce sont aussi des raisons sociales.
+  if (docType === "quittance_cnss") return "charges_sociales";
+  if (!/credit.?agricole|\bcnca\b/.test(haystack)
+      && /\bcnss\b|caisse.nationale.de.securite.sociale|securite.sociale|assurance.maladie.obligatoire|\bcimr\b|caisse.interprofessionnelle.marocaine.de.retraite|cotisations?.sociales?|prestations.(familiales|sociales)|taxe.de.formation.professionnelle/.test(haystack))
+    return "charges_sociales";
+  if (docType === "quittance_dgi") return "taxe_professionnelle";
 
   // Droits de timbre / LCN — priorité absolue (hors TVA, hors EDI DGI)
   if (/droit.?de.?timbre|remise.?lcn|lettre.?de.?change|timbre.?fiscal/.test(haystack)) return "droits_timbre";
@@ -497,6 +531,12 @@ function JustificatifsPage() {
 
   const detectDocumentType = (text: string): string => {
     const t = text.toUpperCase();
+    // Organismes sociaux / publics d'abord : leurs documents s'intitulent souvent
+    // « attestation » ou « quittance » et seraient sinon rabattus sur "recu".
+    // « BORDEREAU DE PAIEMENT » et « AMO » seuls ne suffisent pas : les banques
+    // émettent aussi des bordereaux, et AMO peut être une raison sociale.
+    if (/CAISSE\s+NATIONALE\s+DE\s+S[ÉE]CURIT[ÉE]\s+SOCIALE|\bCNSS\b|T[ÉE]L[ÉE]\s*-?\s*R[ÈE]GLEMENT\s+DES?\s+COTISATIONS|D[ÉE]CLARATION\s+DES\s+SALAIRES|BORDEREAU\s+DE\s+(PAIEMENT|D[ÉE]CLARATION)\s+DES?\s+COTISATIONS|\bCIMR\b|CAISSE\s+INTERPROFESSIONNELLE\s+MAROCAINE\s+DE\s+RETRAITE/.test(t)) return "quittance_cnss";
+    if (/DIRECTION\s+G[ÉE]N[ÉE]RALE\s+DES\s+IMP[ÔO]TS|\bDGI\b|TR[ÉE]SORERIE\s+G[ÉE]N[ÉE]RALE\s+DU\s+ROYAUME|\bTGR\b|\bSIMPL\b/.test(t)) return "quittance_dgi";
     if (/DROIT\s+DE\s+TIMBRE|REMISE\s+LCN|LETTRE\s+DE\s+CHANGE|TIMBRE\s+FISCAL/.test(t)) return "avis_debit";
     if (/D[ÉE]CLARATION\s+UNIQUE\s+DES?\s+MARCHANDISES|\bDUM\b|QUITTANCE\s+DOUAN|BUREAU\s+DE\s+DOUANE|D[ÉE]DOUANEMENT/.test(t)) return "dum";
     if (/FACTURE\s+[ÉE]LECTRICIT[ÉE]|CONSOMMATION\s+[ÉE]LECTRIQUE/.test(t)) return "quittance_elec";
@@ -521,6 +561,9 @@ function JustificatifsPage() {
     avis_debit:     "avis_debit",
     quittance_eau:  "quittance_eau",
     quittance_elec: "quittance_elec",
+    quittance_cnss: "quittance_cnss",
+    quittance_dgi:  "quittance_dgi",
+    quittance_loyer: "quittance_loyer",
   };
 
   // ── OCR upload ─────────────────────────────────────────────────────────────
@@ -591,7 +634,17 @@ function JustificatifsPage() {
         : detectedType;
       const validCats = new Set(CATEGORIES_PCM.map(c => c.value));
       const aiCat    = (result as any).categorie_pcm;
-      const nomTiers = result.emetteur_nom || result.client_nom_extrait || "";
+      let nomTiers   = result.emetteur_nom || result.client_nom_extrait || "";
+
+      // Bordereau / attestation d'organisme : le tiers est l'organisme, jamais la
+      // société gérée lue sous « IDENTIFICATION DE L'EMPLOYEUR » (cf. organismeEmetteur).
+      if (finalType === "quittance_cnss" || finalType === "quittance_dgi") {
+        const organisme = organismeEmetteur(
+          [extractedText, nomTiers, ...(result.lignes ?? []).map((l: any) => l.designation ?? "")].join(" "),
+        );
+        if (organisme) nomTiers = organisme;
+      }
+
       const localCat = inferCatFromContent(nomTiers, result.lignes ?? [], finalType);
 
       // Catégorie brute depuis contenu / IA / sens
@@ -605,6 +658,8 @@ function JustificatifsPage() {
         finalType === "dum"           ? "tva_import"          :
         finalType === "bon_commande"  ? "acompte_fournisseur" :
         finalType === "quittance_eau" || finalType === "quittance_elec" ? "eau_electricite" :
+        finalType === "quittance_cnss" ? "charges_sociales"     :
+        finalType === "quittance_dgi"  ? "taxe_professionnelle" :
         rawCat;
 
       const ttc = result.montant_ttc > 0 ? result.montant_ttc : 0;
@@ -628,16 +683,25 @@ function JustificatifsPage() {
       // Mapping automatique compte PCM / taux TVA : IA > défaut du type de document > catégorie
       const aiCompte  = (result as any).compte_pcm;
       const pcmDef    = TYPE_PCM_DEFAULTS[finalType];
-      const comptePcm =
+      let comptePcm =
         (typeof aiCompte === "string" && /^\d{4,6}$/.test(aiCompte.trim()) ? aiCompte.trim() : null) ??
         pcmDef?.compte ??
         PCM_CODE[cat] ??
         "6141";
       const tauxTva = result.taux_tva != null ? result.taux_tva : (pcmDef?.tva ?? 0);
 
+      // Cotisations sociales : le compte reste dans le 617x quoi qu'ait proposé l'IA.
+      // L'AMO ("Assurance Maladie Obligatoire") est régulièrement confondue avec une
+      // assurance privée (6134 / 6161), ce qui fausse l'imputation des charges sociales.
+      if (cat === "charges_sociales" && !comptePcm.startsWith("6174")) comptePcm = "6174";
+      if (cat === "taxe_professionnelle" && !/^(6313|4456)/.test(comptePcm)) comptePcm = "6313";
+
       // Override "dur" : un compte 61312 (Locations de constructions) ⇒ Quittance de loyer.
       // Garantit que le type affiché suit le PCM même si l'OCR a typé "recu".
       if (comptePcm === "61312") finalType = "quittance_loyer";
+      // 6174 = cotisations aux caisses de retraite et de prévoyance sociale (jamais
+      // 6171 « salaires », qui n'est pas une quittance d'organisme).
+      if (comptePcm.startsWith("6174")) finalType = "quittance_cnss";
 
       setForm({
         ...EMPTY_FORM,

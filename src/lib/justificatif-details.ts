@@ -33,6 +33,7 @@ export interface JustificatifLike {
 export type JustificatifKind =
   | "quittance_loyer"
   | "cnss"
+  | "dgi"
   | "bon_livraison"
   | "bon_commande"
   | "dum"
@@ -127,7 +128,10 @@ export function resolveJustificatifKind(j: JustificatifLike): JustificatifKind {
 
   // Quittances : le compte comptable est le discriminant le plus fiable.
   if (type === "quittance_loyer" || cat === "loyers" || compteCommence(j, "6131")) return "quittance_loyer";
-  if (cat === "cnss_amo" || cat === "charges_sociales" || compteCommence(j, "6174")) return "cnss";
+  if (type === "quittance_cnss" || cat === "cnss_amo" || cat === "charges_sociales" || compteCommence(j, "6174"))
+    return "cnss";
+  if (type === "quittance_dgi" || cat === "taxe_professionnelle" || compteCommence(j, "6313", "4456"))
+    return "dgi";
   if (cat === "eau_electricite" || compteCommence(j, "6125")) return "energie";
   if (cat === "gasoil" || compteCommence(j, "61241", "61223")) return "carburant";
   if (cat === "telecom" || compteCommence(j, "6132")) return "telecom";
@@ -170,6 +174,7 @@ export function justificatifDetails(j: JustificatifLike): JustificatifDetails {
       };
 
     // CNSS : une déclaration de cotisation, pas un achat. Ni TVA ni EDI.
+    // Le tiers est l'organisme (CNSS, AMO, CIMR) — jamais l'employeur déclarant.
     case "cnss":
       return {
         kind, label: "Quittance CNSS", cls: "bg-sky-50 text-sky-700 border-sky-200",
@@ -181,6 +186,20 @@ export function justificatifDetails(j: JustificatifLike): JustificatifDetails {
           { label: "Cotisations", value: fmtMad(ttc), mono: true },
         ],
         note: "Charges sociales (6174) — hors champ TVA, à exclure du relevé de déduction EDI DGI.",
+      };
+
+    // DGI / TGR : un impôt ou une taxe. Comme la CNSS, hors champ TVA et hors EDI.
+    case "dgi":
+      return {
+        kind, label: "Quittance DGI", cls: "bg-stone-100 text-stone-700 border-stone-200",
+        montant: ttc,
+        chips: [
+          { label: "Période / exercice", value: periode ?? "—" },
+          { label: "Organisme", value: tiers ?? "DGI" },
+          { label: "N° quittance", value: piece ?? "—", mono: true },
+          { label: "Montant", value: fmtMad(ttc), mono: true },
+        ],
+        note: "Impôt ou taxe (6313 / 4456) — hors champ TVA, à exclure du relevé de déduction EDI DGI.",
       };
 
     // Bon de livraison : pièce de suivi physique. Il n'a pas de valeur comptable :

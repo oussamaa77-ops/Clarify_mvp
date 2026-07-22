@@ -11,10 +11,14 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Plus, FileCode, Eye, CheckCircle, Upload, Loader2, Download, X, AlertCircle, CheckCircle2, UserPlus, Clock, Mail, FileText, Trash2, Undo2 } from "lucide-react";
+import { Plus, FileCode, Eye, CheckCircle, Upload, Loader2, Download, X, AlertCircle, CheckCircle2, UserPlus, Clock, Mail, FileText, Trash2, Undo2, Banknote } from "lucide-react";
 import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/components/EcheancesInput";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
+import {
+  indexerModesPaiement, modePaiementFacture,
+  MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
+} from "@/lib/mode-paiement";
 import { toast } from "sonner";
 
 interface Ligne { designation: string; quantite: number; prix_unitaire: number; taux_tva: number }
@@ -26,6 +30,7 @@ interface Facture {
   type: string; montant_paye: number; montant_restant: number; mode_reglement: string | null;
   xml_ubl: string | null; hash_sha256: string | null; dgi_uuid: string | null; dgi_response: any;
   fichier_original_url: string | null; fichier_original_nom: string | null; fichier_original_type: string | null;
+  lignes?: Ligne[] | null;
 }
 
 interface OcrData {
@@ -72,6 +77,19 @@ function StatutPaiementBadge({ f }: { f: Facture }) {
   return <Badge variant="secondary" className="text-xs">En attente</Badge>;
 }
 
+/**
+ * Mode de règlement constaté. Une facture non réglée n'en a pas : la cellule
+ * reste vide plutôt que d'afficher le mode simplement prévu à la création.
+ */
+function ModePaiementCell({ mode }: { mode: ModePaiement | null }) {
+  if (!mode) return <span className="text-muted-foreground text-xs">—</span>;
+  return (
+    <span className={`text-[11px] px-2 py-0.5 rounded-full border font-medium ${MODE_PAIEMENT_CLS[mode]}`}>
+      {MODE_PAIEMENT_LABEL[mode]}
+    </span>
+  );
+}
+
 function DGIBadge({ statut, statut_dgi }: { statut: string; statut_dgi: string | null }) {
   if (statut_dgi === "en_analyse" || statut === "envoyee")
     return <Badge className="bg-yellow-100 text-yellow-800 text-xs flex items-center gap-1"><Clock className="h-3 w-3"/>En analyse</Badge>;
@@ -115,9 +133,12 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
 
   const [factures, setFactures] = useState<Facture[]>([]);
   const [clients, setClients]   = useState<Client[]>([]);
+  const [modes, setModes]       = useState<Map<string, ModePaiement>>(new Map());
   const [loading, setLoading]   = useState(true);
   const [openCreate, setOpenCreate] = useState(false);
-  const [viewXml, setViewXml]   = useState<Facture | null>(null);
+  // Détail de la facture telle qu'enregistrée (en-tête, montants, lignes) : c'est
+  // la lecture métier, là où le XML UBL n'est qu'un livrable technique pour la DGI.
+  const [factureDetail, setFactureDetail] = useState<Facture | null>(null);
   const [docView, setDocView]   = useState<DocumentViewerSource | null>(null);
   const [dgiResult, setDgiResult] = useState<any>(null);
   const [processing, setProcessing] = useState<string | null>(null);
@@ -147,12 +168,21 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
 
   const load = async () => {
     setLoading(true);
-    const [{data:f},{data:c}] = await Promise.all([
+    // Les deux dernières requêtes portent les PIÈCES de règlement (ligne de relevé
+    // lettrée, encaissement saisi) : c'est d'elles que se déduit le mode de
+    // paiement réellement constaté — cf. src/lib/mode-paiement.ts.
+    const [{data:f},{data:c},{data:tx},{data:enc}] = await Promise.all([
       supabase.from("factures").select("*").eq("dossier_id",dossierId).order("date_facture",{ascending:false}),
       supabase.from("clients").select("id,nom,ice,email").eq("dossier_id",dossierId).is("deleted_at",null).order("nom"),
+      (supabase.from("transactions_bancaires") as any)
+        .select("facture_id,document_type,libelle,reference")
+        .eq("dossier_id",dossierId).not("facture_id","is",null),
+      (supabase.from("encaissements") as any)
+        .select("facture_id,type").eq("dossier_id",dossierId).not("facture_id","is",null),
     ]);
     setFactures((f??[]) as unknown as Facture[]);
     setClients((c??[]) as Client[]);
+    setModes(indexerModesPaiement("client",{ transactions: tx ?? [], encaissements: enc ?? [] }));
     setLoading(false);
   };
   useEffect(()=>{load();},[dossierId]);
@@ -449,11 +479,13 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     }catch(e:any){toast.error(e.message);}
   };
 
+  // Règlement comptant au guichet : le mode voyage jusqu'au serveur, qui passe
+  // l'écriture en caisse (CAI/5143) et estampille la facture.
   const handlePay = async (fid: string) => {
     setProcessing(fid);
     try{
-      await payFn({data:{facture_id:fid,date_paiement:new Date().toISOString().slice(0,10)}});
-      toast.success("Facture payée + écriture créée");
+      await payFn({data:{facture_id:fid,date_paiement:new Date().toISOString().slice(0,10),mode:"especes"}});
+      toast.success("Facture payée en espèces + écriture de caisse créée");
       load();
     }catch(e:any){toast.error(e.message);}
     finally{setProcessing(null);}
@@ -666,14 +698,15 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
               <TableHead>N°</TableHead><TableHead>Client</TableHead><TableHead>Date</TableHead>
               <TableHead>Échéance</TableHead>
               <TableHead>TTC</TableHead><TableHead>Payé</TableHead><TableHead>Restant</TableHead>
-              <TableHead>DGI</TableHead><TableHead>Paiement</TableHead><TableHead>Actions</TableHead>
+              <TableHead>DGI</TableHead><TableHead>Paiement</TableHead>
+              <TableHead>Mode de paiement</TableHead><TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading
-              ?<TableRow><TableCell colSpan={10} className="text-center py-8"><Loader2 className="h-5 w-5 animate-spin mx-auto"/></TableCell></TableRow>
+              ?<TableRow><TableCell colSpan={11} className="text-center py-8"><Loader2 className="h-5 w-5 animate-spin mx-auto"/></TableCell></TableRow>
               :factures.length===0
-              ?<TableRow><TableCell colSpan={10} className="text-center py-10 text-muted-foreground">Aucune facture</TableCell></TableRow>
+              ?<TableRow><TableCell colSpan={11} className="text-center py-10 text-muted-foreground">Aucune facture</TableCell></TableRow>
               :factures.map(f=>(
                 <TableRow key={f.id}>
                   <TableCell className="font-mono text-xs">{f.numero??f.id.slice(0,8)}</TableCell>
@@ -692,6 +725,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                   <TableCell className="font-mono text-sm text-orange-600">{fmt(Number(f.montant_restant??f.montant_ttc))}</TableCell>
                   <TableCell><DGIBadge statut={f.statut} statut_dgi={f.statut_dgi}/></TableCell>
                   <TableCell><StatutPaiementBadge f={f}/></TableCell>
+                  <TableCell><ModePaiementCell mode={modePaiementFacture(f, modes)}/></TableCell>
                   <TableCell>
                     <div className="flex gap-1 flex-wrap">
                       {f.statut==="brouillon"&&(
@@ -699,20 +733,43 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                           {processing===f.id?<Loader2 className="h-3 w-3 animate-spin mr-1"/>:<FileCode className="h-3 w-3 mr-1"/>}e-Facture
                         </Button>
                       )}
-                      {f.statut==="conforme"&&f.statut_paiement!=="payee"&&(
-                        <Button size="sm" variant="outline" disabled={processing===f.id} onClick={()=>handlePay(f.id)}>
-                          <CheckCircle className="h-3 w-3 mr-1"/>Payée
-                        </Button>
-                      )}
-                      {f.xml_ubl&&(
-                        <Button size="sm" variant="ghost" onClick={()=>setViewXml(f)} title="Voir XML"><Eye className="h-3 w-3"/></Button>
-                      )}
-                      {f.fichier_original_url&&(
-                        <Button size="sm" variant="ghost" title="Voir original"
-                          onClick={()=>setDocView({ title:`Facture ${f.numero??""}`.trim(), url:f.fichier_original_url, fileName:f.fichier_original_nom, mimeType:f.fichier_original_type })}>
-                          <FileText className="h-3 w-3"/>
-                        </Button>
-                      )}
+                      {/* Le bouton porte l'état du règlement. Tant que la facture est due
+                          il propose l'encaissement au comptant ; une fois réglée — au
+                          comptant OU par lettrage d'une ligne de relevé — il devient un
+                          témoin vert « Payée ». L'instrument exact ne s'écrit pas ici mais
+                          dans la colonne « Mode de paiement » : le bouton dirait sinon
+                          « espèces » sur une facture soldée par virement. */}
+                      {f.statut_paiement==="payee"
+                        ?(
+                          <Button size="sm" variant="outline" disabled title="Facture réglée"
+                            className="border-green-200 bg-green-50 text-green-700 disabled:opacity-100">
+                            <CheckCircle className="h-3 w-3 mr-1"/>Payée
+                          </Button>
+                        )
+                        :f.statut==="conforme"&&(
+                          <Button size="sm" variant="outline" disabled={processing===f.id} onClick={()=>handlePay(f.id)}
+                            title="Encaisser le solde au comptant (journal de caisse)">
+                            <Banknote className="h-3 w-3 mr-1"/>Payer en espèces
+                          </Button>
+                        )}
+                      {/* Détail de la facture — TOUJOURS proposé, y compris sur un
+                          brouillon sans XML ni scan. Le XML UBL reste téléchargeable
+                          depuis ce détail : c'est un livrable pour la DGI, pas une
+                          lecture. */}
+                      <Button size="sm" variant="ghost" title="Voir le détail de la facture"
+                        onClick={()=>setFactureDetail(f)}>
+                        <Eye className="h-3 w-3"/>
+                      </Button>
+                      {/* TOUJOURS rendu, désactivé quand rien n'est archivé : un bouton
+                          conditionnel se contente de disparaître, et l'utilisateur ne
+                          peut pas distinguer « pas de scan » de « pas implémenté ». */}
+                      <Button size="sm" variant="ghost" disabled={!f.fichier_original_url}
+                        title={f.fichier_original_url
+                          ? "Voir / télécharger le document original"
+                          : "Aucun document original archivé pour cette facture"}
+                        onClick={()=>setDocView({ title:`Facture ${f.numero??""}`.trim(), url:f.fichier_original_url, fileName:f.fichier_original_nom, mimeType:f.fichier_original_type })}>
+                        <FileText className="h-3 w-3"/>
+                      </Button>
                       {/* Annuler le paiement : actif seulement si la facture est payée
                           (ou partiellement). Débloque ensuite la suppression. */}
                       <Button size="sm" variant="ghost" disabled={!estPayee(f)||processing===f.id}
@@ -811,16 +868,87 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
         </DialogContent>
       </Dialog>
 
-      {/* XML Viewer */}
-      <Dialog open={!!viewXml} onOpenChange={()=>setViewXml(null)}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader><DialogTitle>XML UBL 2.1 — {viewXml?.numero}</DialogTitle></DialogHeader>
-          <Button size="sm" variant="outline" className="w-fit" onClick={()=>{
-            const blob=new Blob([viewXml!.xml_ubl!],{type:"application/xml"});
-            const a=document.createElement("a");a.href=URL.createObjectURL(blob);
-            a.download=`${viewXml!.numero??viewXml!.id}.xml`;a.click();
-          }}><Download className="h-4 w-4 mr-1"/>Télécharger XML</Button>
-          <pre className="bg-muted p-4 rounded text-xs overflow-auto max-h-96 font-mono whitespace-pre-wrap">{viewXml?.xml_ubl}</pre>
+      {/* ── Détail d'une facture client ────────────────────────────────────────
+          Restitue la facture telle qu'enregistrée (en-tête, montants, lignes),
+          au lieu du dump XML UBL qui n'était lisible que par la DGI. Le XML
+          reste téléchargeable ici quand l'e-Facture a été générée. */}
+      <Dialog open={!!factureDetail} onOpenChange={(o)=>{ if(!o) setFactureDetail(null); }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>
+              Facture {factureDetail?.numero ?? "—"} · {clients.find(c=>c.id===factureDetail?.client_id)?.nom ?? "—"}
+            </DialogTitle>
+          </DialogHeader>
+          {factureDetail && (
+            <div className="space-y-4">
+              {/* Signalé seulement quand rien n'est archivé : sinon le bouton
+                  « document original » de la ligne ouvre déjà le scan. */}
+              {!factureDetail.fichier_original_url && (
+                <div className="flex items-start gap-2 rounded-md bg-muted/60 p-3 text-xs text-muted-foreground">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-px"/>
+                  <span>
+                    Aucun document original n'est archivé pour cette facture — voici son
+                    contenu enregistré. Les factures créées ou scannées depuis la mise en
+                    place de l'archivage ouvrent directement l'original.
+                  </span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+                {[
+                  ["Date facture", new Date(factureDetail.date_facture).toLocaleDateString("fr-MA")],
+                  ["Échéance", factureDetail.date_echeance ? new Date(factureDetail.date_echeance).toLocaleDateString("fr-MA") : "—"],
+                  ["Mode de paiement", (()=>{ const m=modePaiementFacture(factureDetail, modes); return m ? MODE_PAIEMENT_LABEL[m] : "—"; })()],
+                  ["Montant HT", fmt(Number(factureDetail.montant_ht))],
+                  ["TVA", fmt(Number(factureDetail.montant_tva))],
+                  ["Montant TTC", fmt(Number(factureDetail.montant_ttc))],
+                  ["Payé", fmt(Number(factureDetail.montant_paye ?? 0))],
+                  ["Restant dû", fmt(Number(factureDetail.montant_restant ?? factureDetail.montant_ttc))],
+                  ["Statut DGI", factureDetail.statut_dgi ?? factureDetail.statut],
+                ].map(([label, value]) => (
+                  <div key={label as string}>
+                    <p className="text-xs text-muted-foreground">{label}</p>
+                    <p className="font-medium">{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {Array.isArray(factureDetail.lignes) && factureDetail.lignes.length > 0 && (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Désignation</TableHead>
+                      <TableHead className="text-right">Qté</TableHead>
+                      <TableHead className="text-right">P.U.</TableHead>
+                      <TableHead className="text-right">TVA</TableHead>
+                      <TableHead className="text-right">Total HT</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {factureDetail.lignes.map((l, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="text-sm">{l.designation || "—"}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{l.quantite ?? "—"}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{fmt(Number(l.prix_unitaire ?? 0))}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{l.taux_tva ?? 0} %</TableCell>
+                        <TableCell className="text-right font-mono text-xs font-medium">
+                          {fmt(Number(l.quantite ?? 0) * Number(l.prix_unitaire ?? 0))}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+
+              {factureDetail.xml_ubl && (
+                <Button size="sm" variant="outline" className="w-fit" onClick={()=>{
+                  const blob=new Blob([factureDetail.xml_ubl!],{type:"application/xml"});
+                  const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+                  a.download=`${factureDetail.numero??factureDetail.id}.xml`;a.click();
+                }}><Download className="h-4 w-4 mr-1"/>Télécharger le XML UBL 2.1</Button>
+              )}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
