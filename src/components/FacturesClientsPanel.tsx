@@ -15,6 +15,7 @@ import { Plus, FileCode, Eye, CheckCircle, Upload, Loader2, Download, X, AlertCi
 import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/components/EcheancesInput";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
+import { puHtToTtc } from "@/lib/tva";
 import {
   indexerModesPaiement, modePaiementFacture,
   MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
@@ -629,6 +630,10 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                         <SelectContent>{[0,7,10,14,20].map(r=><SelectItem key={r} value={String(r)}>{r}%</SelectItem>)}</SelectContent>
                       </Select>
                       <Button type="button" variant="ghost" size="icon" className="col-span-1" onClick={()=>setLignes(ls=>ls.filter((_,j)=>j!==i))} disabled={lignes.length===1}><X className="h-3 w-3"/></Button>
+                      {/* Le PU saisi est HT ; rappel du TTC dérivé du taux de la ligne. */}
+                      <div className="col-span-12 text-[10px] text-muted-foreground pl-1">
+                        P.U. HT {fmt(l.prix_unitaire||0)} · P.U. TTC {fmt(puHtToTtc(l.prix_unitaire||0, l.taux_tva))}
+                      </div>
                     </div>
                   ))}
                   <div className="p-2 bg-muted rounded text-xs text-right mt-1">

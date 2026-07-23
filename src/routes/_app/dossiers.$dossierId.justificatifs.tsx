@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
+import { puHtToTtc } from "@/lib/tva";
 import { ocrFacture, matcherDocumentAvecTransactions, lettrerJustificatif } from "@/server/factures.functions";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/justificatifs")({
@@ -1367,6 +1368,7 @@ function JustificatifsPage() {
                         <TableHead className="text-xs w-16">Qté</TableHead>
                         <TableHead className="text-xs w-28">P.U. HT</TableHead>
                         <TableHead className="text-xs w-20">TVA %</TableHead>
+                        <TableHead className="text-xs w-28 text-right">P.U. TTC</TableHead>
                         <TableHead className="text-xs w-24 text-right">Total HT</TableHead>
                         <TableHead className="w-8"></TableHead>
                       </TableRow>
@@ -1390,6 +1392,9 @@ function JustificatifsPage() {
                           <TableCell className="py-1">
                             <Input className="h-7 text-xs" type="number" min="0" step="1" value={l.taux_tva ?? ""} placeholder="—"
                               onChange={e => setLignes(prev => prev.map((x, j) => j === i ? { ...x, taux_tva: e.target.value === "" ? null : parseFloat(e.target.value) } : x))} />
+                          </TableCell>
+                          <TableCell className="py-1 text-right font-mono text-xs text-muted-foreground">
+                            {fmt(puHtToTtc(l.prix_unitaire || 0, l.taux_tva))}
                           </TableCell>
                           <TableCell className="py-1 text-right font-mono text-xs">
                             {fmt(l.quantite * l.prix_unitaire)}

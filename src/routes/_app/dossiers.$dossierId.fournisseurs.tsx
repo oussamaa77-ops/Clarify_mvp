@@ -37,6 +37,7 @@ import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/componen
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { DocumentsAssocies } from "@/components/DocumentsAssocies";
 import { logAudit } from "@/lib/audit";
+import { puHtToTtc } from "@/lib/tva";
 import {
   indexerModesPaiement, modePaiementFacture,
   MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
@@ -1298,6 +1299,10 @@ function FournisseursPage() {
                       >
                         <X className="h-3 w-3" />
                       </Button>
+                      {/* Rappel HT/TTC : le PU saisi est HT, on affiche le TTC dérivé du taux. */}
+                      <div className="col-span-12 text-[10px] text-muted-foreground pl-1">
+                        P.U. HT {fmt(l.prix_unitaire || 0)} · P.U. TTC {fmt(puHtToTtc(l.prix_unitaire || 0, l.taux_tva))} · Total HT {fmt((l.quantite || 0) * (l.prix_unitaire || 0))}
+                      </div>
                     </div>
                   ))}
                 </div>

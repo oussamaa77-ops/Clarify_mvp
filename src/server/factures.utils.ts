@@ -935,6 +935,8 @@ RÈGLES:
 - mode_reglement: détecter depuis la facture: "carte"|"cheque"|"virement"|"especes"|"prelevement" — si absent mettre "virement"
 - MONTANTS: extrais prioritairement les montants écrits dans le bloc totaux en bas du document (HT, TVA, Net à payer/TTC) — ne recalcule JAMAIS ces valeurs toi-même, sauf si ce bloc est totalement absent ou illisible
 - LIGNES DE DÉTAIL: sauf mention explicite contraire (ex: "P.U. TTC"), le Prix Unitaire et le Total de chaque ligne sont toujours en Hors Taxes (HT) — utilise ces valeurs directement dans prix_unitaire_ht et total_ht
+  · SI la colonne prix unitaire est EXPLICITEMENT libellée TTC ("P.U. TTC", "Prix unitaire TTC", "PU TTC") → mets la valeur lue dans prix_unitaire_ttc (et laisse prix_unitaire_ht à 0) ; le système reconstituera le HT via le taux de TVA de la ligne. Ne remplis JAMAIS les deux à la fois.
+- NOTES MANUSCRITES (lecture image / OCR vision): repère toute annotation MANUSCRITE ajoutée sur le document — mention "Payé", "Réglé", "Acquitté", "BON POUR ACCORD", un numéro de chèque/BC noté à la main, une date, un montant corrigé, un visa/paraphe, une imputation comptable griffonnée. Recopie fidèlement ce texte manuscrit dans le champ "notes_manuscrites" (chaîne, plusieurs mentions séparées par " ; "). N'invente rien : si aucune écriture manuscrite n'est visible → null. Ne confonds pas un texte IMPRIMÉ (tampon net, en-tête) avec du manuscrit. Une annotation manuscrite ne modifie JAMAIS les montants imprimés du bloc totaux.
 - NOMS ILLISIBLES: si un nom d'émetteur ou de client est masqué (barre colorée CamScanner, tampon, zone floutée) ou totalement illisible, renvoie null pour ce champ — ne devine jamais et n'invente pas un nom
 
 RÈGLES CRITIQUES POUR FACTURE ACOMPTE:
@@ -952,12 +954,13 @@ ${text ? `\nTEXTE FACTURE:\n${text.slice(0, 2000)}` : `
 INSTRUCTIONS LECTURE IMAGE SCANNÉE (PRIORITÉ ABSOLUE):
 - Lis chaque chiffre individuellement — ne confonds pas 1/7, 0/6, 3/8, 5/6
 - Montants: repère d'abord le bloc totaux en bas (Total HT, TVA xx%, Total TTC / Net à payer) — lis le nombre exact à droite de chaque ligne, ne recalcule pas
-- Prix unitaire: lis la colonne "P.U." / "Prix unitaire" / "P.U. HT" ligne par ligne — valeur HT sauf si "P.U. TTC" est explicitement écrit
+- Prix unitaire: lis la colonne "P.U." / "Prix unitaire" / "P.U. HT" ligne par ligne — valeur HT sauf si "P.U. TTC" est explicitement écrit (dans ce cas → prix_unitaire_ttc)
 - Quantité × Prix unitaire HT = Total HT ligne (vérifie pour les lignes de détail uniquement, pas pour les totaux)
+- Notes manuscrites: examine tout le document pour des annotations écrites À LA MAIN (stylo/feutre) — "Payé", "Réglé", visa, n° de chèque, date, montant corrigé — et recopie-les dans "notes_manuscrites" (null si aucune). Ne prends jamais un manuscrit pour un montant officiel.
 - Dates: cherche "Date:" ou "Le:" — format JJ/MM/AAAA → convertis en AAAA-MM-JJ
 - Date d'échéance: cherche "Échéance", "À régler avant le", "Date limite" — sinon null
 - Taux TVA marocains valides: 0%, 7%, 10%, 14%, 20% — identifie lequel est sur la facture`}
 
 JSON EXACT (remplace les valeurs):
-{"sens_facture":"client","emetteur_nom":"","emetteur_ice":null,"client_nom":"","client_ice":null,"client_adresse":null,"numero":null,"date":null,"date_echeance":null,"date_commande":null,"dates_reference":[],"type_facture":"standard","type_document_justificatif":"facture","categorie_pcm":"paiement_fournisseur","compte_pcm":null,"periode":null,"numero_compteur":null,"numero_commande":null,"numero_acompte":null,"montant_ht":0,"montant_tva":0,"taux_tva":null,"montant_ttc":0,"montant_commande_total_ht":null,"montant_commande_total_ttc":null,"montant_restant_du":null,"description":"","mode_reglement":"virement","lignes":[{"description":"","quantite":1,"prix_unitaire_ht":0,"total_ht":0,"taux_tva":null}]}`;
+{"sens_facture":"client","emetteur_nom":"","emetteur_ice":null,"client_nom":"","client_ice":null,"client_adresse":null,"numero":null,"date":null,"date_echeance":null,"date_commande":null,"dates_reference":[],"type_facture":"standard","type_document_justificatif":"facture","categorie_pcm":"paiement_fournisseur","compte_pcm":null,"periode":null,"numero_compteur":null,"numero_commande":null,"numero_acompte":null,"montant_ht":0,"montant_tva":0,"taux_tva":null,"montant_ttc":0,"montant_commande_total_ht":null,"montant_commande_total_ttc":null,"montant_restant_du":null,"description":"","notes_manuscrites":null,"mode_reglement":"virement","lignes":[{"description":"","quantite":1,"prix_unitaire_ht":0,"prix_unitaire_ttc":0,"total_ht":0,"taux_tva":null}]}`;
 }

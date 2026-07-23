@@ -21,6 +21,7 @@ import { emailFactureClient, emailFactureRejetee } from "./email.templates";
 import { sendMail } from "./mailer";
 import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
+import { puTtcToHt } from "../lib/tva";
 import { rappelerMemoire } from "./tiers-memoire.functions";
 import { logUsage, logUsageBatch, estimerCoutIA } from "./analytics.functions";
 import { guardScan, libererScan } from "./billing";
@@ -840,6 +841,7 @@ export const ocrFacture = createServerFn({ method: "POST" })
       emetteur_nom: rx.emetteur_nom,
       emetteur_ice: rx.emetteur_ice,
       mode_reglement: rx.mode_reglement,
+      notes_manuscrites: null,
     };
     let confidence: "high" | "medium" | "low" = rx.confidence;
     let method = "regex";
@@ -922,12 +924,27 @@ export const ocrFacture = createServerFn({ method: "POST" })
         montant_commande_total_ttc: Number(ai.montant_commande_total_ttc) || null,
         montant_restant_du: Number(ai.montant_restant_du) || null,
         mode_reglement: ai.mode_reglement ?? result.mode_reglement,
-        lignes: (ai.lignes ?? []).map((l: any) => ({
-          designation: l.description ?? l.designation ?? "Prestation",
-          quantite: Number(l.quantite) || 1,
-          prix_unitaire: Number(l.prix_unitaire_ht ?? l.prix_unitaire) || 0,
-          taux_tva: l.taux_tva != null ? Number(l.taux_tva) : null,
-        })),
+        lignes: (ai.lignes ?? []).map((l: any) => {
+          // Taux de la ligne, sinon taux global de la facture — sert à reconstituer
+          // le HT quand la facture n'affiche QUE le prix unitaire TTC.
+          const tauxLigne =
+            l.taux_tva != null ? Number(l.taux_tva)
+            : ai.taux_tva != null ? Number(ai.taux_tva)
+            : null;
+          let prix_unitaire = Number(l.prix_unitaire_ht ?? l.prix_unitaire) || 0;
+          const puTtc = Number(l.prix_unitaire_ttc) || 0;
+          // Source de vérité interne = HT. Si seul le TTC est présent → on le convertit.
+          if (!prix_unitaire && puTtc > 0) prix_unitaire = puTtcToHt(puTtc, tauxLigne);
+          return {
+            designation: l.description ?? l.designation ?? "Prestation",
+            quantite: Number(l.quantite) || 1,
+            prix_unitaire,
+            taux_tva: tauxLigne,
+          };
+        }),
+        notes_manuscrites: typeof ai.notes_manuscrites === "string" && ai.notes_manuscrites.trim()
+          ? ai.notes_manuscrites.trim()
+          : null,
       };
       confidence = "high";
       method = "ai";

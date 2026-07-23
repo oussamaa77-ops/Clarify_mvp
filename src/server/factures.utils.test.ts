@@ -327,6 +327,19 @@ describe("buildOcrPrompt — règles présentes (intégration)", () => {
     expect(promptText).toContain("prix_unitaire_ht");
   });
 
+  it("gère le prix unitaire TTC explicite (P.U. TTC → prix_unitaire_ttc)", () => {
+    expect(promptText).toContain("prix_unitaire_ttc");
+    expect(promptText).toContain("Ne remplis JAMAIS les deux à la fois");
+  });
+
+  it("demande la détection des notes manuscrites (OCR vision)", () => {
+    expect(promptText).toContain("NOTES MANUSCRITES");
+    expect(promptText).toContain("notes_manuscrites");
+    expect(promptText).toContain("null");
+    // Instruction présente aussi dans le bloc image scannée
+    expect(promptText).toContain("annotations écrites À LA MAIN");
+  });
+
   // Bordereaux et attestations d'organismes sociaux / publics (CNSS, DGI, CIMR, AMO) :
   // sans ces règles, l'OCR classe le document en "recu", prend l'employeur pour le
   // tiers et reconstitue une TVA de 20 % sur des cotisations qui en sont exonérées.
