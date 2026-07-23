@@ -191,6 +191,8 @@ function FournisseursPage() {
     { designation: "", quantite: 1, prix_unitaire: 0, taux_tva: 20 },
   ]);
   const [echeances, setEcheances] = useState<Echeance[]>([]);
+  // Annotations manuscrites lues par l'OCR vision (Payé, visa, n° chèque…).
+  const [notesManuscrites, setNotesManuscrites] = useState<string | null>(null);
 
   // New supplier pending creation (deferred until save)
   const [newFournPending, setNewFournPending] = useState<{ nom: string; ice: string } | null>(null);
@@ -472,6 +474,7 @@ function FournisseursPage() {
       if (r.montant_tva) setMontantTva(r.montant_tva);
       if (r.montant_ttc) setMontantTtc(r.montant_ttc);
       if (r.mode_reglement) setModeReglement(r.mode_reglement);
+      setNotesManuscrites(r.notes_manuscrites ?? null);
       if (r.lignes?.length) {
         setLignes(
           r.lignes.map((l: any) => ({
@@ -597,6 +600,9 @@ function FournisseursPage() {
           mode_reglement: modeReglement,
           lignes: lignes,
           echeances: echeancesPayload,
+          // Métadonnées OCR conservées pour le détail (annotations manuscrites lues
+          // sur le document : « Payé », visa, n° de chèque…). Colonne JSONB existante.
+          ocr_data: notesManuscrites ? { notes_manuscrites: notesManuscrites } : null,
         })
         .select("id")
         .single();
@@ -824,6 +830,7 @@ function FournisseursPage() {
     setNewFournPending(null);
     setLignes([{ designation: "", quantite: 1, prix_unitaire: 0, taux_tva: 20 }]);
     setEcheances([]);
+    setNotesManuscrites(null);
   };
 
   // ── Global KPIs ────────────────────────────────────────────────────────────
@@ -2087,6 +2094,16 @@ function FournisseursPage() {
                   </div>
                 ))}
               </div>
+
+              {/* Notes manuscrites relevées par l'OCR vision sur le document scanné. */}
+              {(factureDetail as any).ocr_data?.notes_manuscrites && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 px-3 py-2">
+                  <p className="text-xs font-semibold text-amber-700 dark:text-amber-400 flex items-center gap-1">
+                    <Pencil className="h-3 w-3" /> Note manuscrite sur le document
+                  </p>
+                  <p className="text-sm mt-0.5 whitespace-pre-line">{(factureDetail as any).ocr_data.notes_manuscrites}</p>
+                </div>
+              )}
 
               {Array.isArray(factureDetail.lignes) && factureDetail.lignes.length > 0 && (
                 <Table>
