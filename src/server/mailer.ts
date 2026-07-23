@@ -1,21 +1,28 @@
 // ============================================================================
-// mailer.ts — Envoi d'e-mails par SMTP (nodemailer), avec filet HTTP.
+// mailer.ts — Point d'entrée UNIQUE de l'envoi d'e-mails. Aiguille vers le
+// transport disponible ; tout le reste de l'app n'appelle que `sendMail`.
 //
-// SMTP est le transport voulu et celui qu'on essaie TOUJOURS en premier.
+// ORDRE DES TRANSPORTS :
+//   1. API Resend  (HTTPS/443) — DÉFAUT en production, dès que RESEND_API_KEY
+//      est posée. Voir mailer.resend.ts.
+//   2. SMTP        (nodemailer, ce fichier) — utilisé si aucune clé HTTP n'est
+//      posée, et sur un réseau qui laisse sortir le 587/465.
+//   3. API Brevo   (HTTPS/443) — filet historique, conservé.
 //
-// ⚠ ATTENTION AU PORT — c'est ici que le mail d'approbation d'inscription est
-//   mort pendant des jours : Railway filtre le port 587 sortant
-//   (smtp.gmail.com:587 → ETIMEDOUT au bout de 10 s), tout comme le réseau
-//   filaire du poste de dev. Le code était bon, le port était fermé. Si les
-//   mails cessent de partir, sonder les ports AVANT de relire ce fichier :
+// ⚠ POURQUOI RESEND EN PREMIER : Railway filtre le SMTP sortant
+//   (smtp.gmail.com:587 → ENETUNREACH / ETIMEDOUT au bout de 10 s), tout comme
+//   le réseau filaire du poste de dev. Le code SMTP était bon, le port était
+//   fermé — c'est ce qui a tué le mail d'approbation d'inscription pendant des
+//   jours. Le 443 passe partout.
+//
+// Si un jour vous revenez au SMTP, sonder les ports AVANT de relire ce fichier :
 //     GET /api/diag-mail?token=…&sonde=1   (teste 25/465/587/2525)
 //   Gmail écoute en 587 (STARTTLS) ET en 465 (TLS implicite) ; si l'un est
 //   filtré, l'autre passe souvent. SMTP_PORT=465 suffit alors, SMTP_SECURE
 //   étant déduit du port.
 //
-// Filet de secours : si le port se révèle filtré ET que BREVO_API_KEY est
-// posée, l'envoi repart par l'API HTTP Brevo (443, jamais filtré). Purement
-// optionnel — sans la clé, on échoue avec un message explicite.
+// Filet de secours SMTP : si le port se révèle filtré ET que BREVO_API_KEY est
+// posée, l'envoi repart par l'API HTTP Brevo. Purement optionnel.
 //
 // ⚠ ANTI-SPAM — deux niveaux :
 //   1) Contenu / en-têtes (géré par ce code) : version texte + HTML
@@ -152,24 +159,27 @@ function estBlocageReseau(e: any): boolean {
 let SMTP_BLOQUE = false;
 
 /**
- * Envoie un e-mail par SMTP. Si le port se révèle filtré depuis ce réseau et
- * qu'une clé Brevo est configurée, bascule sur l'API HTTP plutôt que d'échouer.
- * Lève une erreur explicite et actionnable sinon.
+ * Envoie un e-mail. Resend (HTTPS) est le transport par défaut ; SMTP prend le
+ * relais si aucune clé HTTP n'est posée, avec Brevo en dernier filet quand le
+ * port se révèle filtré. Lève une erreur explicite et actionnable sinon.
  */
 export async function sendMail(
   input: SendMailInput
 ): Promise<{ success: true; messageId: string }> {
   const cfg = readConfig();
   const { sendMailBrevo, brevoApiKey } = await import("./mailer.brevo");
+  const { sendMailResend, resendApiKey } = await import("./mailer.resend");
 
   const force = (process.env.MAIL_TRANSPORT ?? "auto").trim().toLowerCase();
-  const brevoDispo = !!brevoApiKey() && force !== "smtp";
-  const smtpDispo = !!cfg.host && force !== "brevo";
+  const resendDispo = !!resendApiKey() && (force === "auto" || force === "resend");
+  const brevoDispo = !!brevoApiKey() && (force === "auto" || force === "brevo");
+  const smtpDispo = !!cfg.host && (force === "auto" || force === "smtp");
 
-  if (!brevoDispo && !smtpDispo) {
+  if (!resendDispo && !brevoDispo && !smtpDispo) {
     throw new Error(
-      "SMTP non configuré : renseignez SMTP_HOST, SMTP_PORT, SMTP_USER et SMTP_PASS dans les " +
-        "variables d'environnement du serveur (voir .env.example), puis redémarrez."
+      "Aucun transport e-mail configuré : posez RESEND_API_KEY dans les variables " +
+        "d'environnement du serveur (voir .env.example), puis redémarrez. " +
+        "À défaut, renseignez SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS."
     );
   }
 
@@ -177,8 +187,22 @@ export async function sendMail(
   const text = input.text?.trim() || htmlToText(input.html);
   const repli = brevoDispo ? { sendMailBrevo, from } : null;
 
-  // SMTP d'abord, toujours — sauf si le port a DÉJÀ été constaté filtré sur ce
-  // serveur : inutile de repayer 10 s de timeout à chaque envoi.
+  // Resend d'abord : HTTPS/443, le seul port ouvert sur Railway.
+  if (resendDispo) {
+    try {
+      const r = await sendMailResend(input, text);
+      console.log(`[Resend] Email envoyé à ${input.to} | ID: ${r.messageId}`);
+      return r;
+    } catch (e: any) {
+      // Sans transport de repli, l'erreur Resend est LA cause : on la remonte
+      // telle quelle (domaine non vérifié, clé révoquée… tous actionnables).
+      if (!smtpDispo && !brevoDispo) throw e;
+      console.warn(`[Resend] Échec (${e?.message ?? e}) — bascule sur le transport de secours.`);
+    }
+  }
+
+  // SMTP ensuite — sauf si le port a DÉJÀ été constaté filtré sur ce serveur :
+  // inutile de repayer 10 s de timeout à chaque envoi.
   if (smtpDispo && !SMTP_BLOQUE) return sendMailSmtp(input, cfg, text, repli);
 
   if (!repli) return sendMailSmtp(input, cfg, text, null);
@@ -274,7 +298,7 @@ async function sendMailSmtp(
     if (estBlocageReseau(e)) {
       throw new Error(
         `Connexion au serveur SMTP impossible (${cfg.host}:${cfg.port}) : le port est filtré depuis ce réseau ` +
-          `(Railway et beaucoup d'hébergeurs bloquent le SMTP sortant). Posez BREVO_API_KEY pour envoyer en HTTPS. [${code} ${resp}]`
+          `(Railway et beaucoup d'hébergeurs bloquent le SMTP sortant). Posez RESEND_API_KEY pour envoyer en HTTPS/443. [${code} ${resp}]`
       );
     }
     if (/self.signed|unable to verify|cert/i.test(String(resp))) {

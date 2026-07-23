@@ -222,7 +222,18 @@
       "PowerShell(git log *)",
       "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String \"dossiers.\\\\`$dossierId.fournisseurs.tsx\"; Write-Output \"--- total ---\"; \\(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String \"error TS\" | Measure-Object\\).Count)",
       "PowerShell(Remove-Item *)",
-      "Bash(grep -rniE \"\\\\\"?\\(vir|chq|prlv|tpe\\)\\\\\\\\\\\\\\\\?b|virement|cheque\" src/lib/*.ts)"
+      "Bash(grep -rniE \"\\\\\"?\\(vir|chq|prlv|tpe\\)\\\\\\\\\\\\\\\\?b|virement|cheque\" src/lib/*.ts)",
+      "Bash(cp \"C:/Users/O6C96~1.KAR/AppData/Local/Temp/claude/C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main/b7ba575f-86a3-4bbd-b508-a490bc9b4dc1/scratchpad/diag.mjs\" ./_diag_tmp.mjs)",
+      "Bash(rm -f ./_diag_tmp.mjs)",
+      "Bash(python -c ' *)",
+      "PowerShell(npm install *)",
+      "PowerShell(npm ls *)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"src/server/mailer|src/routes/api/diag-mail\" | ForEach-Object { $_.Line })",
+      "PowerShell(npx tsx \"C:\\\\Users\\\\O6C96~1.KAR\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main\\\\412c37d5-5ac0-4402-976a-968b21755ddf\\\\scratchpad\\\\smoke-resend.ts\")",
+      "PowerShell(npx tsx \"C:\\\\Users\\\\O6C96~1.KAR\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main\\\\412c37d5-5ac0-4402-976a-968b21755ddf\\\\scratchpad\\\\smoke-resend.mts\")",
+      "PowerShell(npx tsx smoke-resend.mts)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; \\($e | Select-String -Pattern \"mailer\\\\.resend|mailer\\\\.ts|diag-mail\"\\).Count)",
+      "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"mailer\\\\.resend|mailer\\\\.ts|diag-mail\" | ForEach-Object { $_.Line })"
     ]
   }
 }

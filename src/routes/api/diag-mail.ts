@@ -137,8 +137,10 @@ export const Route = createFileRoute("/api/diag-mail")({
         }
 
         const config = {
+          RESEND_API_KEY: etat(process.env.RESEND_API_KEY),
+          RESEND_FROM: process.env.RESEND_FROM ?? "(défaut : Clarify <onboarding@resend.dev>)",
           BREVO_API_KEY: etat(process.env.BREVO_API_KEY),
-          MAIL_TRANSPORT: process.env.MAIL_TRANSPORT ?? "(auto : SMTP, repli Brevo si le port est filtré)",
+          MAIL_TRANSPORT: process.env.MAIL_TRANSPORT ?? "(auto : Resend d'abord, puis SMTP, puis Brevo)",
           SMTP_HOST: process.env.SMTP_HOST ?? "❌ ABSENT",
           SMTP_PORT: process.env.SMTP_PORT ?? "(défaut 587)",
           SMTP_USER: process.env.SMTP_USER ?? "❌ ABSENT",
@@ -156,13 +158,13 @@ export const Route = createFileRoute("/api/diag-mail")({
           const r = await sendMail({
             to: getAdminEmail(),
             subject: "Test HisabPro — diagnostic d'envoi",
-            html: "<p>Si vous lisez ceci, le SMTP du serveur fonctionne.</p><p>Le mail d'approbation emprunte exactement ce chemin.</p>",
+            html: "<p>Si vous lisez ceci, l'envoi d'e-mails du serveur fonctionne.</p><p>Le mail d'approbation emprunte exactement ce chemin.</p>",
           });
           return json({
             envoi: "✅ RÉUSSI",
             messageId: r.messageId,
             duree_ms: Date.now() - t0,
-            suite: `Le SMTP fonctionne. Si rien n'arrive sur ${getAdminEmail()}, regardez les SPAMS — le problème est la délivrabilité, pas l'envoi.`,
+            suite: `L'envoi fonctionne. Si rien n'arrive sur ${getAdminEmail()}, regardez les SPAMS — le problème est la délivrabilité, pas l'envoi.`,
             config,
           });
         } catch (err: any) {
