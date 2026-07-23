@@ -255,6 +255,52 @@ async function callMistralChat(prompt: string, maxTokens?: number, model: string
   return content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
 }
 
+// ─── Mistral vision (pixtral) — lecture d'IMAGE ──────────────────────────────
+// callMistralChat est TEXTE seul. Ici on envoie l'IMAGE à un modèle Mistral
+// multimodal (pixtral) qui la REGARDE vraiment. Sert à lire ce que l'OCR
+// document (mistral-ocr) laisse de côté — typiquement l'écriture À LA MAIN.
+// Reste 100 % sur le moteur Mistral (ni Groq ni Gemini). Modèle surchargeable
+// par MISTRAL_VISION_MODEL (défaut pixtral-large-latest). Gère le proxy SSL.
+async function callMistralVision(
+  prompt: string,
+  imageBase64: string,
+  mimeType: string,
+  maxTokens = 700,
+): Promise<string> {
+  const key = process.env.MISTRAL_API_KEY;
+  if (!key) throw new Error("MISTRAL_API_KEY manquante");
+  const model = (process.env.MISTRAL_VISION_MODEL || "pixtral-large-latest").trim();
+
+  const body = JSON.stringify({
+    model,
+    max_tokens: maxTokens,
+    temperature: 0,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: `data:${mimeType || "image/jpeg"};base64,${imageBase64}` },
+        ],
+      },
+    ],
+  });
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${key}` };
+  const res: Response = await proxyFetch("https://api.mistral.ai/v1/chat/completions", {
+    method: "POST",
+    headers,
+    body,
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Mistral vision ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as any;
+  const content = data.choices?.[0]?.message?.content ?? "{}";
+  console.log("[MISTRAL VISION] model:", model, "| chars:", content.length);
+  return content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+}
+
 // ─── Extraction facture / justificatif : Mistral principal, Groq secours ─────
 // Même cascade que le relevé, appliquée au document unitaire :
 //   • document scanné (pas de couche texte) → mistral-ocr-latest rend le
@@ -319,15 +365,14 @@ RÈGLES :
 - Si tu ne vois AUCUNE écriture manuscrite → renvoie null.
 Réponds STRICTEMENT en JSON, sans aucun texte autour : {"notes_manuscrites": "<texte manuscrit lu>"} ou {"notes_manuscrites": null}`;
   try {
-    // 500 tokens suffisent : la sortie est une courte chaîne. callAI(image) route
-    // vers le modèle vision Groq (llama-4-scout) — pas de response_format imposé,
-    // d'où l'extraction JSON tolérante ci-dessous.
-    const raw = await callAI(prompt, imageBase64, mimeType, 500);
+    // Modèle VISION Mistral (pixtral) : c'est le même moteur que le reste du scan.
+    // Pas de response_format imposé sur pixtral → extraction JSON tolérante ci-dessous.
+    const raw = await callMistralVision(prompt, imageBase64, mimeType, 700);
     const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     const n = typeof parsed?.notes_manuscrites === "string" ? parsed.notes_manuscrites.trim() : "";
     return n || null;
   } catch (e: any) {
-    console.warn("[OCR] lecture notes manuscrites (vision) échouée:", String(e?.message ?? e).slice(0, 150));
+    console.warn("[OCR] lecture notes manuscrites (Mistral vision) échouée:", String(e?.message ?? e).slice(0, 150));
     return null;
   }
 }
