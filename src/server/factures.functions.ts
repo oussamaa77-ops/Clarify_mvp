@@ -1060,10 +1060,13 @@ export const ocrFacture = createServerFn({ method: "POST" })
       }
     }
 
-    // Chemin mémoire : le LLM a été court-circuité, donc l'image n'a JAMAIS été
-    // analysée → on lit tout de même les annotations manuscrites par vision.
-    // (Le chemin cache, lui, a déjà la note stockée lors du 1ᵉʳ scan.)
-    if (method === "memoire" && data.image_base64 && !result.notes_manuscrites) {
+    // Chemins SKIP IA (mémoire OU cache) : l'extraction LLM a été court-circuitée,
+    // donc l'image n'a jamais été regardée pour l'écriture manuscrite. On la lit
+    // ici dès qu'une note manque — ce qui couvre AUSSI un cache créé avant cette
+    // fonctionnalité (le résultat caché n'a pas de note → on la (re)lit une fois).
+    // Le garde `!result.notes_manuscrites` évite tout appel inutile quand la note
+    // est déjà connue (cache récent).
+    if (skipLLM && data.image_base64 && !result.notes_manuscrites) {
       result.notes_manuscrites = await lireNotesManuscritesVision(data.image_base64, data.mime_type);
     }
 

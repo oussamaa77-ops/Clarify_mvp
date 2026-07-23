@@ -233,7 +233,16 @@
       "PowerShell(npx tsx \"C:\\\\Users\\\\O6C96~1.KAR\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main\\\\412c37d5-5ac0-4402-976a-968b21755ddf\\\\scratchpad\\\\smoke-resend.mts\")",
       "PowerShell(npx tsx smoke-resend.mts)",
       "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; \\($e | Select-String -Pattern \"mailer\\\\.resend|mailer\\\\.ts|diag-mail\"\\).Count)",
-      "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"mailer\\\\.resend|mailer\\\\.ts|diag-mail\" | ForEach-Object { $_.Line })"
+      "PowerShell(npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"mailer\\\\.resend|mailer\\\\.ts|diag-mail\" | ForEach-Object { $_.Line })",
+      "PowerShell(npx vitest run src/lib/tva.test.ts src/server/factures.utils.test.ts 2>&1 | Select-Object -Last 40)",
+      "PowerShell(npx vitest run 2>&1 | Select-Object -Last 30)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"lib/tva|factures\\\\.functions|factures\\\\.utils|fournisseurs\\\\.tsx|justificatifs\\\\.tsx|FacturesClientsPanel\" | ForEach-Object { $_.Line })",
+      "PowerShell(git add src/lib/tva.ts src/lib/tva.test.ts src/server/factures.utils.ts src/server/factures.utils.test.ts src/server/factures.functions.ts src/routes/_app/dossiers.$dossierId.fournisseurs.tsx src/routes/_app/dossiers.$dossierId.justificatifs.tsx src/components/FacturesClientsPanel.tsx; git status --short)",
+      "PowerShell(git add *)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"fournisseurs\\\\.tsx\" | ForEach-Object { $_.Line })",
+      "PowerShell(npx vitest run 2>&1 | Select-Object -Last 8)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"factures\\\\.functions|FacturesClientsPanel\" | ForEach-Object { $_.Line })",
+      "PowerShell(npx vitest run 2>&1 | Select-Object -Last 6)"
     ]
   }
 }
