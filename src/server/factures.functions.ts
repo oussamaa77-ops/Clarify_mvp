@@ -299,6 +299,39 @@ async function extraireFactureIA(args: {
   return { ai: JSON.parse(raw), provider: "groq" };
 }
 
+// ─── Notes manuscrites : lecture VISION dédiée ───────────────────────────────
+// POURQUOI un appel séparé : le chemin d'extraction principal est en DEUX étages
+// (Mistral OCR image→Markdown, puis Mistral chat Markdown→JSON). Le 2ᵉ étage ne
+// voit QUE le texte OCR — l'écriture À LA MAIN (Mistral OCR ne transcrit que
+// l'imprimé) y est déjà perdue. Pour capter une annotation manuscrite (« Payé »,
+// visa, n° de chèque, DATE de virement notée au stylo, montant corrigé), il faut
+// un modèle qui REGARDE l'image. On envoie donc l'image à un modèle vision, avec
+// une tâche unique et étroite. Best-effort : n'échoue jamais le scan.
+async function lireNotesManuscritesVision(
+  imageBase64: string,
+  mimeType: string,
+): Promise<string | null> {
+  const prompt = `Tu examines une facture SCANNÉE. Ta SEULE tâche : lire les annotations écrites À LA MAIN (au stylo ou au feutre) ajoutées sur le document.
+Exemples typiques : « Payé », « Réglé », « Bon pour accord », un visa/paraphe, un numéro de chèque, une DATE de virement ou de règlement notée à la main, un montant corrigé à la main, une imputation comptable griffonnée.
+RÈGLES :
+- Ignore TOUT le texte imprimé/machine (en-tête, tableau, tampons nets). Ne recopie QUE ce qui est manuscrit.
+- Recopie fidèlement, sans interpréter ni reformuler. Plusieurs mentions → sépare-les par «  ; ».
+- Si tu ne vois AUCUNE écriture manuscrite → renvoie null.
+Réponds STRICTEMENT en JSON, sans aucun texte autour : {"notes_manuscrites": "<texte manuscrit lu>"} ou {"notes_manuscrites": null}`;
+  try {
+    // 500 tokens suffisent : la sortie est une courte chaîne. callAI(image) route
+    // vers le modèle vision Groq (llama-4-scout) — pas de response_format imposé,
+    // d'où l'extraction JSON tolérante ci-dessous.
+    const raw = await callAI(prompt, imageBase64, mimeType, 500);
+    const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+    const n = typeof parsed?.notes_manuscrites === "string" ? parsed.notes_manuscrites.trim() : "";
+    return n || null;
+  } catch (e: any) {
+    console.warn("[OCR] lecture notes manuscrites (vision) échouée:", String(e?.message ?? e).slice(0, 150));
+    return null;
+  }
+}
+
 // ─── Contrôle d'équilibre du relevé ──────────────────────────────────────────
 // Identité : solde_final = solde_initial(signé) + Σ crédits − Σ débits. Un écart
 // signifie qu'au moins une transaction a été oubliée ou mal lue. Banque Populaire
@@ -986,6 +1019,13 @@ export const ocrFacture = createServerFn({ method: "POST" })
       if (result.date_facture && result.date_echeance && result.date_echeance < result.date_facture)
         result.date_echeance = null;
 
+      // ── NOTES MANUSCRITES : lecture vision dédiée (l'extraction ci-dessus est
+      // aveugle à l'image). Faite AVANT la mise en cache → un re-scan identique
+      // retrouve la note sans repayer l'appel vision.
+      if (data.image_base64 && !result.notes_manuscrites) {
+        result.notes_manuscrites = await lireNotesManuscritesVision(data.image_base64, data.mime_type);
+      }
+
       // ── Mémorise le résultat OCR pour ce document → prochain scan identique = cache-hit.
       if (inputHash) await storeOcrCache(supabase, data.dossier_id, inputHash, result);
 
@@ -1018,6 +1058,13 @@ export const ocrFacture = createServerFn({ method: "POST" })
         result.emetteur_ice = result.emetteur_ice || rx.emetteur_ice;
         result.sens_facture = "fournisseur";
       }
+    }
+
+    // Chemin mémoire : le LLM a été court-circuité, donc l'image n'a JAMAIS été
+    // analysée → on lit tout de même les annotations manuscrites par vision.
+    // (Le chemin cache, lui, a déjà la note stockée lors du 1ᵉʳ scan.)
+    if (method === "memoire" && data.image_base64 && !result.notes_manuscrites) {
+      result.notes_manuscrites = await lireNotesManuscritesVision(data.image_base64, data.mime_type);
     }
 
     // Auto-fill echéance if missing

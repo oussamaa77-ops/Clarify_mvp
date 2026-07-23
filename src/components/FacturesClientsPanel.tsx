@@ -555,10 +555,10 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                     {ocrData.lignes?.length>0&&(
                       <div className="rounded border overflow-hidden">
                         <Table>
-                          <TableHeader><TableRow><TableHead className="text-xs">Désignation</TableHead><TableHead className="text-xs">Qté</TableHead><TableHead className="text-xs">PU HT</TableHead><TableHead className="text-xs">TVA</TableHead></TableRow></TableHeader>
+                          <TableHeader><TableRow><TableHead className="text-xs">Désignation</TableHead><TableHead className="text-xs">Qté</TableHead><TableHead className="text-xs">PU HT</TableHead><TableHead className="text-xs">PU TTC</TableHead><TableHead className="text-xs">TVA</TableHead></TableRow></TableHeader>
                           <TableBody>
                             {ocrData.lignes.map((l,i)=>(
-                              <TableRow key={i}><TableCell className="text-xs">{l.designation}</TableCell><TableCell className="text-xs">{l.quantite}</TableCell><TableCell className="text-xs">{fmt(l.prix_unitaire)}</TableCell><TableCell className="text-xs">{l.taux_tva}%</TableCell></TableRow>
+                              <TableRow key={i}><TableCell className="text-xs">{l.designation}</TableCell><TableCell className="text-xs">{l.quantite}</TableCell><TableCell className="text-xs">{fmt(l.prix_unitaire)}</TableCell><TableCell className="text-xs text-muted-foreground">{fmt(puHtToTtc(l.prix_unitaire, l.taux_tva))}</TableCell><TableCell className="text-xs">{l.taux_tva}%</TableCell></TableRow>
                             ))}
                           </TableBody>
                         </Table>
