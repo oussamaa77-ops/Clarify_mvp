@@ -38,6 +38,9 @@ import { DocumentViewer, type DocumentViewerSource } from "@/components/Document
 import { DocumentsAssocies } from "@/components/DocumentsAssocies";
 import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
+import { PuTtcInput } from "@/components/PuTtcInput";
+import { FacturesFiltres } from "@/components/FacturesFiltres";
+import { filtrerFactures, joursRetard, trancheRetard, type CriteresFiltre } from "@/lib/factures-filtres";
 import {
   indexerModesPaiement, modePaiementFacture,
   MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
@@ -136,12 +139,22 @@ function ModePaiementCell({ mode }: { mode: ModePaiement | null }) {
   );
 }
 
+/**
+ * Statut de la facture d'achat. En retard, le badge porte le nombre de jours,
+ * recalculé à chaque rendu depuis la date du jour (rien n'est stocké en base).
+ */
 function statutBadge(f: FactureF) {
   const restant = Number(f.montant_restant ?? f.montant_ttc);
   if (restant <= 0 || f.statut_paiement === "payee")
     return { label: "✅ Payée", cls: "bg-green-100 text-green-700" };
-  if (f.date_echeance && new Date(f.date_echeance) < new Date())
-    return { label: "⚠️ En retard", cls: "bg-red-100 text-red-700" };
+  const jours = joursRetard(f);
+  if (jours != null) {
+    const tranche = trancheRetard(jours);
+    return {
+      label: `⚠️ En retard (${jours} j)`,
+      cls: tranche?.cls ?? "bg-red-100 text-red-700",
+    };
+  }
   return { label: "⏳ En attente", cls: "bg-yellow-100 text-yellow-700" };
 }
 
@@ -159,6 +172,13 @@ function FournisseursPage() {
   const [factures, setFactures] = useState<FactureF[]>([]);
   const [modes, setModes] = useState<Map<string, ModePaiement>>(new Map());
   const [fournisseurs, setFournisseurs] = useState<Fournisseur[]>([]);
+  // Filtres de l'annuaire fournisseurs (onglet « Tiers »).
+  const [searchTiers, setSearchTiers] = useState("");
+  const [filtreSoldeTiers, setFiltreSoldeTiers] = useState<"tous" | "restants">("tous");
+  // Filtres du tableau de factures (onglet « Factures »).
+  const [criteres, setCriteres] = useState<CriteresFiltre>({
+    texte: "", statut: "toutes", tiersId: "", debut: "", fin: "", champDate: "date_facture",
+  });
   const [dossier, setDossier] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState<string | null>(null);
@@ -845,6 +865,48 @@ function FournisseursPage() {
 
   const isPanelOpen = !!selectedFourn;
 
+  // Tableau de factures filtré. Les KPIs plus haut restent calculés sur TOUTES
+  // les factures : ils décrivent le dossier, pas la sélection à l'écran.
+  const facturesFiltrees = useMemo(
+    () => filtrerFactures(factures, criteres, {
+      nomTiers: (f) => f.fournisseur_nom,
+      idTiers:  (f) => f.fournisseur_id,
+    }),
+    [factures, criteres],
+  );
+
+  // ── Annuaire fournisseurs : soldes + filtres ────────────────────────────────
+  // Reste à payer par fournisseur, agrégé depuis les factures DÉJÀ chargées
+  // (aucune requête supplémentaire). `montant_restant` peut être NULL sur les
+  // factures antérieures au moteur de paiement → repli sur le TTC.
+  const soldesParFournisseur = useMemo(() => {
+    const soldes: Record<string, number> = {};
+    for (const f of factures) {
+      if (!f.fournisseur_id) continue;
+      soldes[f.fournisseur_id] =
+        (soldes[f.fournisseur_id] ?? 0) + Number(f.montant_restant ?? f.montant_ttc ?? 0);
+    }
+    return soldes;
+  }, [factures]);
+
+  // Recherche sur nom, ICE, IF ou e-mail (insensible à la casse et aux espaces —
+  // un ICE se recopie souvent avec des espaces parasites).
+  const fournisseursFiltres = useMemo(() => {
+    const q = searchTiers.trim().toLowerCase();
+    const norm = (v: string | null | undefined) => (v ?? "").toLowerCase().replace(/\s/g, "");
+    return fournisseurs.filter((f) => {
+      const matchTexte =
+        !q ||
+        f.nom.toLowerCase().includes(q) ||
+        norm(f.ice).includes(norm(q)) ||
+        norm(f.if_fiscal).includes(norm(q)) ||
+        norm(f.email).includes(norm(q));
+      const matchSolde =
+        filtreSoldeTiers === "tous" || (soldesParFournisseur[f.id] ?? 0) > 0;
+      return matchTexte && matchSolde;
+    });
+  }, [fournisseurs, searchTiers, filtreSoldeTiers, soldesParFournisseur]);
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -931,6 +993,14 @@ function FournisseursPage() {
 
         {/* ── Liste factures ── */}
         <TabsContent value="factures" className="mt-4">
+          <FacturesFiltres
+            criteres={criteres}
+            onChange={setCriteres}
+            tiers={fournisseurs.map((f) => ({ id: f.id, nom: f.nom }))}
+            labelTiers="Fournisseur"
+            nbFiltrees={facturesFiltrees.length}
+            nbTotal={factures.length}
+          />
           <Card>
             <CardContent className="p-0">
               <Table>
@@ -955,15 +1025,17 @@ function FournisseursPage() {
                         <Loader2 className="h-5 w-5 animate-spin mx-auto" />
                       </TableCell>
                     </TableRow>
-                  ) : factures.length === 0 ? (
+                  ) : facturesFiltrees.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={10} className="text-center py-12 text-muted-foreground">
                         <Inbox className="h-8 w-8 mx-auto mb-2 opacity-30" />
-                        Aucune facture — scannez un PDF ou faites une saisie manuelle
+                        {factures.length === 0
+                          ? "Aucune facture — scannez un PDF ou faites une saisie manuelle"
+                          : "Aucune facture ne correspond aux filtres"}
                       </TableCell>
                     </TableRow>
                   ) : (
-                    factures.map((f) => {
+                    facturesFiltrees.map((f) => {
                       const s = statutBadge(f);
                       return (
                         <TableRow key={f.id}>
@@ -1232,6 +1304,20 @@ function FournisseursPage() {
                 </div>
               </div>
 
+              {/* Annotations manuscrites relevées par l'OCR vision — affichées au
+                  moment de la saisie pour aider à corriger les champs ci-dessous. */}
+              {notesManuscrites && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/20 p-2.5">
+                  <p className="text-xs font-semibold text-amber-800 dark:text-amber-400">
+                    Notes manuscrites détectées sur le document
+                  </p>
+                  <p className="text-sm mt-0.5 whitespace-pre-line">{notesManuscrites}</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    À titre indicatif — elles ne modifient aucun montant automatiquement.
+                  </p>
+                </div>
+              )}
+
               {/* Lines */}
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -1246,11 +1332,18 @@ function FournisseursPage() {
                     <Plus className="h-3 w-3 mr-1" />Ligne
                   </Button>
                 </div>
+                <div className="grid grid-cols-12 gap-1 px-1 pb-1 text-[10px] font-medium text-muted-foreground">
+                  <span className="col-span-4">Désignation</span>
+                  <span className="col-span-1">Qté</span>
+                  <span className="col-span-2">P.U. HT</span>
+                  <span className="col-span-2">P.U. TTC</span>
+                  <span className="col-span-2">TVA</span>
+                </div>
                 <div className="space-y-2">
                   {lignes.map((l, i) => (
                     <div key={i} className="grid grid-cols-12 gap-1 items-center">
                       <Input
-                        className="col-span-5 text-xs"
+                        className="col-span-4 text-xs"
                         placeholder="Désignation"
                         value={l.designation}
                         onChange={(e) =>
@@ -1260,7 +1353,7 @@ function FournisseursPage() {
                         }
                       />
                       <Input
-                        className="col-span-2 text-xs"
+                        className="col-span-1 text-xs"
                         type="number"
                         placeholder="Qté"
                         value={l.quantite}
@@ -1279,6 +1372,15 @@ function FournisseursPage() {
                           setLignes((ls) =>
                             ls.map((x, j) => j === i ? { ...x, prix_unitaire: parseFloat(e.target.value) || 0 } : x)
                           )
+                        }
+                      />
+                      {/* PU TTC éditable : saisir l'un recalcule l'autre (le HT reste stocké). */}
+                      <PuTtcInput
+                        className="col-span-2 text-xs"
+                        prixHt={l.prix_unitaire}
+                        tauxTva={l.taux_tva}
+                        onChangeHt={(ht) =>
+                          setLignes((ls) => ls.map((x, j) => j === i ? { ...x, prix_unitaire: ht } : x))
                         }
                       />
                       <Select
@@ -1306,11 +1408,10 @@ function FournisseursPage() {
                       >
                         <X className="h-3 w-3" />
                       </Button>
-                      {/* Rappel HT/TTC : le PU saisi est HT, on affiche le TTC dérivé du taux. */}
+                      {/* Les deux PU sont saisissables ci-dessus ; on rappelle ici les totaux ligne. */}
                       <div className="col-span-12 text-xs pl-1 pb-1 flex flex-wrap gap-x-3">
-                        <span className="text-muted-foreground">P.U. HT <span className="font-medium text-foreground">{fmt(l.prix_unitaire || 0)}</span></span>
-                        <span className="text-muted-foreground">P.U. TTC <span className="font-medium text-foreground">{fmt(puHtToTtc(l.prix_unitaire || 0, l.taux_tva))}</span></span>
                         <span className="text-muted-foreground">Total HT <span className="font-medium text-foreground">{fmt((l.quantite || 0) * (l.prix_unitaire || 0))}</span></span>
+                        <span className="text-muted-foreground">Total TTC <span className="font-medium text-foreground">{fmt((l.quantite || 0) * puHtToTtc(l.prix_unitaire || 0, l.taux_tva))}</span></span>
                       </div>
                     </div>
                   ))}
@@ -1361,6 +1462,34 @@ function FournisseursPage() {
 
         {/* ── Fournisseurs tiers + stats ── */}
         <TabsContent value="tiers" className="mt-4">
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <Input
+              className="max-w-sm"
+              placeholder="Rechercher par nom, ICE, IF ou e-mail…"
+              value={searchTiers}
+              onChange={(e) => setSearchTiers(e.target.value)}
+            />
+            <Select value={filtreSoldeTiers} onValueChange={(v) => setFiltreSoldeTiers(v as "tous" | "restants")}>
+              <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="tous">Tous les fournisseurs</SelectItem>
+                <SelectItem value="restants">Reste à payer uniquement</SelectItem>
+              </SelectContent>
+            </Select>
+            {(searchTiers || filtreSoldeTiers !== "tous") && (
+              <>
+                <span className="text-xs text-muted-foreground">
+                  {fournisseursFiltres.length} / {fournisseurs.length}
+                </span>
+                <Button
+                  variant="ghost" size="sm" className="h-8 text-xs"
+                  onClick={() => { setSearchTiers(""); setFiltreSoldeTiers("tous"); }}
+                >
+                  Réinitialiser
+                </Button>
+              </>
+            )}
+          </div>
           <div className="flex gap-6 items-start">
             {/* Supplier list */}
             <div className={isPanelOpen ? "w-72 flex-shrink-0" : "flex-1"}>
@@ -1378,24 +1507,27 @@ function FournisseursPage() {
                             <TableHead>RC</TableHead>
                             <TableHead>Email</TableHead>
                             <TableHead>Téléphone</TableHead>
+                            <TableHead className="text-right">Reste à payer</TableHead>
                           </>
                         )}
                         <TableHead className="w-16"></TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {fournisseurs.length === 0 ? (
+                      {fournisseursFiltres.length === 0 ? (
                         <TableRow>
                           <TableCell
-                            colSpan={isPanelOpen ? 3 : 8}
+                            colSpan={isPanelOpen ? 3 : 9}
                             className="text-center py-10 text-muted-foreground"
                           >
                             <Building2 className="h-8 w-8 mx-auto mb-2 opacity-30" />
-                            Aucun fournisseur
+                            {fournisseurs.length === 0
+                              ? "Aucun fournisseur"
+                              : "Aucun fournisseur ne correspond aux filtres"}
                           </TableCell>
                         </TableRow>
                       ) : (
-                        fournisseurs.map((f) => (
+                        fournisseursFiltres.map((f) => (
                           <TableRow
                             key={f.id}
                             className={`cursor-pointer hover:bg-muted/50 transition-colors ${
@@ -1416,6 +1548,9 @@ function FournisseursPage() {
                                 <TableCell className="font-mono text-xs">{f.rc ?? <span className="text-muted-foreground">—</span>}</TableCell>
                                 <TableCell className="text-sm">{f.email ?? <span className="text-muted-foreground">—</span>}</TableCell>
                                 <TableCell className="text-sm">{f.telephone ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                                <TableCell className={`text-right font-mono text-xs ${(soldesParFournisseur[f.id] ?? 0) > 0 ? "text-red-600 font-semibold" : "text-muted-foreground"}`}>
+                                  {fmt(soldesParFournisseur[f.id] ?? 0)}
+                                </TableCell>
                               </>
                             )}
                             <TableCell className="text-right">

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
 import { generateFactureXml, marquerPayee, ocrFacture, ajouterEmailClient, matcherDocumentAvecTransactions } from "@/server/factures.functions";
@@ -16,6 +16,9 @@ import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/componen
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
+import { PuTtcInput } from "@/components/PuTtcInput";
+import { FacturesFiltres } from "@/components/FacturesFiltres";
+import { filtrerFactures, joursRetard, trancheRetard, type CriteresFiltre } from "@/lib/factures-filtres";
 import {
   indexerModesPaiement, modePaiementFacture,
   MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
@@ -68,9 +71,26 @@ async function getPdfjsLib(): Promise<any> {
 // Types de facture valides attendus par l'OCR
 const VALID_FACTURE_TYPES = ["standard", "acompte", "solde", "avoir"] as const;
 
+/**
+ * Statut de la facture. Le retard prime sur « en attente » / « acompte » : dès que
+ * l'échéance est dépassée et qu'il reste à encaisser, le badge porte le nombre de
+ * jours, recalculé à chaque rendu (rien n'est stocké, rien ne se périme).
+ */
 function StatutPaiementBadge({ f }: { f: Facture }) {
   if (f.statut_paiement === "payee")
     return <Badge className="bg-green-100 text-green-700 text-xs">✅ Payée</Badge>;
+
+  const jours = joursRetard(f);
+  if (jours != null) {
+    const tranche = trancheRetard(jours);
+    return (
+      <Badge className={`${tranche?.cls ?? "bg-red-100 text-red-700"} text-xs`}
+        title={`Échéance dépassée de ${jours} jour${jours > 1 ? "s" : ""}`}>
+        ⚠️ En retard ({jours} j)
+      </Badge>
+    );
+  }
+
   if (f.statut_paiement === "partielle")
     return <Badge className="bg-blue-100 text-blue-700 text-xs">🔵 Acompte partiel</Badge>;
   if (f.type === "acompte")
@@ -134,6 +154,10 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
 
   const [factures, setFactures] = useState<Facture[]>([]);
   const [clients, setClients]   = useState<Client[]>([]);
+  // Filtres du tableau (recherche, statut, client, période).
+  const [criteres, setCriteres] = useState<CriteresFiltre>({
+    texte:"", statut:"toutes", tiersId:"", debut:"", fin:"", champDate:"date_facture",
+  });
   const [modes, setModes]       = useState<Map<string, ModePaiement>>(new Map());
   const [loading, setLoading]   = useState(true);
   const [openCreate, setOpenCreate] = useState(false);
@@ -160,6 +184,8 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
   const [montantRestant, setMontantRestant] = useState(0);
   const [lignes, setLignes] = useState<Ligne[]>([{designation:"",quantite:1,prix_unitaire:0,taux_tva:20}]);
   const [echeances, setEcheances] = useState<Echeance[]>([]);
+  // Annotations manuscrites lues par l'OCR vision (Payé, visa, n° chèque…).
+  const [notesManuscrites, setNotesManuscrites] = useState<string|null>(null);
 
   // OCR
   const [ocrLoading, setOcrLoading] = useState(false);
@@ -303,6 +329,8 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
         setMontantRestant(r.montant_ttc??0);
       }
 
+      setNotesManuscrites((r as any).notes_manuscrites ?? null);
+
       if(r.lignes?.length) {
         if(r.type_facture==="acompte") {
           // Pour acompte: remplacer les lignes par une ligne unique avec le montant de l'acompte
@@ -393,7 +421,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
   };
 
   const resetForm=()=>{
-    setOcrData(null);setOriginalFile(null);
+    setOcrData(null);setOriginalFile(null);setNotesManuscrites(null);
     setLignes([{designation:"",quantite:1,prix_unitaire:0,taux_tva:20}]);
     setClientId("");setNumero("");setDateE("");setTypeFacture("standard");
     setMontantPaye(0);setMontantRestant(0);setModeReglement("virement");
@@ -491,6 +519,16 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     }catch(e:any){toast.error(e.message);}
     finally{setProcessing(null);}
   };
+
+  // Tableau filtré. Les KPIs ci-dessous restent calculés sur TOUTES les factures :
+  // ils décrivent le dossier, pas la sélection à l'écran.
+  const facturesFiltrees = useMemo(
+    () => filtrerFactures(factures, criteres, {
+      nomTiers: f => clients.find(c=>c.id===f.client_id)?.nom,
+      idTiers:  f => f.client_id,
+    }),
+    [factures, criteres, clients],
+  );
 
   // KPIs
   const conformes  = factures.filter(f=>f.statut==="conforme");
@@ -612,6 +650,20 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                   </Select>
                 </div>
 
+                {/* Annotations manuscrites relevées par l'OCR vision — affichées au
+                    moment de la saisie pour aider à corriger les champs ci-dessous. */}
+                {notesManuscrites && (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/20 p-2.5">
+                    <p className="text-xs font-semibold text-amber-800 dark:text-amber-400">
+                      Notes manuscrites détectées sur le document
+                    </p>
+                    <p className="text-sm mt-0.5 whitespace-pre-line">{notesManuscrites}</p>
+                    <p className="text-[10px] text-muted-foreground mt-1">
+                      À titre indicatif — elles ne modifient aucun montant automatiquement.
+                    </p>
+                  </div>
+                )}
+
                 {/* Lignes */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
@@ -620,19 +672,29 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                       <Plus className="h-3 w-3 mr-1"/>Ligne
                     </Button>
                   </div>
+                  <div className="grid grid-cols-12 gap-1 px-1 pb-1 text-[10px] font-medium text-muted-foreground">
+                    <span className="col-span-4">Désignation</span>
+                    <span className="col-span-1">Qté</span>
+                    <span className="col-span-2">P.U. HT</span>
+                    <span className="col-span-2">P.U. TTC</span>
+                    <span className="col-span-2">TVA</span>
+                  </div>
                   {lignes.map((l,i)=>(
                     <div key={i} className="grid grid-cols-12 gap-1 items-center mb-1">
-                      <Input className="col-span-5 text-xs" placeholder="Désignation" value={l.designation} onChange={e=>setLigne(i,"designation",e.target.value)}/>
-                      <Input className="col-span-2 text-xs" type="number" placeholder="Qté" value={l.quantite} onChange={e=>setLigne(i,"quantite",+e.target.value)}/>
+                      <Input className="col-span-4 text-xs" placeholder="Désignation" value={l.designation} onChange={e=>setLigne(i,"designation",e.target.value)}/>
+                      <Input className="col-span-1 text-xs" type="number" placeholder="Qté" value={l.quantite} onChange={e=>setLigne(i,"quantite",+e.target.value)}/>
                       <Input className="col-span-2 text-xs" type="number" placeholder="PU HT" value={l.prix_unitaire} onChange={e=>setLigne(i,"prix_unitaire",+e.target.value)}/>
+                      {/* PU TTC éditable : saisir l'un recalcule l'autre (le HT reste stocké). */}
+                      <PuTtcInput className="col-span-2 text-xs" prixHt={l.prix_unitaire} tauxTva={l.taux_tva}
+                        onChangeHt={ht=>setLigne(i,"prix_unitaire",ht)}/>
                       <Select value={String(l.taux_tva)} onValueChange={v=>setLigne(i,"taux_tva",+v)}>
                         <SelectTrigger className="col-span-2 text-xs"><SelectValue/></SelectTrigger>
                         <SelectContent>{[0,7,10,14,20].map(r=><SelectItem key={r} value={String(r)}>{r}%</SelectItem>)}</SelectContent>
                       </Select>
                       <Button type="button" variant="ghost" size="icon" className="col-span-1" onClick={()=>setLignes(ls=>ls.filter((_,j)=>j!==i))} disabled={lignes.length===1}><X className="h-3 w-3"/></Button>
-                      {/* Le PU saisi est HT ; rappel du TTC dérivé du taux de la ligne. */}
+                      {/* Les deux PU sont saisissables ci-dessus ; rappel des totaux ligne. */}
                       <div className="col-span-12 text-[10px] text-muted-foreground pl-1">
-                        P.U. HT {fmt(l.prix_unitaire||0)} · P.U. TTC {fmt(puHtToTtc(l.prix_unitaire||0, l.taux_tva))}
+                        Total HT {fmt((l.quantite||0)*(l.prix_unitaire||0))} · Total TTC {fmt((l.quantite||0)*puHtToTtc(l.prix_unitaire||0, l.taux_tva))}
                       </div>
                     </div>
                   ))}
@@ -695,6 +757,16 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
         ))}
       </div>
 
+      {/* Filtres du tableau */}
+      <FacturesFiltres
+        criteres={criteres}
+        onChange={setCriteres}
+        tiers={clients.map(c=>({id:c.id,nom:c.nom}))}
+        labelTiers="Client"
+        nbFiltrees={facturesFiltrees.length}
+        nbTotal={factures.length}
+      />
+
       {/* Table */}
       <Card><CardContent className="p-0">
         <Table>
@@ -702,17 +774,19 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
             <TableRow>
               <TableHead>N°</TableHead><TableHead>Client</TableHead><TableHead>Date</TableHead>
               <TableHead>Échéance</TableHead>
-              <TableHead>TTC</TableHead><TableHead>Payé</TableHead><TableHead>Restant</TableHead>
-              <TableHead>DGI</TableHead><TableHead>Paiement</TableHead>
+              <TableHead>HT</TableHead><TableHead>TTC</TableHead><TableHead>Payé</TableHead><TableHead>Restant</TableHead>
+              <TableHead>DGI</TableHead><TableHead>Statut</TableHead>
               <TableHead>Mode de paiement</TableHead><TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading
-              ?<TableRow><TableCell colSpan={11} className="text-center py-8"><Loader2 className="h-5 w-5 animate-spin mx-auto"/></TableCell></TableRow>
-              :factures.length===0
-              ?<TableRow><TableCell colSpan={11} className="text-center py-10 text-muted-foreground">Aucune facture</TableCell></TableRow>
-              :factures.map(f=>(
+              ?<TableRow><TableCell colSpan={12} className="text-center py-8"><Loader2 className="h-5 w-5 animate-spin mx-auto"/></TableCell></TableRow>
+              :facturesFiltrees.length===0
+              ?<TableRow><TableCell colSpan={12} className="text-center py-10 text-muted-foreground">
+                {factures.length===0?"Aucune facture":"Aucune facture ne correspond aux filtres"}
+              </TableCell></TableRow>
+              :facturesFiltrees.map(f=>(
                 <TableRow key={f.id}>
                   <TableCell className="font-mono text-xs">{f.numero??f.id.slice(0,8)}</TableCell>
                   <TableCell className="text-sm">
@@ -725,6 +799,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                   </TableCell>
                   <TableCell className="text-sm">{new Date(f.date_facture).toLocaleDateString("fr-MA")}</TableCell>
                   <TableCell><EcheanceCell f={f}/></TableCell>
+                  <TableCell className="font-mono text-sm">{fmt(Number(f.montant_ht))}</TableCell>
                   <TableCell className="font-medium text-sm">{fmt(Number(f.montant_ttc))}</TableCell>
                   <TableCell className="font-mono text-sm text-green-600">{fmt(Number(f.montant_paye??0))}</TableCell>
                   <TableCell className="font-mono text-sm text-orange-600">{fmt(Number(f.montant_restant??f.montant_ttc))}</TableCell>
@@ -924,9 +999,11 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                     <TableRow>
                       <TableHead>Désignation</TableHead>
                       <TableHead className="text-right">Qté</TableHead>
-                      <TableHead className="text-right">P.U.</TableHead>
+                      <TableHead className="text-right">P.U. HT</TableHead>
+                      <TableHead className="text-right">P.U. TTC</TableHead>
                       <TableHead className="text-right">TVA</TableHead>
                       <TableHead className="text-right">Total HT</TableHead>
+                      <TableHead className="text-right">Total TTC</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -935,9 +1012,13 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                         <TableCell className="text-sm">{l.designation || "—"}</TableCell>
                         <TableCell className="text-right font-mono text-xs">{l.quantite ?? "—"}</TableCell>
                         <TableCell className="text-right font-mono text-xs">{fmt(Number(l.prix_unitaire ?? 0))}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{fmt(puHtToTtc(Number(l.prix_unitaire ?? 0), l.taux_tva))}</TableCell>
                         <TableCell className="text-right font-mono text-xs">{l.taux_tva ?? 0} %</TableCell>
                         <TableCell className="text-right font-mono text-xs font-medium">
                           {fmt(Number(l.quantite ?? 0) * Number(l.prix_unitaire ?? 0))}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs font-medium">
+                          {fmt(Number(l.quantite ?? 0) * puHtToTtc(Number(l.prix_unitaire ?? 0), l.taux_tva))}
                         </TableCell>
                       </TableRow>
                     ))}

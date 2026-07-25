@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -84,6 +85,10 @@ function ClientsPage() {
   const [editing, setEditing] = useState<Tiers | null>(null);
   const [form, setForm] = useState(EMPTY);
   const [search, setSearch] = useState("");
+  // Filtre solde de l'annuaire + reste à encaisser agrégé par client (toutes
+  // factures du dossier), nécessaire pour filtrer AVANT d'ouvrir une fiche.
+  const [filtreSolde, setFiltreSolde] = useState<"tous" | "debiteurs">("tous");
+  const [soldesParClient, setSoldesParClient] = useState<Record<string, number>>({});
   const [view, setView] = useState<Vue>(vue ?? "factures");
   const [docView, setDocView] = useState<DocumentViewerSource | null>(null);
   const [selectedClient, setSelectedClient] = useState<Tiers | null>(null);
@@ -94,12 +99,24 @@ function ClientsPage() {
 
   const load = async () => {
     setLoading(true);
-    const [{ data }, { data: jj }] = await Promise.all([
+    const [{ data }, { data: jj }, { data: ff }] = await Promise.all([
       supabase.from("clients").select("*").eq("dossier_id", dossierId).is("deleted_at", null).order("nom"),
       (supabase.from("justificatifs") as any).select("*").eq("dossier_id", dossierId).eq("flux_type", "vente").order("created_at", { ascending: false }),
+      // Agrégat léger (3 colonnes) : sert uniquement au filtre « solde » de l'annuaire.
+      (supabase.from("factures") as any)
+        .select("client_id,montant_restant,montant_ttc")
+        .eq("dossier_id", dossierId),
     ]);
     setItems((data ?? []) as Tiers[]);
     setJustificatifsVente(jj ?? []);
+    // Reste à encaisser par client. `montant_restant` peut être NULL sur les
+    // factures antérieures au moteur de paiement → on retombe sur le TTC.
+    const soldes: Record<string, number> = {};
+    for (const f of (ff ?? []) as any[]) {
+      if (!f.client_id) continue;
+      soldes[f.client_id] = (soldes[f.client_id] ?? 0) + Number(f.montant_restant ?? f.montant_ttc ?? 0);
+    }
+    setSoldesParClient(soldes);
     setLoading(false);
   };
 
@@ -267,11 +284,21 @@ function ClientsPage() {
     load();
   };
 
-  const filtered = items.filter(t =>
-    t.nom.toLowerCase().includes(search.toLowerCase()) ||
-    (t.ice ?? "").includes(search) ||
-    (t.email ?? "").includes(search)
-  );
+  // Recherche annuaire : nom, ICE, IF (identifiant fiscal) ou e-mail. Insensible à
+  // la casse et aux espaces — un ICE se recopie souvent avec des espaces parasites.
+  const filtered = items.filter(t => {
+    const q = search.trim().toLowerCase();
+    const norm = (v: string | null | undefined) => (v ?? "").toLowerCase().replace(/\s/g, "");
+    const matchTexte =
+      !q ||
+      t.nom.toLowerCase().includes(q) ||
+      norm(t.ice).includes(norm(q)) ||
+      norm(t.if_fiscal).includes(norm(q)) ||
+      norm(t.email).includes(norm(q));
+    // « Débiteurs » = clients dont il reste quelque chose à encaisser.
+    const matchSolde = filtreSolde === "tous" || (soldesParClient[t.id] ?? 0) > 0;
+    return matchTexte && matchSolde;
+  });
 
   const isPanelOpen = !!selectedClient;
 
@@ -349,7 +376,34 @@ function ClientsPage() {
         </TabsContent>
 
         <TabsContent value="annuaire">
-      <Input className="mb-4 max-w-sm" placeholder="Rechercher…" value={search} onChange={e => setSearch(e.target.value)} />
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Input
+          className="max-w-sm"
+          placeholder="Rechercher par nom, ICE, IF ou e-mail…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+        <Select value={filtreSolde} onValueChange={v => setFiltreSolde(v as "tous" | "debiteurs")}>
+          <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="tous">Tous les clients</SelectItem>
+            <SelectItem value="debiteurs">Solde débiteur uniquement</SelectItem>
+          </SelectContent>
+        </Select>
+        {(search || filtreSolde !== "tous") && (
+          <>
+            <span className="text-xs text-muted-foreground">
+              {filtered.length} / {items.length}
+            </span>
+            <Button
+              variant="ghost" size="sm" className="h-8 text-xs"
+              onClick={() => { setSearch(""); setFiltreSolde("tous"); }}
+            >
+              Réinitialiser
+            </Button>
+          </>
+        )}
+      </div>
 
       <div className="flex gap-6 items-start">
         {/* ── Liste clients ─────────────────────────────────────────────────── */}
@@ -358,14 +412,14 @@ function ClientsPage() {
             <Table>
               <TableHeader><TableRow>
                 <TableHead>Nom</TableHead>
-                {!isPanelOpen && <><TableHead>Code aux.</TableHead><TableHead>ICE</TableHead><TableHead>IF</TableHead><TableHead>Email</TableHead><TableHead>Tél</TableHead></>}
+                {!isPanelOpen && <><TableHead>Code aux.</TableHead><TableHead>ICE</TableHead><TableHead>IF</TableHead><TableHead>Email</TableHead><TableHead>Tél</TableHead><TableHead className="text-right">Reste à encaisser</TableHead></>}
                 <TableHead></TableHead>
               </TableRow></TableHeader>
               <TableBody>
                 {loading
-                  ? <TableRow><TableCell colSpan={isPanelOpen ? 2 : 7} className="text-center py-8 text-muted-foreground">Chargement…</TableCell></TableRow>
+                  ? <TableRow><TableCell colSpan={isPanelOpen ? 2 : 8} className="text-center py-8 text-muted-foreground">Chargement…</TableCell></TableRow>
                   : filtered.length === 0
-                    ? <TableRow><TableCell colSpan={isPanelOpen ? 2 : 7} className="text-center py-10 text-muted-foreground">
+                    ? <TableRow><TableCell colSpan={isPanelOpen ? 2 : 8} className="text-center py-10 text-muted-foreground">
                         <Users className="h-8 w-8 mx-auto mb-2 opacity-30" />
                         Aucun client{search ? " trouvé" : ". Créez votre premier client."}
                       </TableCell></TableRow>
@@ -382,6 +436,9 @@ function ClientsPage() {
                           <TableCell className="font-mono text-xs">{t.if_fiscal ?? "—"}</TableCell>
                           <TableCell className="text-sm">{t.email ?? "—"}</TableCell>
                           <TableCell className="text-sm">{t.telephone ?? "—"}</TableCell>
+                          <TableCell className={`text-right font-mono text-xs ${(soldesParClient[t.id] ?? 0) > 0 ? "text-red-600 font-semibold" : "text-muted-foreground"}`}>
+                            {fmt(soldesParClient[t.id] ?? 0)}
+                          </TableCell>
                         </>}
                         <TableCell onClick={e => e.stopPropagation()}>
                           <div className="flex gap-1">

@@ -332,6 +332,22 @@ describe("buildOcrPrompt — règles présentes (intégration)", () => {
     expect(promptText).toContain("Ne remplis JAMAIS les deux à la fois");
   });
 
+  it("impose le contrôle HT/TTC des lignes par le calcul", () => {
+    expect(promptText).toContain("CONTRÔLE HT/TTC PAR LE CALCUL");
+    expect(promptText).toContain("Σ(quantité × prix unitaire)");
+    expect(promptText).toContain("le bloc totaux");
+    // Le bloc totaux tranche ; à défaut on reste en HT (pas de conversion hasardeuse)
+    expect(promptText).toContain("fait FOI sur la nature HT/TTC des lignes");
+    expect(promptText).toContain("garde le PU en HT");
+  });
+
+  it("demande le balayage de TOUS les champs de prix (unitaires et totaux)", () => {
+    expect(promptText).toContain("BALAYAGE COMPLET DES PRIX");
+    expect(promptText).toContain("totaux de ligne");
+    // Recoupement croisé PU ⇄ total de ligne
+    expect(promptText).toContain("Total_ligne ≈ quantité × PU");
+  });
+
   it("demande la détection des notes manuscrites (OCR vision)", () => {
     expect(promptText).toContain("NOTES MANUSCRITES");
     expect(promptText).toContain("notes_manuscrites");

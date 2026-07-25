@@ -21,7 +21,7 @@ import { emailFactureClient, emailFactureRejetee } from "./email.templates";
 import { sendMail } from "./mailer";
 import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
-import { puTtcToHt } from "../lib/tva";
+import { puTtcToHt, reconcilierLignesHtTtc } from "../lib/tva";
 import { rappelerMemoire } from "./tiers-memoire.functions";
 import { logUsage, logUsageBatch, estimerCoutIA } from "./analytics.functions";
 import { guardScan, libererScan } from "./billing";
@@ -1038,6 +1038,17 @@ export const ocrFacture = createServerFn({ method: "POST" })
       result.montant_tva = corrected.montant_tva;
       result.montant_ttc = corrected.montant_ttc;
       result.taux_tva    = corrected.taux_tva;
+
+      // ── Réconciliation lignes ↔ totaux ────────────────────────────────────────
+      // Si le PU des lignes n'est pas libellé TTC mais que Σ(qté × PU) colle au
+      // Total TTC (et pas au Total HT), c'est que les PU affichés étaient en fait
+      // TTC → on les reconvertit en HT (source de vérité interne). Déterministe,
+      // indépendant du LLM : rattrape le cas même si le modèle a supposé HT.
+      const recLignes = reconcilierLignesHtTtc(result.lignes ?? [], result.montant_ht, result.montant_ttc);
+      if (recLignes.converti) {
+        result.lignes = recLignes.lignes;
+        console.log("[OCR] PU des lignes reconnus TTC via réconciliation totaux → convertis en HT");
+      }
 
       // ── Normalisation + validation des dates ────────────────────────────────
       // Convertit DD/MM/YYYY ou DD-MM-YYYY → YYYY-MM-DD avant toute validation

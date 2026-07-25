@@ -4,8 +4,12 @@ import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, Wallet, FileText, ShoppingCart, AlertCircle, CheckCircle, Clock, AlertTriangle, Users, Building2, Receipt, Mail, Loader2, Landmark, ArrowLeftRight } from "lucide-react";
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
+import { TrendingUp, Wallet, FileText, ShoppingCart, AlertCircle, CheckCircle, Clock, AlertTriangle, Users, Building2, Receipt, Mail, Loader2, Landmark, ArrowLeftRight, ExternalLink } from "lucide-react";
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell, BarChart, Bar } from "recharts";
+import {
+  synthetiserTva, tvaRecuperableEnCours, echeanceSimplTva, joursAvant,
+  ventilerChargesPcm, balanceAgeeDashboard, calculerCashFlow,
+} from "@/lib/dashboard-fiscal";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { envoyerRappelTVA } from "@/server/fiscalite.functions";
@@ -16,6 +20,9 @@ import { logAudit } from "@/lib/audit";
 export const Route = createFileRoute("/_app/dossiers/$dossierId/dashboard")({ component: DashboardPage });
 
 const fmt = (n: number) => Number(n).toLocaleString("fr-MA", { minimumFractionDigits: 2 }) + " MAD";
+
+/** Palette du donut de charges — teintes distinctes, lisibles en clair comme en sombre. */
+const COULEURS_PCM = ["#2563eb", "#10b981", "#f59e0b", "#8b5cf6", "#94a3b8"];
 
 // ── Transactions bancaires NON LETTRÉES du dossier, ventilées par relevé ────────
 // « non lettrée » = ni facture ni justificatif lié (même définition que la colonne
@@ -60,7 +67,8 @@ function DashboardPage() {
   const [factures, setFactures] = useState<any[]>([]);
   const [ff, setFf] = useState<any[]>([]);
   const [alertes, setAlertes] = useState<any[]>([]);
-  const [ecrTva, setEcrTva] = useState<any[]>([]);
+  // Écritures de charges (classe 6) — ventilation des dépenses par compte PCM.
+  const [ecrCharges, setEcrCharges] = useState<any[]>([]);
   const [comptesBancaires, setComptesBancaires] = useState<CompteBancaire[]>([]);
   const [releves, setReleves] = useState<ReleveResume[]>([]);
   const [flux, setFlux] = useState<FluxNonLettres>({ parReleve: {}, ok: true });
@@ -73,14 +81,14 @@ function DashboardPage() {
 
   useEffect(() => {
     (async () => {
-      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: tva }, { data: cb }, { data: rel }, fluxNonLettres] = await Promise.all([
+      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }] = await Promise.all([
         supabase.from("dossiers").select("nom_societe,ice,statut").eq("id", dossierId).single(),
         // Ajouter montant_paye et montant_restant pour calculs corrects + tiers pour les alertes
         supabase.from("factures").select("numero,statut,statut_paiement,montant_ht,montant_ttc,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,clients(nom)").eq("dossier_id", dossierId),
-        supabase.from("factures_fournisseurs").select("numero,fournisseur_nom,statut_paiement,montant_ttc,montant_paye,montant_restant,date_echeance,date_facture").eq("dossier_id", dossierId),
+        // montant_ht / montant_tva servent au suivi TVA (régime de l'encaissement)
+        // et au cash-flow, qui raisonnent tous deux hors taxes.
+        supabase.from("factures_fournisseurs").select("numero,fournisseur_nom,statut_paiement,montant_ht,montant_tva,montant_ttc,montant_paye,montant_restant,date_echeance,date_facture").eq("dossier_id", dossierId),
         supabase.from("alertes").select("*").eq("dossier_id", dossierId).eq("lue", false).order("created_at", { ascending: false }).limit(5),
-        // Écritures TVA (mêmes comptes que la page Fiscalité) pour l'échéance de trésorerie
-        supabase.from("ecritures_comptables").select("compte_numero,debit,credit,date_ecriture").eq("dossier_id", dossierId).in("compte_numero", ["44551", "34552"]),
         // Comptes & flux bancaires : TOUS les comptes du dossier + relevés + transactions
         // non lettrées comptées par relevé (cf. chargerFluxNonLettres).
         supabase.from("comptes_bancaires").select("id,banque,intitule,rib,solde_actuel").eq("dossier_id", dossierId).order("created_at"),
@@ -90,15 +98,18 @@ function DashboardPage() {
         // requête — la carte croirait alors qu'il n'y a aucun relevé.
         (supabase.from("releves_bancaires") as any).select("*").eq("dossier_id", dossierId).order("created_at", { ascending: false }),
         chargerFluxNonLettres(dossierId),
+        // Charges (classe 6) pour la ventilation par compte PCM. C'est la seule
+        // source portant un compte PCM : `factures_fournisseurs` n'en a pas.
+        supabase.from("ecritures_comptables").select("compte_numero,debit,credit,date_ecriture").eq("dossier_id", dossierId).like("compte_numero", "6%"),
       ]);
       setDossier(d);
       setFactures(f ?? []);
       setFf(ffData ?? []);
       setAlertes(al ?? []);
-      setEcrTva(tva ?? []);
       setComptesBancaires((cb ?? []) as CompteBancaire[]);
       setReleves((rel ?? []) as ReleveResume[]);
       setFlux(fluxNonLettres);
+      setEcrCharges(charges ?? []);
       setLoading(false);
     })();
   }, [dossierId]);
@@ -126,7 +137,10 @@ function DashboardPage() {
     .filter(f => f.statut_paiement !== "payee")
     .reduce((s, f) => s + Number(f.montant_restant ?? f.montant_ttc), 0);
 
-  const tvaCollectee = conformes.reduce((s, f) => s + Number(f.montant_tva), 0);
+  // Achats facturés (toutes factures fournisseurs reçues, réglées ou non) —
+  // pendant du « CA HT facturé » côté ventes.
+  const achatsHT = ff.reduce((s, f) => s + Number(f.montant_ht ?? 0), 0);
+  const achatsTTC = ff.reduce((s, f) => s + Number(f.montant_ttc ?? 0), 0);
 
   // Dettes fournisseurs = montant_restant (ou montant_ttc si pas encore renseigné)
   const dettes = ff
@@ -173,24 +187,36 @@ function DashboardPage() {
   const totalRetardsFourn = retardsFourn.reduce((s, r) => s + r.restant, 0);
   const maxJoursFourn = retardsFourn[0]?.jours ?? 0;
 
-  // Échéance TVA : TVA nette du dernier mois clos, due le 20 du mois suivant (régime mensuel).
-  const moisTva = [...new Set(ecrTva.map(e => e.date_ecriture?.slice(0, 7)).filter(Boolean))].sort() as string[];
-  const dernierMoisTva = moisTva[moisTva.length - 1] ?? null;
-  const tvaMois = dernierMoisTva ? ecrTva.filter(e => e.date_ecriture?.startsWith(dernierMoisTva)) : [];
-  const tvaCollecteeMois = tvaMois.filter(e => e.compte_numero === "44551").reduce((s, e) => s + Number(e.credit) - Number(e.debit), 0);
-  const tvaRecupMois = tvaMois.filter(e => e.compte_numero === "34552").reduce((s, e) => s + Number(e.debit) - Number(e.credit), 0);
-  const tvaNetteMois = tvaCollecteeMois - tvaRecupMois;
-  // Échéance = 20 du mois suivant le dernier mois déclaré.
-  const echeanceTva = dernierMoisTva ? new Date(Number(dernierMoisTva.slice(0, 4)), Number(dernierMoisTva.slice(5, 7)), 20) : null;
-  const joursTva = echeanceTva ? Math.ceil((echeanceTva.getTime() - today.getTime()) / 86400000) : null;
-  const tvaAPayer = tvaNetteMois > 0;
+  // ── SUIVI TVA & FISCALITÉ DGI (régime de l'encaissement) ────────────────────
+  // Calculé sur les FACTURES et leur règlement effectif, et non sur les écritures
+  // 44551/34552 : celles-ci suivent le fait générateur comptable, alors que
+  // l'exigibilité, sous ce régime, naît de l'encaissement.
+  const syntheseTva = synthetiserTva(factures, ff);
+  const tvaEnCours = tvaRecuperableEnCours(ff);
+
+  // Période déclarée = dernier mois clos ayant des factures ; l'échéance de
+  // télédéclaration SIMPL-TVA tombe le dernier jour du mois suivant.
+  const moisFactures = [...new Set(
+    [...factures, ...ff].map(x => (x.date_facture ?? "").slice(0, 7)).filter(Boolean),
+  )].sort() as string[];
+  const periodeSimpl = moisFactures[moisFactures.length - 1] ?? null;
+  const echeanceSimpl = periodeSimpl ? echeanceSimplTva(periodeSimpl) : null;
+  const joursSimpl = echeanceSimpl ? joursAvant(echeanceSimpl, today) : null;
+
+  // ── Graphiques : ventilation PCM + balance âgée ─────────────────────────────
+  const partsCharges = ventilerChargesPcm(ecrCharges);
+  const totalCharges = partsCharges.reduce((s, p) => s + p.montant, 0);
+  const tranchesAgees = balanceAgeeDashboard(factures, ff, today);
+
+  // ── Trésorerie : marge brute réelle sur flux encaissés/décaissés ────────────
+  const cashFlow = calculerCashFlow(factures, ff);
 
   // Rappel INTERNE : envoie au gérant/utilisateur courant (jamais un tiers) un
   // récap de l'échéance TVA (montant net, période, date limite) via SMTP.
   const envoyerRappelTvaMail = async () => {
     const to = user?.email ?? profile?.email ?? "";
     if (!to) { toast.error("Aucune adresse e-mail pour l'utilisateur courant."); return; }
-    if (!dernierMoisTva || !echeanceTva) { toast.error("Aucune échéance TVA à rappeler."); return; }
+    if (!periodeSimpl || !echeanceSimpl) { toast.error("Aucune échéance TVA à rappeler."); return; }
     setSendingTva(true);
     try {
       const gerantNom = [profile?.prenom, profile?.nom].filter(Boolean).join(" ").trim();
@@ -199,10 +225,12 @@ function DashboardPage() {
           to,
           gerantNom: gerantNom || undefined,
           societeNom: dossier?.nom_societe ?? "HisabPro",
-          montantTVA: Number(tvaNetteMois.toFixed(2)),
-          periode: dernierMoisTva,
-          dateEcheance: echeanceTva.toLocaleDateString("fr-MA"),
-          joursRestants: joursTva ?? undefined,
+          // Montant et échéance du suivi SIMPL-TVA affiché à l'écran : le rappel
+          // doit annoncer exactement ce que l'utilisateur voit.
+          montantTVA: Number(syntheseTva.nette.toFixed(2)),
+          periode: periodeSimpl,
+          dateEcheance: echeanceSimpl.toLocaleDateString("fr-MA"),
+          joursRestants: joursSimpl ?? undefined,
         },
       });
       toast.success(`Rappel d'échéance TVA envoyé à ${to}`);
@@ -244,8 +272,10 @@ function DashboardPage() {
     { icon: TrendingUp, label: "CA HT facturé (conformes DGI)", value: fmt(caHT), sub: `TTC: ${fmt(caTTC)}`, color: "text-green-600" },
     { icon: Wallet, label: "CA encaissé (payé + partiel)", value: fmt(caEncaisse), color: "text-emerald-600" },
     { icon: FileText, label: "Encours clients (restant à encaisser)", value: fmt(encours), color: "text-blue-600" },
-    { icon: ShoppingCart, label: "Dettes fournisseurs", value: fmt(dettes), color: "text-orange-600" },
-    { icon: CheckCircle, label: "TVA collectée", value: fmt(tvaCollectee), color: "text-purple-600" },
+    // La TVA n'est plus ici : elle est détaillée dans le bloc « Suivi TVA &
+    // Fiscalité DGI » ci-dessous, au régime de l'encaissement.
+    { icon: ShoppingCart, label: "Achats HT facturés", value: fmt(achatsHT), sub: `TTC: ${fmt(achatsTTC)}`, color: "text-purple-600" },
+    { icon: Wallet, label: "Dettes fournisseurs", value: fmt(dettes), color: "text-orange-600" },
     { icon: AlertCircle, label: "En analyse DGI", value: String(enAnalyse), color: "text-yellow-600" },
   ];
 
@@ -281,7 +311,7 @@ function DashboardPage() {
           </div>
 
           {/* ── CENTRE D'ALERTES ─────────────────────────────────────────────── */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-8">
             {/* Retards clients */}
             <AlerteCard
               icon={Users}
@@ -308,49 +338,191 @@ function DashboardPage() {
               items={retardsFourn.slice(0, 4)}
               sens="payer"
             />
-            {/* Échéance TVA */}
-            <Card className={
-              joursTva === null ? "" :
-              joursTva < 0 ? "border-red-300 bg-red-50 dark:bg-red-950/20" :
-              joursTva <= 7 ? "border-orange-300 bg-orange-50 dark:bg-orange-950/20" :
-              "border-blue-200 bg-blue-50/50 dark:bg-blue-950/10"
-            }>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Receipt className="h-4 w-4" />Échéance de trésorerie — TVA
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {dernierMoisTva === null ? (
-                  <p className="text-sm text-muted-foreground">Aucune écriture TVA enregistrée.</p>
-                ) : !tvaAPayer ? (
-                  <div className="text-sm">
-                    <p className="text-blue-600 font-medium">Crédit de TVA — {fmt(Math.abs(tvaNetteMois))}</p>
-                    <p className="text-xs text-muted-foreground mt-1">Période {dernierMoisTva} · rien à verser</p>
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex items-baseline justify-between">
-                      <p className="text-2xl font-bold text-orange-600">{fmt(tvaNetteMois)}</p>
-                      {joursTva! < 0
-                        ? <Badge variant="destructive" className="text-xs">⚠️ {Math.abs(joursTva!)} j de retard</Badge>
-                        : <Badge variant={joursTva! <= 7 ? "destructive" : "outline"} className="text-xs">Dans {joursTva} j</Badge>}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      TVA nette {dernierMoisTva} · échéance le {echeanceTva?.toLocaleDateString("fr-MA")}
+          </div>
+
+          {/* ── SUIVI TVA & FISCALITÉ DGI ────────────────────────────────────── */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Receipt className="h-4 w-4" />Suivi TVA &amp; Fiscalité DGI
+                <Badge variant="secondary" className="text-[10px] font-normal">Régime de l'encaissement</Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">TVA collectée</p>
+                  <p className="text-xl font-bold text-purple-600 mt-1">{fmt(syntheseTva.collectee)}</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">Sur ventes réellement encaissées</p>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">TVA déductible</p>
+                  <p className="text-xl font-bold text-blue-600 mt-1">{fmt(syntheseTva.deductible)}</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">Sur achats réellement décaissés</p>
+                </div>
+                {/* Le signe porte le sens : dette envers l'État ou créance sur lui. */}
+                <div className={`rounded-lg border p-3 ${syntheseTva.estCredit ? "border-green-300 bg-green-50 dark:bg-green-950/20" : "border-orange-300 bg-orange-50 dark:bg-orange-950/20"}`}>
+                  <p className="text-xs text-muted-foreground">
+                    {syntheseTva.estCredit ? "Crédit de TVA" : "TVA nette à payer"}
+                  </p>
+                  <p className={`text-xl font-bold mt-1 ${syntheseTva.estCredit ? "text-green-600" : "text-orange-600"}`}>
+                    {fmt(Math.abs(syntheseTva.nette))}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    {syntheseTva.estCredit ? "Reportable sur la période suivante" : "Collectée − déductible"}
+                  </p>
+                </div>
+              </div>
+
+              {/* Alerte échéance SIMPL-TVA */}
+              {echeanceSimpl && periodeSimpl && (
+                <div className={`rounded-lg border p-3 flex flex-wrap items-center justify-between gap-3 ${
+                  joursSimpl !== null && joursSimpl < 0 ? "border-red-300 bg-red-50 dark:bg-red-950/20"
+                  : joursSimpl !== null && joursSimpl <= 7 ? "border-orange-300 bg-orange-50 dark:bg-orange-950/20"
+                  : "border-border bg-muted/30"}`}>
+                  <div>
+                    <p className="text-sm font-medium flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      Échéance SIMPL-TVA — période {periodeSimpl}
                     </p>
-                    <div className="flex items-center gap-3 mt-3">
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Télédéclaration et paiement au plus tard le{" "}
+                      <span className="font-medium text-foreground">
+                        {echeanceSimpl.toLocaleDateString("fr-MA", { day: "2-digit", month: "long", year: "numeric" })}
+                      </span>
+                      {" "}(dernier jour du mois suivant la période)
+                    </p>
+                    {/* Déclaration à néant : au Maroc, l'obligation de dépôt subsiste
+                        même quand la TVA nette est nulle. L'omettre expose à la pénalité
+                        pour dépôt hors délai (Art. 229 du CGI). */}
+                    {Math.abs(syntheseTva.nette) < 0.005 && (
+                      <p
+                        className="text-[11px] mt-1.5 flex items-start gap-1 text-amber-700 dark:text-amber-400"
+                        title="Même à 0 MAD, la déclaration reste obligatoire : le défaut ou le retard de dépôt est sanctionné (Art. 229 du Code général des impôts)."
+                      >
+                        <AlertTriangle className="h-3 w-3 mt-[1px] shrink-0" />
+                        <span>
+                          Déclaration du néant requise (TVA = 0 MAD) pour éviter la pénalité
+                          pour retard de dépôt (Art. 229 du CGI).
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <Badge className={
+                      joursSimpl !== null && joursSimpl < 0 ? "bg-red-100 text-red-700"
+                      : joursSimpl !== null && joursSimpl <= 7 ? "bg-orange-100 text-orange-700"
+                      : "bg-green-100 text-green-700"}>
+                      {joursSimpl === null ? "—"
+                        : joursSimpl < 0 ? `En retard de ${Math.abs(joursSimpl)} j`
+                        : joursSimpl === 0 ? "Dernier jour !"
+                        : `Dans ${joursSimpl} j`}
+                    </Badge>
+                    {joursSimpl !== null && joursSimpl < 0 ? (
+                      <>
+                        {/* En retard : action principale = accéder au téléservice DGI pour
+                            régulariser sans délai. Le rappel e-mail devient secondaire. */}
+                        <Button asChild size="sm" className="h-7 text-xs bg-red-600 hover:bg-red-700 text-white">
+                          <a href="https://simpl.tax.gov.ma" target="_blank" rel="noopener noreferrer"
+                            title="Ouvrir le portail SIMPL-TVA de la DGI pour déposer la déclaration en retard">
+                            <ExternalLink className="h-3 w-3 mr-1.5" />
+                            Accéder à SIMPL-TVA
+                          </a>
+                        </Button>
+                        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={envoyerRappelTvaMail} disabled={sendingTva}
+                          title="M'envoyer par e-mail un rappel de cette échéance TVA">
+                          {sendingTva ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Mail className="h-3 w-3 mr-1.5" />}
+                          Rappel
+                        </Button>
+                      </>
+                    ) : (
                       <Button size="sm" variant="outline" className="h-7 text-xs" onClick={envoyerRappelTvaMail} disabled={sendingTva}
                         title="M'envoyer par e-mail un rappel de cette échéance TVA">
                         {sendingTva ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Mail className="h-3 w-3 mr-1.5" />}
                         M'envoyer un rappel
                       </Button>
-                      <Link to="/dossiers/$dossierId/fiscalite" params={{ dossierId }} className="text-xs text-primary hover:underline">
-                        Voir la déclaration →
-                      </Link>
-                    </div>
+                    )}
+                    <Link to="/dossiers/$dossierId/fiscalite" params={{ dossierId }} className="text-xs text-primary hover:underline">
+                      Voir la déclaration →
+                    </Link>
+                  </div>
+                </div>
+              )}
+
+              {/* Trésorerie & cash-flow — la TVA récupérable en cours rejoint cette grille
+                  sous forme de carte dédiée, à côté de la marge, pour la cohérence visuelle. */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-1 border-t">
+                <div className="pt-3">
+                  <p className="text-xs text-muted-foreground">Encaissements HT réels</p>
+                  <p className="text-lg font-bold text-emerald-600 mt-1">{fmt(cashFlow.encaissementsHt)}</p>
+                </div>
+                <div className="pt-3">
+                  <p className="text-xs text-muted-foreground">Décaissements HT réels</p>
+                  <p className="text-lg font-bold text-rose-600 mt-1">{fmt(cashFlow.decaissementsHt)}</p>
+                </div>
+                <div className="pt-3">
+                  <p className="text-xs text-muted-foreground">Marge brute réelle / cash-flow</p>
+                  <p className={`text-lg font-bold mt-1 ${cashFlow.marge >= 0 ? "text-green-600" : "text-red-600"}`}>
+                    {fmt(cashFlow.marge)}
+                  </p>
+                </div>
+                {/* TVA récupérable en cours : achats reçus, pas encore payés → pas encore
+                    déductible au régime de l'encaissement. Carte discrète pour la distinguer. */}
+                <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50/60 dark:border-blue-900/40 dark:bg-blue-950/20 p-3"
+                  title="TVA sur achats validés non encore payés : pas encore déductible au régime de l'encaissement.">
+                  <p className="text-xs text-muted-foreground">TVA récupérable en cours</p>
+                  <p className="text-lg font-bold text-blue-600 mt-1">{fmt(tvaEnCours)}</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">Sur achats validés non encore payés</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* ── GRAPHIQUES : dépenses PCM + balance âgée ──────────────────────── */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader><CardTitle className="text-base">Répartition des dépenses par catégorie PCM</CardTitle></CardHeader>
+              <CardContent>
+                {partsCharges.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-12 text-center">
+                    Aucune charge comptabilisée (classe 6).
+                  </p>
+                ) : (
+                  <>
+                    <ResponsiveContainer width="100%" height={240}>
+                      <PieChart>
+                        <Pie data={partsCharges} dataKey="montant" nameKey="label"
+                          innerRadius={55} outerRadius={90} paddingAngle={2}>
+                          {partsCharges.map((p, i) => (
+                            <Cell key={p.cle} fill={COULEURS_PCM[i % COULEURS_PCM.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(v: any, n: any) => [fmt(Number(v)), n]} />
+                        <Legend wrapperStyle={{ fontSize: 11 }} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <p className="text-xs text-muted-foreground text-center">
+                      Total charges : <span className="font-semibold text-foreground">{fmt(totalCharges)}</span>
+                    </p>
                   </>
                 )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader><CardTitle className="text-base">Balance âgée — créances &amp; dettes</CardTitle></CardHeader>
+              <CardContent>
+                <ResponsiveContainer width="100%" height={240}>
+                  <BarChart data={tranchesAgees}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                    <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={0} />
+                    <YAxis tick={{ fontSize: 11 }} tickFormatter={v => `${(v / 1000).toFixed(0)}k`} />
+                    <Tooltip formatter={(v: any, n: string) => [fmt(Number(v)), n === "creances" ? "Créances clients" : "Dettes fournisseurs"]} />
+                    <Legend formatter={(v: string) => v === "creances" ? "Créances clients" : "Dettes fournisseurs"} />
+                    <Bar dataKey="creances" fill="#2563eb" name="creances" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="dettes"   fill="#f59e0b" name="dettes"   radius={[3, 3, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
               </CardContent>
             </Card>
           </div>

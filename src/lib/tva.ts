@@ -29,3 +29,49 @@ export function puTtcToHt(prixTtc: number, tauxTva: number | null | undefined): 
   const ttc = Number(prixTtc) || 0;
   return round2(ttc / (1 + tauxOrZero(tauxTva) / 100));
 }
+
+export interface LigneMontant {
+  quantite: number;
+  prix_unitaire: number;
+  taux_tva: number | null;
+}
+
+/**
+ * Décide si les prix unitaires des lignes sont HT ou TTC en RÉCONCILIANT leur
+ * somme `Σ(quantité × prix_unitaire)` avec le bloc totaux de la facture.
+ *
+ * Cas visé : une facture affiche un prix unitaire SANS libellé « TTC », mais le
+ * bloc totaux (HT, TVA, TTC) prouve, par le calcul, que ce prix était en fait
+ * TTC. On convertit alors chaque PU en HT (source de vérité interne).
+ *
+ * Prudence : ne convertit QUE si HT et TTC sont tous deux connus et distincts, et
+ * si la somme des lignes colle NETTEMENT mieux au TTC qu'au HT (dans la tolérance).
+ * Dans le doute → on ne touche à rien (le PU reste HT, comportement par défaut).
+ */
+export function reconcilierLignesHtTtc<T extends LigneMontant>(
+  lignes: T[],
+  montantHt: number,
+  montantTtc: number,
+  toleranceRelative = 0.02,
+): { lignes: T[]; converti: boolean } {
+  const sommePU = lignes.reduce(
+    (s, l) => s + (Number(l.quantite) || 0) * (Number(l.prix_unitaire) || 0),
+    0,
+  );
+  const ht = Number(montantHt) || 0;
+  const ttc = Number(montantTtc) || 0;
+  // Sans lignes chiffrées, sans les DEUX totaux, ou si HT == TTC (pas de TVA) →
+  // aucune réconciliation possible ni utile.
+  if (sommePU <= 0 || ht <= 0 || ttc <= 0 || Math.abs(ttc - ht) < 0.01) {
+    return { lignes, converti: false };
+  }
+  const ecartHt = Math.abs(sommePU - ht) / ht;
+  const ecartTtc = Math.abs(sommePU - ttc) / ttc;
+  if (ecartTtc <= toleranceRelative && ecartTtc < ecartHt) {
+    return {
+      lignes: lignes.map((l) => ({ ...l, prix_unitaire: puTtcToHt(l.prix_unitaire, l.taux_tva) })),
+      converti: true,
+    };
+  }
+  return { lignes, converti: false };
+}

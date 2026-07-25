@@ -242,7 +242,15 @@
       "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"fournisseurs\\\\.tsx\" | ForEach-Object { $_.Line })",
       "PowerShell(npx vitest run 2>&1 | Select-Object -Last 8)",
       "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"factures\\\\.functions|FacturesClientsPanel\" | ForEach-Object { $_.Line })",
-      "PowerShell(npx vitest run 2>&1 | Select-Object -Last 6)"
+      "PowerShell(npx vitest run 2>&1 | Select-Object -Last 6)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"factures\\\\.functions|fournisseurs\\\\.tsx\" | ForEach-Object { $_.Line })",
+      "PowerShell(npx vitest run 2>&1 | Select-Object -Last 5)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"factures\\\\.functions\" | ForEach-Object { $_.Line })",
+      "PowerShell(npx vitest run src/lib/tva.test.ts src/server/factures.utils.test.ts 2>&1 | Select-Object -Last 12)",
+      "PowerShell(npx vitest run 2>&1 | Select-Object -Last 4)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"lib/tva|factures\\\\.functions|factures\\\\.utils\" | ForEach-Object { $_.Line })",
+      "Bash(sed -i 's/colSpan={isPanelOpen ? 2 : 7}/colSpan={isPanelOpen ? 2 : 8}/g' 'src/routes/_app/dossiers.$dossierId.clients.tsx')",
+      "Bash(sed -n 355,396p 'src/routes/_app/dossiers.$dossierId.dashboard.tsx')"
     ]
   }
 }

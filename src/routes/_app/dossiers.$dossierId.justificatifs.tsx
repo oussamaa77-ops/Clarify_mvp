@@ -16,6 +16,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
+import { PuTtcInput } from "@/components/PuTtcInput";
 import { ocrFacture, matcherDocumentAvecTransactions, lettrerJustificatif } from "@/server/factures.functions";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/justificatifs")({
@@ -458,6 +459,8 @@ function JustificatifsPage() {
   const [datesRef, setDatesRef]   = useState<{ valeur: string; libelle: string }[]>([]);
   const [lignes, setLignes]       = useState<LigneJustif[]>([]);
   const [editId, setEditId]       = useState<string | null>(null);
+  // Annotations manuscrites lues par l'OCR vision (Payé, visa, n° chèque…).
+  const [notesManuscrites, setNotesManuscrites] = useState<string | null>(null);
   // Fichier scanné en cours — archivé (bucket) à l'enregistrement pour re-consultation.
   const [scanFile, setScanFile]   = useState<File | null>(null);
   const [docView, setDocView]     = useState<DocumentViewerSource | null>(null);
@@ -573,6 +576,7 @@ function JustificatifsPage() {
     setLignes([]);
     setDatesRef([]);
     setEditId(null);
+    setNotesManuscrites(null);
     setScanFile(file);
     setOcrLoading(true);
     try {
@@ -721,6 +725,8 @@ function JustificatifsPage() {
         ...fiscalOverrides, // applique tva_zero_doc, tva_non_deductible, edi_bloque
       });
 
+      setNotesManuscrites((result as any).notes_manuscrites ?? null);
+
       const periode = (result as any).periode;
       const isQuittanceEnergie = finalType === "quittance_eau" || finalType === "quittance_elec";
       setLignes((result.lignes ?? []).map((l: any) => ({
@@ -765,6 +771,9 @@ function JustificatifsPage() {
     });
     setLignes(j.lignes ?? []);
     setDatesRef([]);
+    // Édition d'un justificatif existant : pas de scan en cours, donc aucune note
+    // manuscrite à afficher (ne pas conserver celle d'un scan précédent).
+    setNotesManuscrites(null);
     setOpen(true);
   };
 
@@ -950,6 +959,7 @@ function JustificatifsPage() {
             setForm({ ...EMPTY_FORM });
             setDatesRef([]);
             setLignes([]);
+            setNotesManuscrites(null);
             setScanFile(null);   // saisie manuelle → pas de fichier scanné à rattacher
             setOpen(true);
           }}>
@@ -1103,7 +1113,7 @@ function JustificatifsPage() {
 
       {/* ── Dialog ajout / modification / OCR ── */}
       <Dialog open={open} onOpenChange={v => {
-        if (!saving) { setOpen(v); if (!v) { setDatesRef([]); setLignes([]); setEditId(null); } }
+        if (!saving) { setOpen(v); if (!v) { setDatesRef([]); setLignes([]); setEditId(null); setNotesManuscrites(null); } }
       }}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -1346,6 +1356,20 @@ function JustificatifsPage() {
               </div>
             </div>
 
+            {/* Annotations manuscrites relevées par l'OCR vision — affichées au
+                moment de la saisie pour aider à corriger les champs ci-dessous. */}
+            {notesManuscrites && (
+              <div className="col-span-2 rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/20 p-2.5">
+                <p className="text-xs font-semibold text-amber-800 dark:text-amber-400">
+                  Notes manuscrites détectées sur le document
+                </p>
+                <p className="text-sm mt-0.5 whitespace-pre-line">{notesManuscrites}</p>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  À titre indicatif — elles ne modifient aucun montant automatiquement.
+                </p>
+              </div>
+            )}
+
             {/* Lignes / Articles */}
             <div className="col-span-2 space-y-2 pt-1 border-t">
               <div className="flex items-center justify-between">
@@ -1367,8 +1391,8 @@ function JustificatifsPage() {
                         <TableHead className="text-xs">Désignation</TableHead>
                         <TableHead className="text-xs w-16">Qté</TableHead>
                         <TableHead className="text-xs w-28">P.U. HT</TableHead>
+                        <TableHead className="text-xs w-28">P.U. TTC</TableHead>
                         <TableHead className="text-xs w-20">TVA %</TableHead>
-                        <TableHead className="text-xs w-28 text-right">P.U. TTC</TableHead>
                         <TableHead className="text-xs w-24 text-right">Total HT</TableHead>
                         <TableHead className="w-8"></TableHead>
                       </TableRow>
@@ -1389,12 +1413,15 @@ function JustificatifsPage() {
                             <Input className="h-7 text-xs" type="number" min="0" step="0.01" value={l.prix_unitaire || ""}
                               onChange={e => setLignes(prev => prev.map((x, j) => j === i ? { ...x, prix_unitaire: parseFloat(e.target.value) || 0 } : x))} />
                           </TableCell>
+                          {/* PU TTC éditable : saisir l'un recalcule l'autre (le HT reste stocké). */}
+                          <TableCell className="py-1">
+                            <PuTtcInput className="h-7 text-xs" placeholder="—"
+                              prixHt={l.prix_unitaire} tauxTva={l.taux_tva}
+                              onChangeHt={ht => setLignes(prev => prev.map((x, j) => j === i ? { ...x, prix_unitaire: ht } : x))} />
+                          </TableCell>
                           <TableCell className="py-1">
                             <Input className="h-7 text-xs" type="number" min="0" step="1" value={l.taux_tva ?? ""} placeholder="—"
                               onChange={e => setLignes(prev => prev.map((x, j) => j === i ? { ...x, taux_tva: e.target.value === "" ? null : parseFloat(e.target.value) } : x))} />
-                          </TableCell>
-                          <TableCell className="py-1 text-right font-mono text-xs text-muted-foreground">
-                            {fmt(puHtToTtc(l.prix_unitaire || 0, l.taux_tva))}
                           </TableCell>
                           <TableCell className="py-1 text-right font-mono text-xs">
                             {fmt(l.quantite * l.prix_unitaire)}
@@ -1409,10 +1436,18 @@ function JustificatifsPage() {
                       ))}
                     </TableBody>
                   </Table>
-                  <div className="px-4 py-1.5 bg-muted/20 flex justify-end text-xs">
-                    <span className="text-muted-foreground">Total HT :</span>
-                    <span className="font-semibold ml-2">
-                      {fmt(lignes.reduce((s, l) => s + l.quantite * l.prix_unitaire, 0))}
+                  <div className="px-4 py-1.5 bg-muted/20 flex justify-end gap-4 text-xs">
+                    <span>
+                      <span className="text-muted-foreground">Total HT :</span>
+                      <span className="font-semibold ml-2">
+                        {fmt(lignes.reduce((s, l) => s + l.quantite * l.prix_unitaire, 0))}
+                      </span>
+                    </span>
+                    <span>
+                      <span className="text-muted-foreground">Total TTC :</span>
+                      <span className="font-semibold ml-2">
+                        {fmt(lignes.reduce((s, l) => s + l.quantite * puHtToTtc(l.prix_unitaire, l.taux_tva), 0))}
+                      </span>
                     </span>
                   </div>
                 </div>
