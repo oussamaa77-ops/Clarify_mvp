@@ -259,7 +259,12 @@
       "Bash(sed -i 's|createFileRoute\\(\"/_tmp-donut-preview\"\\)|createFileRoute\\(\"/tmpdonutpreview\"\\)|' src/routes/tmpdonutpreview.tsx)",
       "Bash(sed -i 's|/_tmp-donut-preview|/tmpdonutpreview|' e2e/tests/_tmp-donut.spec.ts)",
       "PowerShell(npx vitest run src/lib/dashboard-fiscal.test.ts --reporter=basic 2>&1 | Select-Object -Last 40)",
-      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"Total erreurs TS : \" + $e.Count; $e | Group-Object { \\($_ -split '\\\\\\('\\)[0] } | Sort-Object Count -Descending | Select-Object -First 12 Count, Name)"
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"Total erreurs TS : \" + $e.Count; $e | Group-Object { \\($_ -split '\\\\\\('\\)[0] } | Sort-Object Count -Descending | Select-Object -First 12 Count, Name)",
+      "Bash(tee \"C:/Users/O6C96~1.KAR/AppData/Local/Temp/claude/C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main/a1c8986e-9f7c-4209-ac5e-033e28fe0212/scratchpad/tsc-after.txt\")",
+      "Bash(python -m py_compile donut_service.py donut-service/app.py ia_services/scan/router.py ia_services/reconciliation/router.py)",
+      "Bash(npx eslint *)",
+      "Bash(npm test *)",
+      "Bash(python -m pytest --version)"
     ]
   }
 }
