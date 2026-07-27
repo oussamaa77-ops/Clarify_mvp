@@ -12,12 +12,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { DatePicker } from "@/components/ui/date-picker";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SECTEURS_ACTIVITE } from "@/lib/categorization-engine";
 import { Plus, Building2, ArrowRight, Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/dossiers")({ component: DossiersPage });
 
-interface Dossier { id: string; nom_societe: string; ice: string | null; rc: string | null; if_fiscal: string | null; statut: string; created_at: string; date_reprise: string | null; }
+interface Dossier { id: string; nom_societe: string; ice: string | null; rc: string | null; if_fiscal: string | null; statut: string; created_at: string; date_reprise: string | null; secteur_activite?: string | null; }
 
 function DossiersPage() {
   const initPCM = useServerFn(initDossierPCM);
@@ -30,7 +32,7 @@ function DossiersPage() {
   const [search, setSearch] = useState("");
   // Édition des réglages d'un dossier (dont la date de reprise comptable).
   const [editDossier, setEditDossier] = useState<Dossier | null>(null);
-  const [editForm, setEditForm] = useState<{ nom_societe: string; ice: string; rc: string; if_fiscal: string; date_reprise: string | null }>({ nom_societe: "", ice: "", rc: "", if_fiscal: "", date_reprise: null });
+  const [editForm, setEditForm] = useState<{ nom_societe: string; ice: string; rc: string; if_fiscal: string; date_reprise: string | null; secteur_activite: string }>({ nom_societe: "", ice: "", rc: "", if_fiscal: "", date_reprise: null, secteur_activite: "" });
   const [savingEdit, setSavingEdit] = useState(false);
 
   const load = async () => {
@@ -40,7 +42,8 @@ function DossiersPage() {
     // être désactivée sur la base, un compte ne voit jamais les dossiers d'un
     // autre cabinet. Sans cabinet_id → aucune donnée (jamais « tout lister »).
     if (!profile?.cabinet_id) { setDossiers([]); setLoading(false); return; }
-    const { data, error } = await supabase.from("dossiers").select("*")
+    const { data, error } = await supabase.from("dossiers")
+      .select("id,nom_societe,ice,rc,if_fiscal,statut,created_at,date_reprise,secteur_activite")
       .eq("cabinet_id", profile.cabinet_id)
       .order("created_at", { ascending: false });
     if (error) toast.error(error.message);
@@ -88,7 +91,7 @@ function DossiersPage() {
 
   const openEdit = (d: Dossier) => {
     setEditDossier(d);
-    setEditForm({ nom_societe: d.nom_societe, ice: d.ice ?? "", rc: d.rc ?? "", if_fiscal: d.if_fiscal ?? "", date_reprise: d.date_reprise ?? null });
+    setEditForm({ nom_societe: d.nom_societe, ice: d.ice ?? "", rc: d.rc ?? "", if_fiscal: d.if_fiscal ?? "", date_reprise: d.date_reprise ?? null, secteur_activite: d.secteur_activite ?? "" });
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
@@ -102,6 +105,7 @@ function DossiersPage() {
         rc: editForm.rc || null,
         if_fiscal: editForm.if_fiscal || null,
         date_reprise: editForm.date_reprise || null,   // MAJ réactive de la date de reprise
+        secteur_activite: editForm.secteur_activite || null,  // pilote le fallback du moteur PCM
       }).eq("id", editDossier.id);
       if (error) { toast.error(error.message); return; }
       logAudit({ dossierId: editDossier.id, action: "modification_dossier", ressourceType: "dossier", ressourceId: editDossier.id, details: { nom_societe: editForm.nom_societe } });
@@ -231,6 +235,20 @@ function DossiersPage() {
               <div className="space-y-2"><Label>ICE</Label><Input value={editForm.ice} onChange={e => setEditForm({ ...editForm, ice: e.target.value })} /></div>
               <div className="space-y-2"><Label>RC</Label><Input value={editForm.rc} onChange={e => setEditForm({ ...editForm, rc: e.target.value })} /></div>
               <div className="space-y-2"><Label>IF</Label><Input value={editForm.if_fiscal} onChange={e => setEditForm({ ...editForm, if_fiscal: e.target.value })} /></div>
+            </div>
+            <div className="space-y-2">
+              <Label>Secteur d'activité</Label>
+              <Select value={editForm.secteur_activite || "__none__"}
+                onValueChange={(v) => setEditForm({ ...editForm, secteur_activite: v === "__none__" ? "" : v })}>
+                <SelectTrigger><SelectValue placeholder="Non défini" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">Non défini</SelectItem>
+                  {SECTEURS_ACTIVITE.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Utilisé par le moteur de catégorisation comptable pour suggérer le compte PCM par défaut.
+              </p>
             </div>
             <div className="space-y-2 rounded-md border p-3 bg-muted/30">
               <Label>Date de reprise comptable</Label>

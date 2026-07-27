@@ -21,6 +21,7 @@ import { emailFactureClient, emailFactureRejetee } from "./email.templates";
 import { sendMail } from "./mailer";
 import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
+import { compteTiersAuxiliaire } from "../lib/comptes-auxiliaires";
 import { puTtcToHt, reconcilierLignesHtTtc } from "../lib/tva";
 import { rappelerMemoire } from "./tiers-memoire.functions";
 import { logUsage, logUsageBatch, estimerCoutIA } from "./analytics.functions";
@@ -726,16 +727,23 @@ ${lignesXml}
 
     if (conforme && Number(facture.montant_ttc) > 0) {
       const ref = facture.numero ?? facture.id;
+      // Ligne 3 — compte de TIERS : auxiliaire du client (C0002 → 34210002) si sa
+      // fiche porte un code, sinon le collectif 3421. Le lettrage et la balance
+      // âgée raisonnent par préfixe « 342 » : rien à adapter en aval.
+      const { data: cliRow } = facture.client_id
+        ? await supabase.from("clients").select("code_auxiliaire").eq("id", facture.client_id).maybeSingle()
+        : { data: null as any };
+      const compteClient = compteTiersAuxiliaire("client", cliRow?.code_auxiliaire ?? null);
       const typeFacture = (facture as any).type ?? "facture";
       if (typeFacture === "acompte") {
         await supabase.from("ecritures_comptables").insert([
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "3421",  date_ecriture: facture.date_facture, libelle: `Acompte ${ref}`,     debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Acompte ${ref}`,     debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "4191",  date_ecriture: facture.date_facture, libelle: `Avance reçue ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "44551", date_ecriture: facture.date_facture, libelle: `TVA acompte ${ref}`,  debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
         ]);
       } else if (typeFacture === "solde") {
         await supabase.from("ecritures_comptables").insert([
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "3421",  date_ecriture: facture.date_facture, libelle: `Solde ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Solde ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "44551", date_ecriture: facture.date_facture, libelle: `TVA ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: "4191",  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: Number(facture.montant_ht), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
@@ -743,7 +751,7 @@ ${lignesXml}
         ]);
       } else {
         await supabase.from("ecritures_comptables").insert([
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "3421",  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "44551", date_ecriture: facture.date_facture, libelle: `TVA collectée ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
         ]);
@@ -1190,6 +1198,19 @@ export const ocrFacture = createServerFn({ method: "POST" })
     const nomClient = result.client_nom_extrait?.trim();
     const iceClient = result.ice_client?.trim();
 
+    // ── MÉMOIRE TIERS côté VENTES ────────────────────────────────────────────
+    // Symétrique du rappel fournisseur ci-dessus, mais keyé sur l'ICE du CLIENT
+    // (`ice_client`, le destinataire de la facture — l'émetteur étant le cabinet).
+    // Le rappel a lieu ici et non avant le LLM : `ice_client` n'est connu qu'une
+    // fois l'extraction faite. But : rendre au comptable le compte de produit
+    // qu'il avait retenu pour ce client, avant tout repli générique.
+    let memoireClient: Awaited<ReturnType<typeof rappelerMemoire>> = null;
+    if ((nomClient || iceClient) && result.sens_facture !== "fournisseur") {
+      memoireClient = await rappelerMemoire(supabase, {
+        dossier_id: data.dossier_id, sens: "client", ice: iceClient, nom: nomClient,
+      });
+    }
+
     if ((nomClient || iceClient) && result.sens_facture !== "fournisseur") {
       if (iceClient) {
         const { data: byIce } = await supabase
@@ -1279,6 +1300,15 @@ export const ocrFacture = createServerFn({ method: "POST" })
         fournisseur_id,
         fournisseur_action,
         fournisseur_trouve,
+        // Rappel mémoire côté VENTES (compte de produit appris pour ce client).
+        memoire_client: memoireClient
+          ? {
+              par_ice: memoireClient.par_ice,
+              occurrences: memoireClient.occurrences,
+              compte_pcm: memoireClient.compte_pcm,
+              taux_tva: memoireClient.taux_tva,
+            }
+          : null,
         // POC mémoire : métadonnées de rappel (null si aucun rappel).
         memoire: memoire
           ? {
@@ -1307,10 +1337,17 @@ export const marquerPayee = createServerFn({ method: "POST" })
     const supabase = getSupabase();
     const { data: f } = await supabase
       .from("factures")
-      .select("dossier_id,montant_ttc,montant_paye,numero,statut")
+      .select("dossier_id,montant_ttc,montant_paye,numero,statut,client_id")
       .eq("id", data.facture_id)
       .single();
     if (!f) throw new Error("Facture introuvable");
+    // Le règlement doit SOLDER le compte exact qu'a débité la vente : si la vente
+    // est partie sur l'auxiliaire 34210002, un crédit sur le collectif 3421
+    // laisserait les deux comptes ouverts et fausserait la balance auxiliaire.
+    const { data: cliPaie } = (f as any).client_id
+      ? await supabase.from("clients").select("code_auxiliaire").eq("id", (f as any).client_id).maybeSingle()
+      : { data: null as any };
+    const compteClient = compteTiersAuxiliaire("client", cliPaie?.code_auxiliaire ?? null);
     // Ce bouton est le règlement COMPTANT du guichet : les espèces passent par la
     // caisse (journal CAI / 5143, comme l'encaissement manuel de la page Banque),
     // tout autre mode par la banque (BQ / 5141). Sans ce couple, le libellé du
@@ -1332,7 +1369,7 @@ export const marquerPayee = createServerFn({ method: "POST" })
     const ref = f.numero ?? data.facture_id;
     await supabase.from("ecritures_comptables").insert([
       { dossier_id: f.dossier_id, journal_code: journal, compte_numero: compteTresorerie, date_ecriture: data.date_paiement, libelle: `Encaissement ${especes ? "espèces " : ""}${ref}`, debit: Number(f.montant_ttc), credit: 0, reference_piece: ref, facture_id: data.facture_id, valide: true },
-      { dossier_id: f.dossier_id, journal_code: journal, compte_numero: "3421", date_ecriture: data.date_paiement, libelle: `Règlement client ${ref}`, debit: 0, credit: Number(f.montant_ttc), reference_piece: ref, facture_id: data.facture_id, valide: true },
+      { dossier_id: f.dossier_id, journal_code: journal, compte_numero: compteClient, date_ecriture: data.date_paiement, libelle: `Règlement client ${ref}`, debit: 0, credit: Number(f.montant_ttc), reference_piece: ref, facture_id: data.facture_id, valide: true },
     ]);
     // Estampille du mode réellement employé : c'est elle que lit la colonne
     // « Mode de paiement » quand aucune pièce bancaire n'explique le règlement

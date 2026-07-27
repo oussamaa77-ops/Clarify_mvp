@@ -1,6 +1,6 @@
 // Pure utility functions — no framework dependencies, fully testable.
 
-import { extractRibMarocain } from "../lib/releve-attijari";
+import { extractRibMarocain, estEnteteOuMetaReleve } from "../lib/releve-attijari";
 import { identifierBanque } from "../lib/bank-identity";
 
 export function parseInvoiceRegex(text: string, dossierNom: string, dossierIce: string) {
@@ -590,6 +590,16 @@ export function parseReleveMarkdown(markdown: string): ReleveMarkdownResult {
     const date_operation = mdNormDate(mdGetCell(cells, cols.date_operation));
     const libelle = mdGetCell(cells, cols.libelle).trim();
     const rowText = cells.join(" ");
+
+    // ── EN-TÊTE / MÉTADONNÉE repliée DANS le tableau ───────────────────────────
+    // Mistral-OCR fait régulièrement entrer le bandeau du relevé dans la grille du
+    // tableau (« | 30/04/2026 | CIH BANK … RELEVE DE COMPTE BANCAIRE AGENCE … |
+    // | 1 084 033,00 | »). Sans ce filtre, la ligne devenait une transaction dont
+    // le « montant » était en fait un n° de téléphone ou de RIB — c'est l'origine
+    // du faux crédit de 1 084 033 MAD constaté sur SOMADIR (couple 5141/6171).
+    // Le garde est PARTAGÉ avec le parser ATW et innocente toute ligne portant un
+    // verbe d'opération, donc « VIR SEPA RECU / FRM SUPER-PAIN MAROC » passe.
+    if (estEnteteOuMetaReleve(rowText)) continue;
 
     // ── LIGNE DE SOLDE (report/départ/ancien OU final/reporter) ─────────────────
     // Détectée par mot-clé sur la ligne complète, AVEC OU SANS date. Le solde report

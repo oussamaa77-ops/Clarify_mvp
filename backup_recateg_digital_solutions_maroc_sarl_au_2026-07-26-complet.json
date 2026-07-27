@@ -1,0 +1,34 @@
+{
+  "dossier_id": "b64505dd-94ec-4d3a-9ab2-aa5637aec98b",
+  "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+  "date": "2026-07-26T13:32:50.369Z",
+  "secteur": "Services IT",
+  "note": "Sauvegarde CONSOLIDÉE des 2 passages (achats puis ventes). secteur_activite du dossier : null AVANT l'opération.",
+  "secteur_avant": null,
+  "modifications": [
+    {
+      "id": "e6b0985d-99ff-4bdf-8437-d824086842aa",
+      "journal": "ACH",
+      "libelle": "Achat AZUR BUREAU SARL FR - 2026 - 88",
+      "ancien": "6141",
+      "nouveau": "61254",
+      "motif": "Mot-clé « fournitures de bureau » → Fournitures de bureau."
+    },
+    {
+      "id": "12e0422c-038e-49a9-94d8-fa7168f325ef",
+      "journal": "VTE",
+      "libelle": "Vente FAC - 2026 - 001",
+      "ancien": "7111",
+      "nouveau": "7124",
+      "motif": "Compte par défaut du secteur « Services IT »."
+    },
+    {
+      "id": "0a94cb04-43ad-4798-b608-4ad78b1e2053",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2024-04-102",
+      "ancien": "7111",
+      "nouveau": "7124",
+      "motif": "Compte par défaut du secteur « Services IT »."
+    }
+  ]
+}

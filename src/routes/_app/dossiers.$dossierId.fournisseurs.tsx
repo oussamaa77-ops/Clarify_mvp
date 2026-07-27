@@ -40,6 +40,8 @@ import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { FacturesFiltres } from "@/components/FacturesFiltres";
+import { suggestAccount, type SuggestionCompte } from "@/lib/categorization-engine";
+import { compteTiersAuxiliaire } from "@/lib/comptes-auxiliaires";
 import { filtrerFactures, joursRetard, trancheRetard, type CriteresFiltre } from "@/lib/factures-filtres";
 import {
   indexerModesPaiement, modePaiementFacture,
@@ -85,6 +87,8 @@ interface Fournisseur {
   telephone: string | null;
   adresse: string | null;
   code_auxiliaire: string | null;
+  // Compte de charge PCM par défaut (Règle 1 du moteur de catégorisation).
+  compte_charge_defaut?: string | null;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -179,7 +183,8 @@ function FournisseursPage() {
   const [criteres, setCriteres] = useState<CriteresFiltre>({
     texte: "", statut: "toutes", tiersId: "", debut: "", fin: "", champDate: "date_facture",
   });
-  const [dossier, setDossier] = useState<any>(null);
+  // Seul le secteur d'activité est lu ici (fallback sectoriel du moteur PCM).
+  const [dossier, setDossier] = useState<{ secteur_activite: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState<string | null>(null);
 
@@ -213,6 +218,16 @@ function FournisseursPage() {
   const [echeances, setEcheances] = useState<Echeance[]>([]);
   // Annotations manuscrites lues par l'OCR vision (Payé, visa, n° chèque…).
   const [notesManuscrites, setNotesManuscrites] = useState<string | null>(null);
+
+  // Compte de charge PCM de la facture — proposé par le moteur de catégorisation,
+  // éditable. `touche` passe à true dès que l'utilisateur le corrige à la main :
+  // on cesse alors de le réécrire automatiquement (il reste maître de son choix).
+  const [compteCharge, setCompteCharge] = useState("6141");
+  // Compte rappelé par la mémoire tiers au dernier scan (clé ICE puis libellé).
+  const [compteMemoireIce, setCompteMemoireIce] = useState<string | null>(null);
+  const [compteChargeTouche, setCompteChargeTouche] = useState(false);
+  const [compteChargeSug, setCompteChargeSug] = useState<SuggestionCompte | null>(null);
+  const [savingDefaut, setSavingDefaut] = useState(false);
 
   // New supplier pending creation (deferred until save)
   const [newFournPending, setNewFournPending] = useState<{ nom: string; ice: string } | null>(null);
@@ -255,8 +270,11 @@ function FournisseursPage() {
         .select("*")
         .eq("dossier_id", dossierId)
         .order("created_at", { ascending: false }),
-      supabase.from("fournisseurs").select("*").eq("dossier_id", dossierId).order("nom"),
-      (supabase.from("dossiers") as any).select("nom_societe,ice").eq("id", dossierId).single(),
+      supabase.from("fournisseurs")
+        .select("id,nom,ice,if_fiscal,rc,email,telephone,adresse,code_auxiliaire,compte_charge_defaut")
+        .eq("dossier_id", dossierId).order("nom"),
+      // Secteur d'activité du dossier — alimente le fallback sectoriel du moteur PCM.
+      supabase.from("dossiers").select("secteur_activite").eq("id", dossierId).single(),
       (supabase.from("justificatifs") as any)
         .select("*")
         .eq("dossier_id", dossierId)
@@ -303,6 +321,28 @@ function FournisseursPage() {
     setMontantTva(Math.round(tva * 100) / 100);
     setMontantTtc(Math.round((ht + tva) * 100) / 100);
   }, [lignes]);
+
+  // Suggestion du compte de charge PCM (moteur centralisé). Se recalcule quand le
+  // fournisseur ou la 1re désignation change — TANT QUE l'utilisateur n'a pas
+  // corrigé le compte à la main (compteChargeTouche). Le même moteur sert à l'OCR.
+  const fournSelectionne = fournisseurs.find((f) => f.id === fournisseurId);
+  useEffect(() => {
+    if (compteChargeTouche) return;
+    const sug = suggestAccount({
+      sens: "charge",
+      tiersId: fournisseurId || null,
+      compteDefautTiers: fournSelectionne?.compte_charge_defaut ?? null,
+      // Compte rappelé par la mémoire tiers (clé ICE) lors du scan : c'est LE
+      // compte que le comptable avait saisi la dernière fois pour cet ICE, même
+      // s'il ne l'a jamais « défini par défaut ». Prioritaire sur les mots-clés.
+      compteMemoireTiers: compteMemoireIce,
+      description: lignes[0]?.designation ?? "",
+      nomTiers: fournisseurNom || fournSelectionne?.nom || newFournPending?.nom || "",
+      secteurActivite: dossier?.secteur_activite ?? null,
+    });
+    setCompteChargeSug(sug);
+    setCompteCharge(sug.compte);
+  }, [fournisseurId, fournisseurNom, lignes, dossier?.secteur_activite, fournSelectionne?.compte_charge_defaut, compteMemoireIce, newFournPending?.nom, compteChargeTouche]);
 
   // ── Supplier stats KPIs ─────────────────────────────────────────────────────
 
@@ -507,6 +547,17 @@ function FournisseursPage() {
         );
       }
 
+      // ── MÉMOIRE DES COMPTES PAR TIERS ────────────────────────────────────────
+      // Le serveur a déjà interrogé tiers_memoire (clé ICE d'abord, libellé
+      // normalisé ensuite) et renvoie le compte appris. On l'applique AVANT toute
+      // heuristique : sans cette ligne, le compte auxiliaire saisi la fois
+      // précédente (44110005…) était rappelé côté serveur puis JETÉ côté UI, et le
+      // formulaire retombait sur le compte générique du secteur.
+      // Uniquement `memoire.compte_pcm` : `result.compte_pcm` peut aussi venir du
+      // LLM, et une proposition d'IA n'a pas à passer devant les mots-clés (elle
+      // reste cantonnée au repli, cf. suggestAccountWithAi).
+      setCompteMemoireIce(r.memoire?.compte_pcm ?? null);
+
       // POC mémoire : rappel du fournisseur connu (classification réutilisée).
       if (r.memoire) {
         toast.success(
@@ -653,12 +704,24 @@ function FournisseursPage() {
         }
       }
 
+      // Code auxiliaire du fournisseur → compte de tiers détaillé (ligne 3).
+      // Relu en base plutôt que dans l'état local : un fournisseur tout juste créé
+      // n'est pas encore dans `fournisseurs`, et le code a pu changer depuis le load.
+      let fournAux: string | null = fournisseurs.find((f) => f.id === fId)?.code_auxiliaire ?? null;
+      if (fId && !fournAux) {
+        const { data: fRow } = await supabase
+          .from("fournisseurs").select("code_auxiliaire").eq("id", fId).maybeSingle();
+        fournAux = fRow?.code_auxiliaire ?? null;
+      }
+
       // Accounting entries ACH — reference_piece = factureId for clean cascade delete
       await supabase.from("ecritures_comptables").insert([
         {
           dossier_id: dossierId,
           journal_code: "ACH",
-          compte_numero: "6141",
+          // Compte de charge issu du moteur de catégorisation (Règle tiers/mots-clés/
+          // secteur), éditable par l'utilisateur. Repli sur 6141 par sécurité.
+          compte_numero: compteCharge || "6141",
           date_ecriture: dateFacture,
           libelle: `Achat ${nomFourn} ${ref}`,
           debit: montantHt,
@@ -680,7 +743,11 @@ function FournisseursPage() {
         {
           dossier_id: dossierId,
           journal_code: "ACH",
-          compte_numero: "4411",
+          // Ligne 3 — compte de TIERS. Compte AUXILIAIRE du fournisseur quand il a
+          // un code (F0005 → 44110005), sinon le collectif 4411 : la balance
+          // auxiliaire distingue alors chaque fournisseur, et le lettrage (qui
+          // raisonne par préfixe « 441 ») continue de fonctionner à l'identique.
+          compte_numero: compteTiersAuxiliaire("fournisseur", fournAux),
           date_ecriture: dateFacture,
           libelle: `Dette ${nomFourn} ${ref}`,
           debit: 0,
@@ -699,7 +766,7 @@ function FournisseursPage() {
       memoriserFn({ data: {
         dossier_id: dossierId, sens: "fournisseur",
         ice: fournisseurIce || null, nom: nomFourn,
-        fournisseur_id: fId || null, compte_pcm: "6141",
+        fournisseur_id: fId || null, compte_pcm: compteCharge || "6141",
         categorie_pcm: null, taux_tva: tauxDominant,
       }}).then((res) => {
         if (res.ok) console.log(`[mémoire] ${nomFourn} → ${res.occurrences} usage(s)`);
@@ -851,6 +918,31 @@ function FournisseursPage() {
     setLignes([{ designation: "", quantite: 1, prix_unitaire: 0, taux_tva: 20 }]);
     setEcheances([]);
     setNotesManuscrites(null);
+    // Le moteur reprendra la main sur le compte (touche remis à false).
+    setCompteCharge("6141");
+    setCompteChargeTouche(false);
+    setCompteChargeSug(null);
+    setCompteMemoireIce(null);
+  };
+
+  // Mémorise le compte choisi comme défaut du fournisseur sélectionné (Règle 1
+  // pour les prochaines factures / scans). Proposé quand l'utilisateur a retenu un
+  // compte différent de celui déjà stocké sur le tiers.
+  const enregistrerCompteDefautFourn = async () => {
+    if (!fournisseurId) return;
+    setSavingDefaut(true);
+    try {
+      const { error } = await supabase.from("fournisseurs")
+        .update({ compte_charge_defaut: compteCharge })
+        .eq("id", fournisseurId);
+      if (error) throw error;
+      setFournisseurs((fs) => fs.map((f) => f.id === fournisseurId ? { ...f, compte_charge_defaut: compteCharge } : f));
+      toast.success(`Compte ${compteCharge} enregistré comme défaut du fournisseur`);
+    } catch (e: any) {
+      toast.error("Échec de l'enregistrement du compte par défaut : " + (e?.message ?? e));
+    } finally {
+      setSavingDefaut(false);
+    }
   };
 
   // ── Global KPIs ────────────────────────────────────────────────────────────
@@ -1226,6 +1318,10 @@ function FournisseursPage() {
                   value={fournisseurId}
                   onValueChange={(v) => {
                     setFournisseurId(v);
+                    // Le compte rappelé valait pour le tiers du scan : changer de
+                    // fournisseur à la main doit le PURGER, sinon on collerait le
+                    // compte auxiliaire d'un tiers sur un autre.
+                    setCompteMemoireIce(null);
                     const f = fournisseurs.find((f) => f.id === v);
                     if (f) {
                       setFournisseurNom(f.nom);
@@ -1416,6 +1512,52 @@ function FournisseursPage() {
                     </div>
                   ))}
                 </div>
+              </div>
+
+              {/* Compte comptable (charge) — proposé par le moteur de catégorisation PCM.
+                  Éditable ; la source de la suggestion est affichée pour la transparence. */}
+              <div className="space-y-1.5">
+                <Label className="flex items-center gap-2">
+                  Compte comptable (charge)
+                  {compteChargeSug && !compteChargeTouche && (
+                    <Badge variant="secondary" className="text-[10px] font-normal">
+                      {compteChargeSug.source === "tiers" ? "défaut fournisseur"
+                        : compteChargeSug.source === "mots_cles" ? `mot-clé « ${compteChargeSug.motCle} »`
+                        : compteChargeSug.source === "secteur" ? "secteur"
+                        : "défaut"}
+                    </Badge>
+                  )}
+                </Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    className="font-mono w-32"
+                    value={compteCharge}
+                    onChange={(e) => { setCompteCharge(e.target.value); setCompteChargeTouche(true); }}
+                    placeholder="6141"
+                  />
+                  {compteChargeTouche && (
+                    <Button size="sm" variant="ghost" className="h-8 text-xs"
+                      onClick={() => setCompteChargeTouche(false)}
+                      title="Reprendre la suggestion automatique du moteur">
+                      <Wand2 className="h-3 w-3 mr-1" />Suggérer
+                    </Button>
+                  )}
+                  {/* Proposer de mémoriser ce compte comme défaut du fournisseur —
+                      uniquement s'il diffère de celui déjà stocké sur le tiers. */}
+                  {fournisseurId && compteCharge && compteCharge !== (fournSelectionne?.compte_charge_defaut ?? "") && (
+                    <Button size="sm" variant="outline" className="h-8 text-xs"
+                      onClick={enregistrerCompteDefautFourn} disabled={savingDefaut}
+                      title="Mémoriser ce compte pour les prochaines factures de ce fournisseur">
+                      {savingDefaut ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                      Définir par défaut pour ce fournisseur
+                    </Button>
+                  )}
+                </div>
+                {compteChargeSug && (
+                  <p className="text-[10px] text-muted-foreground">
+                    {compteChargeSug.motif}{compteChargeSug.label ? ` — ${compteChargeSug.label}` : ""}
+                  </p>
+                )}
               </div>
 
               {/* Totals */}

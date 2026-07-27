@@ -6,6 +6,7 @@ import {
   echeanceSimplTva,
   joursAvant,
   ventilerChargesPcm,
+  GROUPES_PCM,
   balanceAgeeDashboard,
   calculerCashFlow,
   type FactureFiscale,
@@ -175,6 +176,54 @@ describe("ventilerChargesPcm", () => {
   it("borne sur la période demandée", () => {
     const parts = ventilerChargesPcm(ecr, { debut: "2026-06-08", fin: "2026-06-09" });
     expect(parts.map(p => p.cle).sort()).toEqual(["personnel", "services"]);
+  });
+
+  // ── 6125 « achats NON STOCKÉS » : eau, électricité, fournitures de bureau ──
+  // Le préfixe 6125 est plus précis que 612 : il doit gagner, sinon des
+  // consommables du quotidien s'affichent en « Matières premières ».
+  it("sort 6125x de « Matières premières » vers son propre poste", () => {
+    const parts = ventilerChargesPcm([
+      { compte_numero: "61251", debit: 800,  credit: 0, date_ecriture: "2026-06-05" }, // eau
+      { compte_numero: "61252", debit: 1500, credit: 0, date_ecriture: "2026-06-06" }, // électricité
+      { compte_numero: "61254", debit: 1200, credit: 0, date_ecriture: "2026-06-07" }, // fournitures de bureau
+    ]);
+    expect(parts).toEqual([
+      { cle: "non_stockes", label: "Eau, énergie & fournitures", montant: 3500 },
+    ]);
+    expect(parts.some(p => p.cle === "matieres")).toBe(false);
+  });
+
+  it("laisse les VRAIES matières premières (6121) sous « Matières premières »", () => {
+    const parts = ventilerChargesPcm([
+      { compte_numero: "6121",  debit: 5000, credit: 0, date_ecriture: "2026-06-05" },
+      { compte_numero: "61254", debit: 1200, credit: 0, date_ecriture: "2026-06-06" },
+    ]);
+    expect(parts.find(p => p.cle === "matieres")?.montant).toBe(5000);
+    expect(parts.find(p => p.cle === "non_stockes")?.montant).toBe(1200);
+  });
+
+  it("place 6125 AVANT 612 dans l'ordre de la légende (priorité de matching)", () => {
+    const iNonStockes = GROUPES_PCM.findIndex(g => g.cle === "non_stockes");
+    const iMatieres = GROUPES_PCM.findIndex(g => g.cle === "matieres");
+    expect(iNonStockes).toBeGreaterThanOrEqual(0);
+    expect(iNonStockes).toBeLessThan(iMatieres);
+  });
+
+  it("6126 (travaux & études) reste dans le groupe général 612", () => {
+    const parts = ventilerChargesPcm([
+      { compte_numero: "6126", debit: 400, credit: 0, date_ecriture: "2026-06-05" },
+    ]);
+    expect(parts.map(p => p.cle)).toEqual(["matieres"]);
+  });
+
+  it("le total des charges est insensible au regroupement", () => {
+    const lignes = [
+      { compte_numero: "6111",  debit: 1000, credit: 0, date_ecriture: "2026-06-05" },
+      { compte_numero: "6121",  debit: 2000, credit: 0, date_ecriture: "2026-06-05" },
+      { compte_numero: "61254", debit: 1200, credit: 0, date_ecriture: "2026-06-05" },
+    ];
+    const total = ventilerChargesPcm(lignes).reduce((s, p) => s + p.montant, 0);
+    expect(total).toBe(4200);
   });
 });
 

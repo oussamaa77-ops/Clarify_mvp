@@ -3,6 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
 import { generateFactureXml, marquerPayee, ocrFacture, ajouterEmailClient, matcherDocumentAvecTransactions } from "@/server/factures.functions";
 import { annulerPaiementFacture } from "@/server/paiements.functions";
+import { memoriserTiers } from "@/server/tiers-memoire.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,6 +20,7 @@ import { puHtToTtc } from "@/lib/tva";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { FacturesFiltres } from "@/components/FacturesFiltres";
 import { filtrerFactures, joursRetard, trancheRetard, type CriteresFiltre } from "@/lib/factures-filtres";
+import { suggestAccount, type SuggestionCompte } from "@/lib/categorization-engine";
 import {
   indexerModesPaiement, modePaiementFacture,
   MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
@@ -26,7 +28,7 @@ import {
 import { toast } from "sonner";
 
 interface Ligne { designation: string; quantite: number; prix_unitaire: number; taux_tva: number }
-interface Client { id: string; nom: string; ice: string | null; email: string | null }
+interface Client { id: string; nom: string; ice: string | null; email: string | null; compte_produit_defaut?: string | null }
 interface Facture {
   id: string; numero: string | null; date_facture: string; date_echeance: string | null;
   client_id: string | null; statut: string; statut_paiement: string; statut_dgi: string | null;
@@ -151,6 +153,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
   const addEmailFn = useServerFn(ajouterEmailClient);
   const matchFn  = useServerFn(matcherDocumentAvecTransactions);
   const annulerPaiementFn = useServerFn(annulerPaiementFacture);
+  const memoriserFn = useServerFn(memoriserTiers);
 
   const [factures, setFactures] = useState<Facture[]>([]);
   const [clients, setClients]   = useState<Client[]>([]);
@@ -175,6 +178,12 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
 
   // Formulaire
   const [clientId, setClientId]   = useState("");
+  // Compte de produit PCM suggéré par le moteur de catégorisation (ventes).
+  const [secteurActivite, setSecteurActivite] = useState<string | null>(null);
+  const [compteProduit, setCompteProduit] = useState("7111");
+  const [compteProduitTouche, setCompteProduitTouche] = useState(false);
+  const [compteProduitSug, setCompteProduitSug] = useState<SuggestionCompte | null>(null);
+  const [savingDefautClient, setSavingDefautClient] = useState(false);
   const [numero, setNumero]       = useState("");
   const [dateF, setDateF]         = useState(new Date().toISOString().slice(0,10));
   const [dateE, setDateE]         = useState("");
@@ -189,6 +198,8 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
 
   // OCR
   const [ocrLoading, setOcrLoading] = useState(false);
+  // Compte de produit rappelé par la mémoire tiers (clé ICE client) au dernier scan.
+  const [compteMemoireIce, setCompteMemoireIce] = useState<string | null>(null);
   const [ocrData, setOcrData]       = useState<OcrData|null>(null);
   const [originalFile, setOriginalFile] = useState<File|null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -198,17 +209,21 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     // Les deux dernières requêtes portent les PIÈCES de règlement (ligne de relevé
     // lettrée, encaissement saisi) : c'est d'elles que se déduit le mode de
     // paiement réellement constaté — cf. src/lib/mode-paiement.ts.
-    const [{data:f},{data:c},{data:tx},{data:enc}] = await Promise.all([
+    const [{data:f},{data:c},{data:tx},{data:enc},{data:dos}] = await Promise.all([
       supabase.from("factures").select("*").eq("dossier_id",dossierId).order("date_facture",{ascending:false}),
-      supabase.from("clients").select("id,nom,ice,email").eq("dossier_id",dossierId).is("deleted_at",null).order("nom"),
+      supabase.from("clients").select("id,nom,ice,email,compte_produit_defaut")
+        .eq("dossier_id",dossierId).is("deleted_at",null).order("nom"),
       (supabase.from("transactions_bancaires") as any)
         .select("facture_id,document_type,libelle,reference")
         .eq("dossier_id",dossierId).not("facture_id","is",null),
       (supabase.from("encaissements") as any)
         .select("facture_id,type").eq("dossier_id",dossierId).not("facture_id","is",null),
+      // Secteur d'activité du dossier — alimente le fallback sectoriel du moteur.
+      supabase.from("dossiers").select("secteur_activite").eq("id",dossierId).single(),
     ]);
     setFactures((f??[]) as unknown as Facture[]);
-    setClients((c??[]) as Client[]);
+    setClients(c??[]);
+    setSecteurActivite(dos?.secteur_activite ?? null);
     setModes(indexerModesPaiement("client",{ transactions: tx ?? [], encaissements: enc ?? [] }));
     setLoading(false);
   };
@@ -226,6 +241,39 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     if(typeFacture==="standard") { setMontantPaye(0); setMontantRestant(ttc); }
     else if(typeFacture==="acompte") { setMontantRestant(Math.max(0,ttc-montantPaye)); }
   },[ttc,typeFacture]);
+
+  // Suggestion du compte de produit PCM (moteur centralisé, sens « produit »).
+  // Recalcul tant que l'utilisateur ne l'a pas corrigé à la main.
+  const clientSelectionne = clients.find(c=>c.id===clientId);
+  useEffect(()=>{
+    if(compteProduitTouche) return;
+    const sug = suggestAccount({
+      sens: "produit",
+      tiersId: clientId || null,
+      compteDefautTiers: clientSelectionne?.compte_produit_defaut ?? null,
+      compteMemoireTiers: compteMemoireIce,
+      description: lignes[0]?.designation ?? "",
+      nomTiers: clientSelectionne?.nom ?? "",
+      secteurActivite,
+    });
+    setCompteProduitSug(sug);
+    setCompteProduit(sug.compte);
+  },[clientId, lignes, secteurActivite, clientSelectionne?.compte_produit_defaut, compteMemoireIce, compteProduitTouche]);
+
+  // Mémorise le compte comme défaut du client (Règle 1 pour les prochaines ventes).
+  const enregistrerCompteDefautClient = async () => {
+    if(!clientId) return;
+    setSavingDefautClient(true);
+    try {
+      const { error } = await supabase.from("clients")
+        .update({ compte_produit_defaut: compteProduit }).eq("id", clientId);
+      if (error) throw error;
+      setClients(cs=>cs.map(c=>c.id===clientId?{...c,compte_produit_defaut:compteProduit}:c));
+      toast.success(`Compte ${compteProduit} enregistré comme défaut du client`);
+    } catch(e:any){
+      toast.error("Échec de l'enregistrement : " + (e?.message ?? e));
+    } finally { setSavingDefautClient(false); }
+  };
 
   const handleOcr = async (file: File) => {
     setOcrLoading(true);
@@ -296,6 +344,10 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
       const r = result.result as OcrData;
       setOcrData(r);
       logAudit({ dossierId, action: "scan_facture", ressourceType: "facture", details: { numero: r.numero_facture ?? null, sens: r.sens_facture } });
+
+      // Compte appris pour cet ICE client lors d'une validation précédente : il
+      // passe devant le repli sectoriel/générique (Règle 1b du moteur).
+      setCompteMemoireIce((r as any).memoire_client?.compte_pcm ?? null);
 
       // Pré-remplir formulaire
       if (r.client_id) setClientId(r.client_id);
@@ -404,6 +456,23 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
 
     toast.success("Facture créée");
     if (newFact) logAudit({ dossierId, action: "creation_facture", ressourceType: "facture", ressourceId: newFact.id, details: { numero: numero || null } });
+
+    // ── MÉMOIRE DES COMPTES PAR TIERS (ventes) ────────────────────────────────
+    // Symétrique des achats : on apprend {ICE client → compte de produit saisi}.
+    // Sans ça, le compte auxiliaire retenu sur une facture client (34210002…)
+    // n'était mémorisé NULLE PART — seul le bouton « définir par défaut »
+    // (clients.compte_produit_defaut) le conservait, et uniquement sur clic.
+    if (clientId && compteProduit) {
+      memoriserFn({ data: {
+        dossier_id: dossierId, sens: "client",
+        ice: clientSelectionne?.ice || null,
+        nom: clientSelectionne?.nom ?? "",
+        compte_pcm: compteProduit,
+        categorie_pcm: null,
+        taux_tva: Number(lignes[0]?.taux_tva ?? 20),
+        type_tiers: "client",
+      }}).catch(() => {});   // best-effort : la facture est déjà enregistrée
+    }
     setOpenCreate(false);
     resetForm();
     load();
@@ -426,6 +495,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     setClientId("");setNumero("");setDateE("");setTypeFacture("standard");
     setMontantPaye(0);setMontantRestant(0);setModeReglement("virement");
     setEcheances([]);
+    setCompteProduit("7111");setCompteProduitTouche(false);setCompteProduitSug(null);setCompteMemoireIce(null);
   };
 
   // Une facture payée ne se supprime pas : il faut d'abord annuler son paiement,
@@ -616,6 +686,44 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                     <SelectTrigger><SelectValue placeholder="Sélectionner…"/></SelectTrigger>
                     <SelectContent>{clients.map(c=><SelectItem key={c.id} value={c.id}>{c.nom}</SelectItem>)}</SelectContent>
                   </Select>
+                </div>
+
+                {/* Compte comptable (produit) — proposé par le moteur de catégorisation PCM. */}
+                <div className="space-y-1.5">
+                  <Label className="flex items-center gap-2">
+                    Compte comptable (produit)
+                    {compteProduitSug && !compteProduitTouche && (
+                      <Badge variant="secondary" className="text-[10px] font-normal">
+                        {compteProduitSug.source === "tiers" ? "défaut client"
+                          : compteProduitSug.source === "mots_cles" ? `mot-clé « ${compteProduitSug.motCle} »`
+                          : compteProduitSug.source === "secteur" ? "secteur"
+                          : "défaut"}
+                      </Badge>
+                    )}
+                  </Label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input className="font-mono w-32" value={compteProduit} placeholder="7111"
+                      onChange={e=>{setCompteProduit(e.target.value);setCompteProduitTouche(true);}}/>
+                    {compteProduitTouche && (
+                      <Button type="button" size="sm" variant="ghost" className="h-8 text-xs"
+                        onClick={()=>setCompteProduitTouche(false)} title="Reprendre la suggestion automatique">
+                        Suggérer
+                      </Button>
+                    )}
+                    {clientId && compteProduit && compteProduit !== (clientSelectionne?.compte_produit_defaut ?? "") && (
+                      <Button type="button" size="sm" variant="outline" className="h-8 text-xs"
+                        onClick={enregistrerCompteDefautClient} disabled={savingDefautClient}
+                        title="Mémoriser ce compte pour les prochaines factures de ce client">
+                        {savingDefautClient ? <Loader2 className="h-3 w-3 mr-1 animate-spin"/> : null}
+                        Définir par défaut pour ce client
+                      </Button>
+                    )}
+                  </div>
+                  {compteProduitSug && (
+                    <p className="text-[10px] text-muted-foreground">
+                      {compteProduitSug.motif}{compteProduitSug.label ? ` — ${compteProduitSug.label}` : ""}
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">

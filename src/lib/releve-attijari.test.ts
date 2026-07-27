@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   cleanOcrText, detectDates, detectAmounts, isNonTransactional, parseAttijariReleve,
-  extractRibMarocain,
+  extractRibMarocain, estEnteteOuMetaReleve,
 } from "./releve-attijari";
 
 describe("cleanOcrText", () => {
@@ -154,5 +154,34 @@ describe("parseAttijariReleve", () => {
 
   it("renvoie une liste vide sur un texte sans transaction", () => {
     expect(parseAttijariReleve("PAGE 1 / 3\nMENTIONS LEGALES\n", opts).txs).toHaveLength(0);
+  });
+});
+
+// ─── estEnteteOuMetaReleve — garde PARTAGÉ avec le parser markdown générique ──
+describe("estEnteteOuMetaReleve", () => {
+  it("rejette les bandeaux d'en-tête et les métadonnées de document", () => {
+    for (const l of [
+      "CIH   BANK   011   7800   RELEVE DE COMPTE BANCAIRE  AGENCE   CASABLANCA",
+      "ATTIJARIWAFA BANK - EXTRAIT DE COMPTE",
+      "Période : 01/04/2026 au 30/04/2026 Devise : MAD — Dirham Marocain",
+      "Date oper  Date valeur  Libellé  Débit  Crédit",
+      "TOTAL DEBIT   45 000,00",
+      "SOUS-TOTAL   1 200,00",
+    ]) expect(estEnteteOuMetaReleve(l)).toBe(true);
+  });
+
+  it("INNOCENTE les vraies opérations dont le tiers contient un mot d'en-tête", () => {
+    for (const l of [
+      "VIR SEPA RECU / FRM SUPER-PAIN MAROC / REF FAC-2024-306",
+      "VIREMENT RECU - DISTRI-FOOD MAROC",
+      "PRLV CREDIT AGRICOLE ECHEANCE PRET",   // nom de banque, mais c'est un prélèvement
+      "REMISE CHEQUE 12345",
+    ]) expect(estEnteteOuMetaReleve(l)).toBe(false);
+  });
+
+  it("laisse passer une ligne vide ou anodine (pas de faux positif)", () => {
+    expect(estEnteteOuMetaReleve("")).toBe(false);
+    expect(estEnteteOuMetaReleve(null)).toBe(false);
+    expect(estEnteteOuMetaReleve("ACHAT TPE MARJANE CASA")).toBe(false);
   });
 });

@@ -137,9 +137,19 @@ export interface GroupePcm {
  * Regroupements demandés pour la ventilation des dépenses. « Autres charges »
  * capture le reste de la classe 6 : sans lui, le total du graphique serait
  * inférieur aux charges réelles et induirait en erreur.
+ *
+ * ORDRE SIGNIFICATIF — la ventilation retient le PREMIER groupe dont un préfixe
+ * matche : un préfixe plus précis doit donc précéder le plus général qui le
+ * contient (6125 avant 612), sinon il ne serait jamais atteint. L'ordre est
+ * aussi celui de la légende du donut.
  */
 export const GROUPES_PCM: GroupePcm[] = [
   { cle: "marchandises", label: "Achats de marchandises",       prefixes: ["611"] },
+  // 6125 « Achats NON STOCKÉS de matières et fournitures » (CGNC) : eau 61251,
+  // électricité 61252, fournitures de bureau 61254… Ce sont des consommables du
+  // quotidien, pas de la matière première transformée — les afficher sous
+  // « Matières premières » (612) faussait la lecture du donut.
+  { cle: "non_stockes",  label: "Eau, énergie & fournitures",   prefixes: ["6125"] },
   { cle: "matieres",     label: "Matières premières",           prefixes: ["612"] },
   { cle: "services",     label: "Services extérieurs & Loyers", prefixes: ["613", "614"] },
   { cle: "personnel",    label: "Charges de personnel",         prefixes: ["617"] },

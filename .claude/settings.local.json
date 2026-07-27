@@ -250,7 +250,10 @@
       "PowerShell(npx vitest run 2>&1 | Select-Object -Last 4)",
       "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"total: $\\($e.Count\\)\"; $e | Select-String -Pattern \"lib/tva|factures\\\\.functions|factures\\\\.utils\" | ForEach-Object { $_.Line })",
       "Bash(sed -i 's/colSpan={isPanelOpen ? 2 : 7}/colSpan={isPanelOpen ? 2 : 8}/g' 'src/routes/_app/dossiers.$dossierId.clients.tsx')",
-      "Bash(sed -n 355,396p 'src/routes/_app/dossiers.$dossierId.dashboard.tsx')"
+      "Bash(sed -n 355,396p 'src/routes/_app/dossiers.$dossierId.dashboard.tsx')",
+      "Bash(tee \"C:/Users/O6C96~1.KAR/AppData/Local/Temp/claude/C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main/6781557c-5e19-44e1-9e09-cda26da76830/scratchpad/tsc-before.txt\")",
+      "Bash(tee \"C:/Users/O6C96~1.KAR/AppData/Local/Temp/claude/C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main/6781557c-5e19-44e1-9e09-cda26da76830/scratchpad/tsc-after-types.txt\")",
+      "Bash(tee \"C:/Users/O6C96~1.KAR/AppData/Local/Temp/claude/C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main/6781557c-5e19-44e1-9e09-cda26da76830/scratchpad/tsc-after.txt\")"
     ]
   }
 }

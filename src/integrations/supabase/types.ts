@@ -61,6 +61,53 @@ export type Database = {
         },
       ]
       }
+      "analytics_usage": {
+        Row: {
+          id: string
+          dossier_id: string | null
+          sens: string
+          method: string
+          skip_llm: boolean
+          cout_estime: number
+          libelle: string | null
+          created_at: string
+          module: string | null
+          phase: string | null
+        }
+        Insert: {
+          id?: string
+          dossier_id?: string | null
+          sens: string
+          method: string
+          skip_llm?: boolean
+          cout_estime?: number
+          libelle?: string | null
+          created_at?: string
+          module?: string | null
+          phase?: string | null
+        }
+        Update: {
+          id?: string
+          dossier_id?: string | null
+          sens?: string
+          method?: string
+          skip_llm?: boolean
+          cout_estime?: number
+          libelle?: string | null
+          created_at?: string
+          module?: string | null
+          phase?: string | null
+        }
+        Relationships: [
+        {
+          foreignKeyName: "analytics_usage_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
       "audit_logs": {
         Row: {
           id: string
@@ -276,6 +323,8 @@ export type Database = {
           deleted_at: string | null
           created_at: string | null
           code_auxiliaire: string | null
+          import_batch_id: string | null
+          compte_produit_defaut: string | null
         }
         Insert: {
           id?: string
@@ -290,6 +339,8 @@ export type Database = {
           deleted_at?: string | null
           created_at?: string | null
           code_auxiliaire?: string | null
+          import_batch_id?: string | null
+          compte_produit_defaut?: string | null
         }
         Update: {
           id?: string
@@ -304,6 +355,8 @@ export type Database = {
           deleted_at?: string | null
           created_at?: string | null
           code_auxiliaire?: string | null
+          import_batch_id?: string | null
+          compte_produit_defaut?: string | null
         }
         Relationships: [
         {
@@ -311,6 +364,13 @@ export type Database = {
           columns: ["dossier_id"]
           isOneToOne: false
           referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "clients_import_batch_id_fkey"
+          columns: ["import_batch_id"]
+          isOneToOne: false
+          referencedRelation: "import_batches"
           referencedColumns: ["id"]
         },
       ]
@@ -394,6 +454,68 @@ export type Database = {
         },
       ]
       }
+      "document_jobs": {
+        Row: {
+          id: string
+          dossier_id: string | null
+          type: string
+          bucket: string | null
+          file_path: string | null
+          payload: Json | null
+          status: string
+          attempts: number
+          result: Json | null
+          error: string | null
+          idempotency_key: string | null
+          created_at: string
+          updated_at: string
+          started_at: string | null
+          finished_at: string | null
+        }
+        Insert: {
+          id?: string
+          dossier_id?: string | null
+          type: string
+          bucket?: string | null
+          file_path?: string | null
+          payload?: Json | null
+          status?: string
+          attempts?: number
+          result?: Json | null
+          error?: string | null
+          idempotency_key?: string | null
+          created_at?: string
+          updated_at?: string
+          started_at?: string | null
+          finished_at?: string | null
+        }
+        Update: {
+          id?: string
+          dossier_id?: string | null
+          type?: string
+          bucket?: string | null
+          file_path?: string | null
+          payload?: Json | null
+          status?: string
+          attempts?: number
+          result?: Json | null
+          error?: string | null
+          idempotency_key?: string | null
+          created_at?: string
+          updated_at?: string
+          started_at?: string | null
+          finished_at?: string | null
+        }
+        Relationships: [
+        {
+          foreignKeyName: "document_jobs_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
       "dossier_access": {
         Row: {
           id: string
@@ -448,6 +570,8 @@ export type Database = {
           created_by: string | null
           created_at: string | null
           updated_at: string | null
+          date_reprise: string | null
+          secteur_activite: string | null
         }
         Insert: {
           id?: string
@@ -463,6 +587,8 @@ export type Database = {
           created_by?: string | null
           created_at?: string | null
           updated_at?: string | null
+          date_reprise?: string | null
+          secteur_activite?: string | null
         }
         Update: {
           id?: string
@@ -478,6 +604,8 @@ export type Database = {
           created_by?: string | null
           created_at?: string | null
           updated_at?: string | null
+          date_reprise?: string | null
+          secteur_activite?: string | null
         }
         Relationships: [
         {
@@ -509,6 +637,9 @@ export type Database = {
           lettre: string | null
           date_lettrage: string | null
           transaction_id: string | null
+          batch_id: string | null
+          lettree: boolean
+          code_lettrage: string | null
         }
         Insert: {
           id?: string
@@ -529,6 +660,9 @@ export type Database = {
           lettre?: string | null
           date_lettrage?: string | null
           transaction_id?: string | null
+          batch_id?: string | null
+          lettree?: boolean
+          code_lettrage?: string | null
         }
         Update: {
           id?: string
@@ -549,6 +683,9 @@ export type Database = {
           lettre?: string | null
           date_lettrage?: string | null
           transaction_id?: string | null
+          batch_id?: string | null
+          lettree?: boolean
+          code_lettrage?: string | null
         }
         Relationships: [
         {
@@ -584,6 +721,13 @@ export type Database = {
           columns: ["transaction_id"]
           isOneToOne: false
           referencedRelation: "transactions_bancaires"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "ecritures_comptables_batch_id_fkey"
+          columns: ["batch_id"]
+          isOneToOne: false
+          referencedRelation: "import_batches"
           referencedColumns: ["id"]
         },
       ]
@@ -756,7 +900,7 @@ export type Database = {
           dossier_id: string
           client_id: string | null
           numero: string | null
-          type: "facture" | "avoir" | "proforma" | null
+          type: "facture" | "avoir" | "proforma" | "acompte" | "solde" | null
           statut: "brouillon" | "envoyee" | "conforme" | "rejetee" | "annulee" | null
           statut_dgi: string | null
           statut_paiement: "non_payee" | "partielle" | "payee" | "en_retard" | null
@@ -779,7 +923,6 @@ export type Database = {
           fichier_original_nom: string | null
           fichier_original_type: string | null
           statut_dgi_detail: Json | null
-          type_facture: string | null
           numero_commande: string | null
           numero_acompte: number | null
           montant_commande_total_ht: number | null
@@ -796,7 +939,7 @@ export type Database = {
           dossier_id: string
           client_id?: string | null
           numero?: string | null
-          type?: "facture" | "avoir" | "proforma" | null
+          type?: "facture" | "avoir" | "proforma" | "acompte" | "solde" | null
           statut?: "brouillon" | "envoyee" | "conforme" | "rejetee" | "annulee" | null
           statut_dgi?: string | null
           statut_paiement?: "non_payee" | "partielle" | "payee" | "en_retard" | null
@@ -819,7 +962,6 @@ export type Database = {
           fichier_original_nom?: string | null
           fichier_original_type?: string | null
           statut_dgi_detail?: Json | null
-          type_facture?: string | null
           numero_commande?: string | null
           numero_acompte?: number | null
           montant_commande_total_ht?: number | null
@@ -836,7 +978,7 @@ export type Database = {
           dossier_id?: string
           client_id?: string | null
           numero?: string | null
-          type?: "facture" | "avoir" | "proforma" | null
+          type?: "facture" | "avoir" | "proforma" | "acompte" | "solde" | null
           statut?: "brouillon" | "envoyee" | "conforme" | "rejetee" | "annulee" | null
           statut_dgi?: string | null
           statut_paiement?: "non_payee" | "partielle" | "payee" | "en_retard" | null
@@ -859,7 +1001,6 @@ export type Database = {
           fichier_original_nom?: string | null
           fichier_original_type?: string | null
           statut_dgi_detail?: Json | null
-          type_facture?: string | null
           numero_commande?: string | null
           numero_acompte?: number | null
           montant_commande_total_ht?: number | null
@@ -921,6 +1062,9 @@ export type Database = {
           montant_restant: number | null
           mode_reglement: string | null
           echeances: Json | null
+          fichier_original_url: string | null
+          fichier_original_nom: string | null
+          fichier_original_type: string | null
         }
         Insert: {
           id?: string
@@ -947,6 +1091,9 @@ export type Database = {
           montant_restant?: number | null
           mode_reglement?: string | null
           echeances?: Json | null
+          fichier_original_url?: string | null
+          fichier_original_nom?: string | null
+          fichier_original_type?: string | null
         }
         Update: {
           id?: string
@@ -973,6 +1120,9 @@ export type Database = {
           montant_restant?: number | null
           mode_reglement?: string | null
           echeances?: Json | null
+          fichier_original_url?: string | null
+          fichier_original_nom?: string | null
+          fichier_original_type?: string | null
         }
         Relationships: [
         {
@@ -1005,6 +1155,8 @@ export type Database = {
           deleted_at: string | null
           created_at: string | null
           code_auxiliaire: string | null
+          import_batch_id: string | null
+          compte_charge_defaut: string | null
         }
         Insert: {
           id?: string
@@ -1019,6 +1171,8 @@ export type Database = {
           deleted_at?: string | null
           created_at?: string | null
           code_auxiliaire?: string | null
+          import_batch_id?: string | null
+          compte_charge_defaut?: string | null
         }
         Update: {
           id?: string
@@ -1033,6 +1187,8 @@ export type Database = {
           deleted_at?: string | null
           created_at?: string | null
           code_auxiliaire?: string | null
+          import_batch_id?: string | null
+          compte_charge_defaut?: string | null
         }
         Relationships: [
         {
@@ -1040,6 +1196,13 @@ export type Database = {
           columns: ["dossier_id"]
           isOneToOne: false
           referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "fournisseurs_import_batch_id_fkey"
+          columns: ["import_batch_id"]
+          isOneToOne: false
+          referencedRelation: "import_batches"
           referencedColumns: ["id"]
         },
       ]
@@ -1100,6 +1263,53 @@ export type Database = {
           columns: ["facture_id"]
           isOneToOne: false
           referencedRelation: "factures"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
+      "import_batches": {
+        Row: {
+          id: string
+          dossier_id: string
+          type: string
+          filename: string | null
+          source_rows: number
+          inserted_ecritures: number
+          inserted_tiers: number
+          mapping: Json
+          created_by: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          dossier_id: string
+          type?: string
+          filename?: string | null
+          source_rows?: number
+          inserted_ecritures?: number
+          inserted_tiers?: number
+          mapping: Json
+          created_by?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          dossier_id?: string
+          type?: string
+          filename?: string | null
+          source_rows?: number
+          inserted_ecritures?: number
+          inserted_tiers?: number
+          mapping?: Json
+          created_by?: string | null
+          created_at?: string
+        }
+        Relationships: [
+        {
+          foreignKeyName: "import_batches_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
           referencedColumns: ["id"]
         },
       ]
@@ -1214,6 +1424,9 @@ export type Database = {
           devis_id: string | null
           date_commande: string | null
           lignes: Json | null
+          fichier_original_url: string | null
+          fichier_original_nom: string | null
+          fichier_original_type: string | null
         }
         Insert: {
           id?: string
@@ -1238,6 +1451,9 @@ export type Database = {
           devis_id?: string | null
           date_commande?: string | null
           lignes?: Json | null
+          fichier_original_url?: string | null
+          fichier_original_nom?: string | null
+          fichier_original_type?: string | null
         }
         Update: {
           id?: string
@@ -1262,6 +1478,9 @@ export type Database = {
           devis_id?: string | null
           date_commande?: string | null
           lignes?: Json | null
+          fichier_original_url?: string | null
+          fichier_original_nom?: string | null
+          fichier_original_type?: string | null
         }
         Relationships: [
         {
@@ -1325,6 +1544,119 @@ export type Database = {
         },
       ]
       }
+      "ocr_cache": {
+        Row: {
+          id: string
+          dossier_id: string | null
+          input_hash: string
+          result: Json
+          method: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          dossier_id?: string | null
+          input_hash: string
+          result: Json
+          method?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          dossier_id?: string | null
+          input_hash?: string
+          result?: Json
+          method?: string | null
+          created_at?: string
+        }
+        Relationships: [
+        {
+          foreignKeyName: "ocr_cache_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
+      "paiements": {
+        Row: {
+          id: string
+          dossier_id: string
+          facture_id: string | null
+          facture_fournisseur_id: string | null
+          montant: number
+          date_paiement: string
+          origine: string
+          encaissement_id: string | null
+          transaction_id: string | null
+          reference: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          dossier_id: string
+          facture_id?: string | null
+          facture_fournisseur_id?: string | null
+          montant: number
+          date_paiement?: string
+          origine: string
+          encaissement_id?: string | null
+          transaction_id?: string | null
+          reference?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          dossier_id?: string
+          facture_id?: string | null
+          facture_fournisseur_id?: string | null
+          montant?: number
+          date_paiement?: string
+          origine?: string
+          encaissement_id?: string | null
+          transaction_id?: string | null
+          reference?: string | null
+          created_at?: string
+        }
+        Relationships: [
+        {
+          foreignKeyName: "paiements_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "paiements_facture_id_fkey"
+          columns: ["facture_id"]
+          isOneToOne: false
+          referencedRelation: "factures"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "paiements_facture_fournisseur_id_fkey"
+          columns: ["facture_fournisseur_id"]
+          isOneToOne: false
+          referencedRelation: "factures_fournisseurs"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "paiements_encaissement_id_fkey"
+          columns: ["encaissement_id"]
+          isOneToOne: false
+          referencedRelation: "encaissements"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "paiements_transaction_id_fkey"
+          columns: ["transaction_id"]
+          isOneToOne: false
+          referencedRelation: "transactions_bancaires"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
       "pcm_reference": {
         Row: {
           numero: string
@@ -1349,6 +1681,48 @@ export type Database = {
         }
         Relationships: []
       }
+      "plans": {
+        Row: {
+          id: string
+          code: string
+          name: string
+          price_monthly: number
+          currency: string
+          scans_limit: number
+          features: Json
+          is_active: boolean
+          sort_order: number
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          code: string
+          name: string
+          price_monthly: number
+          currency?: string
+          scans_limit: number
+          features: Json
+          is_active?: boolean
+          sort_order?: number
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          code?: string
+          name?: string
+          price_monthly?: number
+          currency?: string
+          scans_limit?: number
+          features?: Json
+          is_active?: boolean
+          sort_order?: number
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       "profiles": {
         Row: {
           id: string
@@ -1358,6 +1732,7 @@ export type Database = {
           cabinet_id: string | null
           created_at: string
           updated_at: string
+          is_approved: boolean
         }
         Insert: {
           id: string
@@ -1367,6 +1742,7 @@ export type Database = {
           cabinet_id?: string | null
           created_at?: string
           updated_at?: string
+          is_approved?: boolean
         }
         Update: {
           id?: string
@@ -1376,6 +1752,7 @@ export type Database = {
           cabinet_id?: string | null
           created_at?: string
           updated_at?: string
+          is_approved?: boolean
         }
         Relationships: [
         {
@@ -1459,6 +1836,72 @@ export type Database = {
         },
       ]
       }
+      "subscriptions": {
+        Row: {
+          id: string
+          cabinet_id: string
+          plan_id: string
+          status: "trial" | "active" | "past_due" | "canceled" | "inactive"
+          current_period_start: string
+          current_period_end: string
+          trial_ends_at: string | null
+          cancel_at_period_end: boolean
+          provider: string
+          provider_customer_id: string | null
+          provider_subscription_id: string | null
+          metadata: Json
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          cabinet_id: string
+          plan_id: string
+          status?: "trial" | "active" | "past_due" | "canceled" | "inactive"
+          current_period_start?: string
+          current_period_end?: string
+          trial_ends_at?: string | null
+          cancel_at_period_end?: boolean
+          provider?: string
+          provider_customer_id?: string | null
+          provider_subscription_id?: string | null
+          metadata: Json
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          cabinet_id?: string
+          plan_id?: string
+          status?: "trial" | "active" | "past_due" | "canceled" | "inactive"
+          current_period_start?: string
+          current_period_end?: string
+          trial_ends_at?: string | null
+          cancel_at_period_end?: boolean
+          provider?: string
+          provider_customer_id?: string | null
+          provider_subscription_id?: string | null
+          metadata?: Json
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+        {
+          foreignKeyName: "subscriptions_cabinet_id_fkey"
+          columns: ["cabinet_id"]
+          isOneToOne: false
+          referencedRelation: "cabinets"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "subscriptions_plan_id_fkey"
+          columns: ["plan_id"]
+          isOneToOne: false
+          referencedRelation: "plans"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
       "tiers": {
         Row: {
           id: string
@@ -1523,6 +1966,71 @@ export type Database = {
           columns: ["tier_id"]
           isOneToOne: false
           referencedRelation: "tiers"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
+      "tiers_memoire": {
+        Row: {
+          id: string
+          dossier_id: string
+          sens: string
+          cle_ice: string | null
+          cle_libelle: string
+          fournisseur_id: string | null
+          compte_pcm: string | null
+          categorie_pcm: string | null
+          taux_tva: number | null
+          occurrences: number
+          derniere_validation: string
+          created_at: string
+          type_tiers: string | null
+          pattern: string | null
+          pattern_hash: string | null
+          confiance: number
+        }
+        Insert: {
+          id?: string
+          dossier_id: string
+          sens?: string
+          cle_ice?: string | null
+          cle_libelle: string
+          fournisseur_id?: string | null
+          compte_pcm?: string | null
+          categorie_pcm?: string | null
+          taux_tva?: number | null
+          occurrences?: number
+          derniere_validation?: string
+          created_at?: string
+          type_tiers?: string | null
+          pattern?: string | null
+          pattern_hash?: string | null
+          confiance?: number
+        }
+        Update: {
+          id?: string
+          dossier_id?: string
+          sens?: string
+          cle_ice?: string | null
+          cle_libelle?: string
+          fournisseur_id?: string | null
+          compte_pcm?: string | null
+          categorie_pcm?: string | null
+          taux_tva?: number | null
+          occurrences?: number
+          derniere_validation?: string
+          created_at?: string
+          type_tiers?: string | null
+          pattern?: string | null
+          pattern_hash?: string | null
+          confiance?: number
+        }
+        Relationships: [
+        {
+          foreignKeyName: "tiers_memoire_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
           referencedColumns: ["id"]
         },
       ]
@@ -1612,6 +2120,67 @@ export type Database = {
         },
       ]
       }
+      "usage_records": {
+        Row: {
+          id: string
+          cabinet_id: string
+          subscription_id: string | null
+          dossier_id: string | null
+          kind: string
+          quantity: number
+          period_start: string
+          idempotency_key: string
+          metadata: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          cabinet_id: string
+          subscription_id?: string | null
+          dossier_id?: string | null
+          kind: string
+          quantity?: number
+          period_start: string
+          idempotency_key: string
+          metadata: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          cabinet_id?: string
+          subscription_id?: string | null
+          dossier_id?: string | null
+          kind?: string
+          quantity?: number
+          period_start?: string
+          idempotency_key?: string
+          metadata?: Json
+          created_at?: string
+        }
+        Relationships: [
+        {
+          foreignKeyName: "usage_records_cabinet_id_fkey"
+          columns: ["cabinet_id"]
+          isOneToOne: false
+          referencedRelation: "cabinets"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "usage_records_subscription_id_fkey"
+          columns: ["subscription_id"]
+          isOneToOne: false
+          referencedRelation: "subscriptions"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "usage_records_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
       "user_profiles": {
         Row: {
           id: string
@@ -1681,6 +2250,66 @@ export type Database = {
           referencedColumns: ["id"]
         },
       ]
+      }
+      "v_balance_agee": {
+        Row: {
+          dossier_id: string | null
+          sens: string | null
+          tiers_id: string | null
+          tiers_nom: string | null
+          nb_factures: number | null
+          nb_ouvertes: number | null
+          nb_reglees: number | null
+          total_facture: number | null
+          total_paye: number | null
+          total_du: number | null
+          non_echu: number | null
+          retard_1_30: number | null
+          retard_31_60: number | null
+          retard_60_plus: number | null
+          plus_ancienne_echeance: string | null
+          jours_retard_max: number | null
+          delai_reglement_moyen: number | null
+        }
+        Insert: {
+          dossier_id?: string | null
+          sens?: string | null
+          tiers_id?: string | null
+          tiers_nom?: string | null
+          nb_factures?: number | null
+          nb_ouvertes?: number | null
+          nb_reglees?: number | null
+          total_facture?: number | null
+          total_paye?: number | null
+          total_du?: number | null
+          non_echu?: number | null
+          retard_1_30?: number | null
+          retard_31_60?: number | null
+          retard_60_plus?: number | null
+          plus_ancienne_echeance?: string | null
+          jours_retard_max?: number | null
+          delai_reglement_moyen?: number | null
+        }
+        Update: {
+          dossier_id?: string | null
+          sens?: string | null
+          tiers_id?: string | null
+          tiers_nom?: string | null
+          nb_factures?: number | null
+          nb_ouvertes?: number | null
+          nb_reglees?: number | null
+          total_facture?: number | null
+          total_paye?: number | null
+          total_du?: number | null
+          non_echu?: number | null
+          retard_1_30?: number | null
+          retard_31_60?: number | null
+          retard_60_plus?: number | null
+          plus_ancienne_echeance?: string | null
+          jours_retard_max?: number | null
+          delai_reglement_moyen?: number | null
+        }
+        Relationships: []
       }
       "v_releves_stats": {
         Row: {

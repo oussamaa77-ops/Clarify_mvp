@@ -226,6 +226,39 @@ export function isNonTransactional(line: string): boolean {
   return false;
 }
 
+// ── Garde PARTAGÉ : en-tête / métadonnée de relevé ───────────────────────────
+// `isNonTransactional` ci-dessus est taillé pour une ligne BRUTE d'OCR dans le
+// parser ATW : sa liste inclut « maroc », « agence », « rib », « montant »… des
+// mots qui apparaissent aussi dans de VRAIS libellés (« VIREMENT RECU - DISTRI-FOOD
+// MAROC »). L'appliquer tel quel ailleurs supprimerait des transactions légitimes.
+//
+// Ce garde-ci est donc conçu pour être partagé (parser générique markdown, audits) :
+// il exige un marqueur EXPLICITE d'en-tête/métadonnée, et il INNOCENTE d'office
+// toute ligne portant un verbe d'opération bancaire.
+
+/** Nom d'établissement bancaire — présent dans les bandeaux d'en-tête. */
+const RX_ETABLISSEMENT = /\b(cih\s*bank|attijariwafa|banque\s+populaire|bmce|bmci|societe\s+generale|credit\s+agricole|cr[eé]dit\s+du\s+maroc|al\s*barid|saham|wafabank)\b/i;
+/** Mention structurelle du document (titre, périmètre, en-tête de colonnes). */
+const RX_DOC_META = /\b(relev[eé]\s+d[eu]?\s*compte|releve\s+de\s+compte|extrait\s+de\s+compte|p[eé]riode\s*:|devise\s*:|dirham\s+marocain|date\s+oper|date\s+valeur|code\s+banque|num[eé]ro\s+de\s+compte|r[eé]capitulatif|total\s+(d[eé]bit|cr[eé]dit|des\s+mouvements?|g[eé]n[eé]ral)|sous[-\s]?total|totaux|solde\s+interm[eé]diaire)\b/i;
+/**
+ * Verbe d'opération bancaire : sa présence prouve une vraie ligne de mouvement.
+ * Sans cette échappatoire, « VIR SEPA RECU / FRM SUPER-PAIN MAROC » serait rejeté.
+ */
+const RX_OPERATION_BANCAIRE = /\b(vir(ement|t)?|sepa|pr[eé]l[eè]v\w*|prlv|ch[eè]que|chq|remise|encaissement|paiement|paimt|versement|retrait|gab|dab|commission|agios|effet|traite|lcn|domiciliation)\b/i;
+
+/**
+ * `true` si la ligne est un EN-TÊTE ou une MÉTADONNÉE de relevé (bandeau banque,
+ * titre du document, période/devise, en-tête de colonnes, sous-total) et non une
+ * opération. Volontairement plus STRICT que `isNonTransactional` : un verbe
+ * d'opération l'emporte toujours, pour ne jamais perdre une transaction réelle.
+ */
+export function estEnteteOuMetaReleve(line: string | null | undefined): boolean {
+  const s = String(line ?? "");
+  if (!s.trim()) return false;
+  if (RX_OPERATION_BANCAIRE.test(s)) return false;         // vraie opération → on garde
+  return RX_ETABLISSEMENT.test(s) || RX_DOC_META.test(s);
+}
+
 // ── Mots-clés crédit (fallback direction) ────────────────────────────────────
 const CREDIT_KW = [
   "VIRT RECU", "VIR RECU", "VIREMENT RECU", "VIR REC", "RECU DE",

@@ -457,3 +457,42 @@ describe("parseReleveMarkdown — SOLDE AU <date> en fin de tableau", () => {
     expect(r.txs.length).toBe(1);
   });
 });
+
+// ─── parseReleveMarkdown — en-tête de relevé repliée DANS le tableau ──────────
+// Régression réelle : l'OCR range le bandeau CIH dans la grille du tableau et le
+// parser en faisait une transaction de 1 084 033 MAD (un n° de téléphone/RIB pris
+// pour un montant), imputée 5141 / 6171. Cf. audit-ecritures-parasites.
+describe("parseReleveMarkdown — en-tête bancaire dans le tableau", () => {
+  const ENTETE = "CIH   BANK   011   7800   RELEVE DE COMPTE BANCAIRE  AGENCE   CASABLANCA AIN SEBAA   21000  N° TEL  05 22 34 03 30";
+  const md = [
+    "| Date | Libellé | Débit | Crédit |",
+    "|---|---|---|---|",
+    `| 30/04/2026 | ${ENTETE} | | 1 084 033,00 |`,
+    "| 05/04/2026 | VIR RECU CLIENT X | | 1 200,00 |",
+    "| 06/04/2026 | VIR SEPA RECU / FRM SUPER-PAIN MAROC / REF FAC-2024-306 | | 3 400,00 |",
+    "| 07/04/2026 | VIREMENT RECU - DISTRI-FOOD MAROC | | 950,00 |",
+  ].join("\n");
+
+  it("n'retient PAS l'en-tête comme transaction", () => {
+    const r = parseReleveMarkdown(md);
+    expect(r.txs.some((t) => /RELEVE DE COMPTE|CIH\s+BANK/i.test(t.libelle ?? ""))).toBe(false);
+    expect(r.txs.some((t) => t.montant_credit === 1084033)).toBe(false);
+  });
+
+  it("conserve les vraies opérations, même quand le tiers s'appelle « … MAROC »", () => {
+    const r = parseReleveMarkdown(md);
+    expect(r.txs).toHaveLength(3);
+    expect(r.txs.map((t) => t.montant_credit)).toEqual([1200, 3400, 950]);
+  });
+
+  it("ignore aussi une ligne de métadonnées période/devise", () => {
+    const r = parseReleveMarkdown([
+      "| Date | Libellé | Débit | Crédit |",
+      "|---|---|---|---|",
+      "| 30/04/2026 | Période : 01/04/2026 au 30/04/2026 Devise : MAD — Dirham Marocain | | 2 024,00 |",
+      "| 05/04/2026 | REMISE CHEQUE 12345 | | 500,00 |",
+    ].join("\n"));
+    expect(r.txs).toHaveLength(1);
+    expect(r.txs[0].montant_credit).toBe(500);
+  });
+});

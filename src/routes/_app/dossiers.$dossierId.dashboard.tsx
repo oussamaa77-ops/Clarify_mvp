@@ -21,8 +21,21 @@ export const Route = createFileRoute("/_app/dossiers/$dossierId/dashboard")({ co
 
 const fmt = (n: number) => Number(n).toLocaleString("fr-MA", { minimumFractionDigits: 2 }) + " MAD";
 
-/** Palette du donut de charges — teintes distinctes, lisibles en clair comme en sombre. */
-const COULEURS_PCM = ["#2563eb", "#10b981", "#f59e0b", "#8b5cf6", "#94a3b8"];
+/**
+ * Palette du donut de charges, indexée par CLÉ de groupe et non par rang : les
+ * groupes vides sont écartés de la ventilation, donc un index de tableau donnait
+ * au même poste une couleur différente selon les dossiers (et l'ajout d'un groupe
+ * repeignait tout le monde). Teintes vérifiées par paires adjacentes (séparation
+ * daltonisme) dans cet ordre de légende.
+ */
+const COULEURS_PCM: Record<string, string> = {
+  marchandises: "#2563eb",
+  non_stockes:  "#db2777",
+  matieres:     "#10b981",
+  services:     "#f59e0b",
+  personnel:    "#8b5cf6",
+  autres:       "#94a3b8",
+};
 
 // ── Transactions bancaires NON LETTRÉES du dossier, ventilées par relevé ────────
 // « non lettrée » = ni facture ni justificatif lié (même définition que la colonne
@@ -493,8 +506,8 @@ function DashboardPage() {
                       <PieChart>
                         <Pie data={partsCharges} dataKey="montant" nameKey="label"
                           innerRadius={55} outerRadius={90} paddingAngle={2}>
-                          {partsCharges.map((p, i) => (
-                            <Cell key={p.cle} fill={COULEURS_PCM[i % COULEURS_PCM.length]} />
+                          {partsCharges.map((p) => (
+                            <Cell key={p.cle} fill={COULEURS_PCM[p.cle] ?? COULEURS_PCM.autres} />
                           ))}
                         </Pie>
                         <Tooltip formatter={(v: any, n: any) => [fmt(Number(v)), n]} />

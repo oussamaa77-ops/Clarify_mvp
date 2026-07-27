@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
+import { compteTiersAuxiliaire, suffixeAuxiliaire } from "@/lib/comptes-auxiliaires";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,6 +67,9 @@ function ComptabilitePage() {
   const [livre, setLivre] = useState<LivreKey>("tous");
   const [ecritures, setEcritures] = useState<Ecriture[]>([]);
   const [pcmComptes, setPcmComptes] = useState<{ numero: string; intitule: string }[]>([]);
+  // Intitulés des comptes AUXILIAIRES (44110005 → « ALPHA SARL ») : c'est ce qui
+  // transforme la balance générale en balance AUXILIAIRE lisible.
+  const [intitulesAux, setIntitulesAux] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -120,6 +124,20 @@ function ComptabilitePage() {
       setPcmComptes((data ?? []) as { numero: string; intitule: string }[]);
     })();
   }, []);
+
+  // Tiers du dossier → intitulé des comptes auxiliaires (balance auxiliaire).
+  useEffect(() => {
+    (async () => {
+      const [{ data: cli }, { data: fou }] = await Promise.all([
+        supabase.from("clients").select("nom,code_auxiliaire").eq("dossier_id", dossierId).is("deleted_at", null),
+        supabase.from("fournisseurs").select("nom,code_auxiliaire").eq("dossier_id", dossierId),
+      ]);
+      const map: Record<string, string> = {};
+      for (const c of cli ?? []) if (c.code_auxiliaire) map[compteTiersAuxiliaire("client", c.code_auxiliaire)] = c.nom;
+      for (const f of fou ?? []) if (f.code_auxiliaire) map[compteTiersAuxiliaire("fournisseur", f.code_auxiliaire)] = f.nom;
+      setIntitulesAux(map);
+    })();
+  }, [dossierId]);
 
   // Modifier une écriture
   const updateEcriture = (id: string, field: keyof Ecriture, value: any) => {
@@ -480,7 +498,14 @@ function ComptabilitePage() {
             <div className="max-h-[60vh] overflow-y-auto">
               {balance.map((l, i) => (
                 <div key={l.compte} className={`grid grid-cols-10 gap-1 px-4 py-1.5 border-b text-sm ${i%2===0?"bg-white dark:bg-background":"bg-muted/20"}`}>
-                  <div className="col-span-2 font-mono font-medium">{l.compte}</div>
+                  <div className="col-span-2 font-mono font-medium">
+                    {l.compte}
+                    {(intitulesAux[l.compte] || suffixeAuxiliaire(l.compte)) && (
+                      <span className="ml-2 font-sans text-xs text-muted-foreground">
+                        {intitulesAux[l.compte] ?? "tiers auxiliaire"}
+                      </span>
+                    )}
+                  </div>
                   <div className="col-span-3 text-right font-mono text-red-600">{l.total_debit>0?fmt(l.total_debit):"—"}</div>
                   <div className="col-span-3 text-right font-mono text-green-600">{l.total_credit>0?fmt(l.total_credit):"—"}</div>
                   <div className="col-span-1 text-right font-mono font-semibold">{fmt(l.solde)}</div>
