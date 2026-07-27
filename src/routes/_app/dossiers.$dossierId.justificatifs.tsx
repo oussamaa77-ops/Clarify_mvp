@@ -16,6 +16,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
+import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { ocrFacture, matcherDocumentAvecTransactions, lettrerJustificatif } from "@/server/factures.functions";
 
@@ -586,12 +587,12 @@ function JustificatifsPage() {
       const isImage = file.type.startsWith("image/");
 
       if (isImage) {
-        imageBase64 = await new Promise<string>((res, rej) => {
-          const reader = new FileReader();
-          reader.onload = () => res((reader.result as string).split(",")[1]);
-          reader.onerror = rej;
-          reader.readAsDataURL(file);
-        });
+        // Allègement du payload avant l'envoi (1800 px max, JPEG 85 %) : c'est le
+        // transfert de l'image brute qui dominait la latence de scan en prod.
+        const payload = await preparerImagePourOcr(file);
+        journaliserPayload("justificatif", payload);
+        imageBase64 = payload.base64;
+        ocrMime     = payload.mimeType;
       } else {
         const pdfjsLib = await import("pdfjs-dist");
         pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";

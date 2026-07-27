@@ -16,6 +16,7 @@ HTTPAdapter.send = subclassed_send
 
 import io
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.concurrency import run_in_threadpool
 import uvicorn
 from transformers import DonutProcessor, VisionEncoderDecoderModel
 import PIL.Image
@@ -33,23 +34,36 @@ try:
 except Exception as e:
     print(f"❌ Erreur : {e}")
 
+def _inferer(image_bytes: bytes) -> dict:
+    """Tout le CPU-bound du scan, regroupé dans une fonction SYNCHRONE.
+
+    Décodage PIL, pré-traitement du processor et `model.generate` occupent le
+    cœur pendant plusieurs secondes sans jamais rendre la main : exécutés dans la
+    coroutine, ils gelaient l'event loop et TOUTES les requêtes concurrentes
+    (health check compris) attendaient la fin de l'inférence. Isolés ici, ils
+    sont poussés dans le threadpool par l'appelant.
+    """
+    image = PIL.Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    pixel_values = processor(image, return_tensors="pt").pixel_values.to(device)
+    task_prompt = "<s_cord-v2>"
+    decoder_input_ids = processor.tokenizer(task_prompt, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
+
+    outputs = model.generate(
+        pixel_values,
+        decoder_input_ids=decoder_input_ids,
+        max_length=model.config.decoder.max_position_embeddings,
+        early_stopping=True,
+    )
+    return processor.token2json(outputs[0])
+
+
 @app.post("/parse")
 async def parse_statement(file: UploadFile = File(...)):
     try:
+        # Seule l'I/O reste dans la coroutine ; l'inférence part en threadpool.
         image_bytes = await file.read()
-        image = PIL.Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        pixel_values = processor(image, return_tensors="pt").pixel_values.to(device)
-        task_prompt = "<s_cord-v2>"
-        decoder_input_ids = processor.tokenizer(task_prompt, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
-        
-        outputs = model.generate(
-            pixel_values,
-            decoder_input_ids=decoder_input_ids,
-            max_length=model.config.decoder.max_position_embeddings,
-            early_stopping=True,
-        )
-        prediction = processor.token2json(outputs[0])
-        
+        prediction = await run_in_threadpool(_inferer, image_bytes)
+
         txs_mappees = []
         items_bruts = []
         if isinstance(prediction, dict):

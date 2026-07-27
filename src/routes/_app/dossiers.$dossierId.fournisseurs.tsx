@@ -38,6 +38,7 @@ import { DocumentViewer, type DocumentViewerSource } from "@/components/Document
 import { DocumentsAssocies } from "@/components/DocumentsAssocies";
 import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
+import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { FacturesFiltres } from "@/components/FacturesFiltres";
 import { suggestAccount, type SuggestionCompte } from "@/lib/categorization-engine";
@@ -509,12 +510,15 @@ function FournisseursPage() {
           extracted_text = "";
         }
       } else {
-        // Image (JPG/PNG) → envoyer en base64 au modèle vision du backend
-        const ab = await file.arrayBuffer();
-        const bytes = new Uint8Array(ab);
-        let bin = "";
-        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-        image_base64 = btoa(bin);
+        // Image (JPG/PNG/WebP) → base64 pour le modèle vision du backend, mais
+        // ALLÉGÉE avant l'envoi (1800 px max, JPEG 85 %) : une photo de 4 Mo
+        // encodée en base64 faisait ~5,3 Mo de POST, soit plusieurs secondes de
+        // latence en prod (Railway) avant même le premier appel IA.
+        // Le fichier ORIGINAL reste intact et part tel quel dans le bucket.
+        const payload = await preparerImagePourOcr(file);
+        journaliserPayload("facture fournisseur", payload);
+        image_base64 = payload.base64;
+        mime_type = payload.mimeType;
       }
 
       const { result: r } = await ocrFn({

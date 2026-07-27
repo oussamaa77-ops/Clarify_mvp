@@ -20,6 +20,8 @@ import { PCM_MAP, RX_VIREMENT_INTERNE, deriveCategorie, genererLignesBQ } from "
 import { extractRibMarocain } from "@/lib/releve-attijari";
 import { identifierBanque, identifierBanqueParNom, maskRib } from "@/lib/bank-identity";
 import { reconcilierPaiements } from "@/lib/paiements";
+import { controlerCoherenceReleve, resumerCoherence } from "@/lib/releve-coherence";
+import { encoderCanvasPourOcr, preparerImageBanquePourOcr, cumulerMesures, journaliserMesure, type MesureGrayscale } from "@/lib/bank-grayscale";
 import { BankLogo } from "@/components/BankLogo";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
@@ -775,8 +777,10 @@ function BanquePage() {
   const PDF_RENDER_SCALE=3.5;   // netteté ; baisser si 413/quota
   const PDF_JPEG_QUALITY=0.95;  // ≥ 0.95 pour ne pas sur-compresser le tableau
   const HALF_OVERLAP=0.12;      // recouvrement vertical entre les 2 moitiés (12%)
-  const pdfPageToHalves=async(lib:any,ab:ArrayBuffer,pageNum:number):Promise<string[]>=>{
-    const pdfDoc=await lib.getDocument({data:ab.slice(0)}).promise;
+  // Reçoit le document pdf.js DÉJÀ ouvert : ré-ouvrir le PDF (et recopier son
+  // ArrayBuffer) à chaque page faisait re-parser tout le fichier N fois, pour un
+  // coût purement gaspillé sur un relevé de 10 pages.
+  const pdfPageToHalves=async(pdfDoc:any,pageNum:number,mesures:MesureGrayscale[]):Promise<string[]>=>{
     const page=await pdfDoc.getPage(pageNum);
     const viewport=page.getViewport({scale:PDF_RENDER_SCALE});
     const full=document.createElement("canvas");
@@ -784,7 +788,13 @@ function BanquePage() {
     full.height=viewport.height;
     await page.render({canvasContext:full.getContext("2d")!,viewport}).promise;
     const W=full.width, H=full.height;
-    const toB64=(c:HTMLCanvasElement)=>c.toDataURL("image/jpeg",PDF_JPEG_QUALITY).split(",")[1];
+    // Échelle de rendu et qualité JPEG INCHANGÉES ; `encoderCanvasPourOcr` ne
+    // touche qu'à la couleur, et seulement si le drapeau gris est actif.
+    const toB64=(c:HTMLCanvasElement)=>{
+      const {base64,mesure}=encoderCanvasPourOcr(c,PDF_JPEG_QUALITY);
+      mesures.push(mesure);
+      return base64;
+    };
 
     // Page courte → pas de découpe
     if(H<2000) return [toB64(full)];
@@ -815,14 +825,13 @@ function BanquePage() {
       if(isImage){
         // ── Image directe (JPEG/PNG) → Vision IA (même pipeline que PDF) ─────
         toast.info("Image détectée — Vision IA en cours…");
-        const base64=await new Promise<string>((res,rej)=>{
-          const reader=new FileReader();
-          reader.onload=()=>res((reader.result as string).split(",")[1]);
-          reader.onerror=rej;
-          reader.readAsDataURL(file);
-        });
+        // Drapeau OFF (défaut) : octets d'origine transmis tels quels, comme avant.
+        // Drapeau ON : conversion en gris à résolution NATURELLE (aucune réduction).
+        const prep=await preparerImageBanquePourOcr(file);
+        journaliserMesure(`image ${file.name}`,prep.mesure);
+        const base64=prep.base64;
         {
-          const r=await extraireTransactionsVision({data:{images:[{base64,mime_type:file.type}]}});
+          const r=await extraireTransactionsVision({data:{images:[{base64,mime_type:prep.mimeType}]}});
           txBrutes=r.txs;
           if(r.info) info=r.info; // en-tête (banque/RIB/soldes) extrait par Mistral
         }
@@ -911,57 +920,80 @@ function BanquePage() {
         // Toutes les moitiés partent dans un seul appel ; le serveur les traite à la
         // suite puis déduplique le recouvrement.
         // Info de repli : en-tête parsé côté client (utile si Mistral échoue).
-        info=parserRelevePDF(fullText).info;
+        const parseLocal=parserRelevePDF(fullText);
+        info=parseLocal.info;
 
-        // ── OPTION PRINCIPALE : Mistral OCR sur le PDF complet (rapide, 1 appel) ──
-        const pdfB64=await new Promise<string>((res,rej)=>{
-          const r=new FileReader();
-          r.onload=()=>res((r.result as string).split(",")[1]);
-          r.onerror=rej;
-          r.readAsDataURL(file);
-        });
-        toast.info("OCR Mistral en cours…");
-        let vision=await extraireTransactionsVision({data:{images:[],pdf_base64:pdfB64}});
+        // ── FAST PATH TEXTE ────────────────────────────────────────────────────
+        // Un relevé téléchargé depuis l'e-banking possède une vraie couche texte :
+        // `parserRelevePDF` vient d'en extraire les transactions en quelques ms,
+        // avec le sens débit/crédit donné par la POSITION X des colonnes (marqueurs
+        // <D:>/<C:> posés plus haut) — donc sans aucune lecture de pixels.
+        // On ne s'en contente QUE si l'extraction est prouvée : solde_initial
+        // + Σ crédits − Σ débits doit retomber sur solde_final au centime près.
+        // Un montant mal lu, une ligne perdue ou une colonne inversée casse cette
+        // égalité → on repart alors sur l'OCR exactement comme avant.
+        // Gain : plusieurs secondes d'aller-retour Mistral supprimées, et sur ce
+        // chemin les chiffres ne transitent JAMAIS par un OCR.
+        const controle=controlerCoherenceReleve(parseLocal.txs,parseLocal.info);
+        console.log(`[FAST PATH texte] ${resumerCoherence(controle)}`);
 
-        // ══════════ DEBUG : MARKDOWN OCR BRUT (à copier-coller et m'envoyer) ══════════
-        if((vision as any).markdown){
-          console.log("%c[MISTRAL OCR] MARKDOWN BRUT ↓↓↓ (copier tout ce bloc)","color:#e11;font-weight:bold;font-size:14px");
-          console.log((vision as any).markdown);
-          console.log("%c[MISTRAL OCR] FIN MARKDOWN BRUT ↑↑↑","color:#e11;font-weight:bold;font-size:14px");
-        }
-        // ═════════════════════════════════════════════════════════════════════════════
+        if(controle.fiable){
+          txBrutes=parseLocal.txs.map((t:any,i:number)=>({...t,ligne:t.ligne??i+1}));
+          toast.success(`${txBrutes.length} transactions lues dans le texte du PDF — soldes vérifiés au centime`);
+        } else {
+          // ── OPTION PRINCIPALE : Mistral OCR sur le PDF complet (rapide, 1 appel) ──
+          const pdfB64=await new Promise<string>((res,rej)=>{
+            const r=new FileReader();
+            r.onload=()=>res((r.result as string).split(",")[1]);
+            r.onerror=rej;
+            r.readAsDataURL(file);
+          });
+          toast.info("OCR Mistral en cours…");
+          let vision=await extraireTransactionsVision({data:{images:[],pdf_base64:pdfB64}});
 
-        // ── SECOURS : rendu page→moitiés + Vision Groq (si Mistral indispo) ──
-        if(vision.txs.length===0){
-          toast.info(`Conversion des ${pdf.numPages} page(s) en images…`);
-          const pdfjsLib=await import("pdfjs-dist");   // client-only (cf. note en tête de fichier)
-          const images:{base64:string;mime_type:string}[]=[];
-          for(let p=1;p<=pdf.numPages;p++){
-            const halves=await pdfPageToHalves(pdfjsLib,ab,p);
-            for(const h of halves) images.push({base64:h,mime_type:"image/jpeg"});
+          // ══════════ DEBUG : MARKDOWN OCR BRUT (à copier-coller et m'envoyer) ══════════
+          if((vision as any).markdown){
+            console.log("%c[MISTRAL OCR] MARKDOWN BRUT ↓↓↓ (copier tout ce bloc)","color:#e11;font-weight:bold;font-size:14px");
+            console.log((vision as any).markdown);
+            console.log("%c[MISTRAL OCR] FIN MARKDOWN BRUT ↑↑↑","color:#e11;font-weight:bold;font-size:14px");
           }
-          toast.info("Analyse Vision IA en cours…");
-          vision=await extraireTransactionsVision({data:{images}});
+          // ═════════════════════════════════════════════════════════════════════════════
+
+          // ── SECOURS : rendu page→moitiés + Vision Groq (si Mistral indispo) ──
+          if(vision.txs.length===0){
+            toast.info(`Conversion des ${pdf.numPages} page(s) en images…`);
+            const images:{base64:string;mime_type:string}[]=[];
+            const mesures:MesureGrayscale[]=[];
+            // Le document pdf.js est DÉJÀ ouvert (`pdf`) : le repasser évite de
+            // re-parser tout le PDF — et d'en recopier les octets — à chaque page.
+            for(let p=1;p<=pdf.numPages;p++){
+              const halves=await pdfPageToHalves(pdf,p,mesures);
+              for(const h of halves) images.push({base64:h,mime_type:"image/jpeg"});
+            }
+            journaliserMesure(`PDF scanné — ${pdf.numPages} page(s) → ${images.length} image(s)`,cumulerMesures(mesures));
+            toast.info("Analyse Vision IA en cours…");
+            vision=await extraireTransactionsVision({data:{images}});
+          }
+          // Si Mistral a tourné (markdown présent), ses soldes FONT FOI — ils sont
+          // issus des seules lignes SOLDE du relevé (règle 2). On NE retombe PAS sur
+          // le parser client parserRelevePDF, qui prend à tort la 1re transaction
+          // comme solde initial. solde_initial = 0 est une valeur VALIDE (relevé sans
+          // ligne de solde de départ) : on l'accepte telle quelle (pas de test truthy).
+          if((vision as any).markdown && vision.info){
+            info.banque = vision.info.banque || info.banque;
+            info.rib = vision.info.rib || info.rib;
+            info.solde_initial = vision.info.solde_initial; // 0 accepté
+            info.solde_final = vision.info.solde_final;     // 0 accepté
+          } else if(vision.info){
+            if(vision.info.rib) info.rib=vision.info.rib;
+            if(vision.info.banque && vision.info.banque!=="Banque (OCR)") info.banque=vision.info.banque;
+            if(vision.info.solde_initial) info.solde_initial=vision.info.solde_initial;
+            if(vision.info.solde_final) info.solde_final=vision.info.solde_final;
+          }
+          console.log("[VISION BRUT] sortie avant tout traitement:",JSON.stringify(vision.txs,null,2));
+          txBrutes=vision.txs.map((t:any,i:number)=>({...t,ligne:i+1}));
+          toast.success(`${pdf.numPages} page${pdf.numPages>1?"s":""} analysée${pdf.numPages>1?"s":""}`);
         }
-        // Si Mistral a tourné (markdown présent), ses soldes FONT FOI — ils sont
-        // issus des seules lignes SOLDE du relevé (règle 2). On NE retombe PAS sur
-        // le parser client parserRelevePDF, qui prend à tort la 1re transaction
-        // comme solde initial. solde_initial = 0 est une valeur VALIDE (relevé sans
-        // ligne de solde de départ) : on l'accepte telle quelle (pas de test truthy).
-        if((vision as any).markdown && vision.info){
-          info.banque = vision.info.banque || info.banque;
-          info.rib = vision.info.rib || info.rib;
-          info.solde_initial = vision.info.solde_initial; // 0 accepté
-          info.solde_final = vision.info.solde_final;     // 0 accepté
-        } else if(vision.info){
-          if(vision.info.rib) info.rib=vision.info.rib;
-          if(vision.info.banque && vision.info.banque!=="Banque (OCR)") info.banque=vision.info.banque;
-          if(vision.info.solde_initial) info.solde_initial=vision.info.solde_initial;
-          if(vision.info.solde_final) info.solde_final=vision.info.solde_final;
-        }
-        console.log("[VISION BRUT] sortie avant tout traitement:",JSON.stringify(vision.txs,null,2));
-        txBrutes=vision.txs.map((t:any,i:number)=>({...t,ligne:i+1}));
-        toast.success(`${pdf.numPages} page${pdf.numPages>1?"s":""} analysée${pdf.numPages>1?"s":""}`);
       } // ferme else(!isImage)
 
       setInfoReleve(info);

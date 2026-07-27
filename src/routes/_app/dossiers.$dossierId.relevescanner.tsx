@@ -14,6 +14,7 @@ import { memoriserTiers } from "@/server/tiers-memoire.functions";
 import { runDocumentJob } from "@/hooks/useDocumentJob";
 import { parseAttijariReleve, extractRibMarocain } from "@/lib/releve-attijari";
 import { enregistrerPaiement } from "@/lib/paiements";
+import { traiterPagesEnPipeline } from "@/lib/pipeline-pages";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/relevescanner")({
   component: RelEveScanner,
@@ -303,9 +304,11 @@ function RelEveScanner() {
   };
 
   // Rendu d'une page PDF en base64 JPEG via canvas (pour CamScanned PDFs)
-  const pdfPageToBase64 = async (pdfjsLib: any, ab: ArrayBuffer, pageNum: number): Promise<string> => {
-    const pdf = await pdfjsLib.getDocument({ data: ab.slice(0) }).promise;
-    const page = await pdf.getPage(pageNum);
+  // Reçoit le document pdf.js DÉJÀ ouvert : ré-ouvrir le PDF (et recopier son
+  // ArrayBuffer) à chaque page faisait re-parser tout le fichier N fois.
+  // La résolution de rendu (scale 2.0) et la qualité JPEG sont inchangées.
+  const pdfPageToBase64 = async (pdfDoc: any, pageNum: number): Promise<string> => {
+    const page = await pdfDoc.getPage(pageNum);
     const viewport = page.getViewport({ scale: 2.0 });
     const canvas = document.createElement("canvas");
     canvas.width = viewport.width;
@@ -390,14 +393,23 @@ function RelEveScanner() {
           toast.info("PDF scanné détecté — OCR vision en cours…");
           const allTxs: any[] = [];
           let lastSoldeFinal: number | undefined;
-          for (let p = 1; p <= pdf.numPages; p++) {
-            const base64 = await pdfPageToBase64(pdfjsLib, ab, p);
-            const result = await ocrReleve({ data: { image_base64: base64, mime_type: "image/jpeg", solde_initial_override: lastSoldeFinal, dossier_id: dossierId, scan_key: scanKey } });
-            // Le solde_final de cette page = solde_initial de la page suivante
-            if (result.info.solde_final > 0) lastSoldeFinal = result.info.solde_final;
-            allTxs.push(...result.txs.map((t: any, i: number) => ({ ...t, ligne: allTxs.length + i + 1 })));
-            if (p === 1) info = result.info;
-          }
+          // Le rendu canvas de la page p+1 se fait PENDANT que l'OCR de la page p
+          // est en vol (cf. traiterPagesEnPipeline, testé). Les appels ocrReleve
+          // restent strictement séquentiels et dans l'ordre des pages : le chaînage
+          // des soldes (solde_final de p → solde_initial_override de p+1, qui
+          // conditionne aussi le filtre « SOLDE REPORTÉ » côté serveur) est donc
+          // rigoureusement inchangé. Seul le rendu sort du chemin critique.
+          await traiterPagesEnPipeline(
+            pdf.numPages,
+            (p) => pdfPageToBase64(pdf, p),
+            async (base64, p) => {
+              const result = await ocrReleve({ data: { image_base64: base64, mime_type: "image/jpeg", solde_initial_override: lastSoldeFinal, dossier_id: dossierId, scan_key: scanKey } });
+              // Le solde_final de cette page = solde_initial de la page suivante
+              if (result.info.solde_final > 0) lastSoldeFinal = result.info.solde_final;
+              allTxs.push(...result.txs.map((t: any, i: number) => ({ ...t, ligne: allTxs.length + i + 1 })));
+              if (p === 1) info = result.info;
+            },
+          );
           txBrutes = allTxs;
         } else {
           // ── PDF numérique texte → parser multi-banques ───────────────────────

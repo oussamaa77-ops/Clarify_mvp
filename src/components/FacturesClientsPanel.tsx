@@ -17,6 +17,7 @@ import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/componen
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
+import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { FacturesFiltres } from "@/components/FacturesFiltres";
 import { filtrerFactures, joursRetard, trancheRetard, type CriteresFiltre } from "@/lib/factures-filtres";
@@ -331,11 +332,12 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
           throw err; // le catch externe affiche le toast unique
         }
       } else if (isImage) {
-        image_base64 = await new Promise<string>((res, rej) => {
-          const r = new FileReader();
-          r.onload = () => { const full = r.result as string; res(full.includes(",") ? full.split(",")[1] : full); };
-          r.onerror = rej; r.readAsDataURL(file);
-        });
+        // Allègement du payload avant l'envoi (1800 px max, JPEG 85 %) : c'est le
+        // transfert de l'image brute qui dominait la latence de scan en prod.
+        const payload = await preparerImagePourOcr(file);
+        journaliserPayload("facture client", payload);
+        image_base64 = payload.base64;
+        mime_type = payload.mimeType;
       } else {
         extractedText = await file.text();
       }
