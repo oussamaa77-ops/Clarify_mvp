@@ -5,11 +5,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TrendingUp, Wallet, FileText, ShoppingCart, AlertCircle, CheckCircle, Clock, AlertTriangle, Users, Building2, Receipt, Mail, Loader2, Landmark, ArrowLeftRight, ExternalLink } from "lucide-react";
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell, BarChart, Bar } from "recharts";
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, BarChart, Bar } from "recharts";
 import {
   synthetiserTva, tvaRecuperableEnCours, echeanceSimplTva, joursAvant,
-  ventilerChargesPcm, balanceAgeeDashboard, calculerCashFlow,
+  ventilerChargesParCompte, ventilerVentesParCompte, balanceAgeeDashboard, calculerCashFlow,
 } from "@/lib/dashboard-fiscal";
+import { RepartitionDepensesPcm } from "@/components/RepartitionDepensesPcm";
+import { RepartitionVentesPcm } from "@/components/RepartitionVentesPcm";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { envoyerRappelTVA } from "@/server/fiscalite.functions";
@@ -20,22 +22,6 @@ import { logAudit } from "@/lib/audit";
 export const Route = createFileRoute("/_app/dossiers/$dossierId/dashboard")({ component: DashboardPage });
 
 const fmt = (n: number) => Number(n).toLocaleString("fr-MA", { minimumFractionDigits: 2 }) + " MAD";
-
-/**
- * Palette du donut de charges, indexée par CLÉ de groupe et non par rang : les
- * groupes vides sont écartés de la ventilation, donc un index de tableau donnait
- * au même poste une couleur différente selon les dossiers (et l'ajout d'un groupe
- * repeignait tout le monde). Teintes vérifiées par paires adjacentes (séparation
- * daltonisme) dans cet ordre de légende.
- */
-const COULEURS_PCM: Record<string, string> = {
-  marchandises: "#2563eb",
-  non_stockes:  "#db2777",
-  matieres:     "#10b981",
-  services:     "#f59e0b",
-  personnel:    "#8b5cf6",
-  autres:       "#94a3b8",
-};
 
 // ── Transactions bancaires NON LETTRÉES du dossier, ventilées par relevé ────────
 // « non lettrée » = ni facture ni justificatif lié (même définition que la colonne
@@ -80,8 +66,11 @@ function DashboardPage() {
   const [factures, setFactures] = useState<any[]>([]);
   const [ff, setFf] = useState<any[]>([]);
   const [alertes, setAlertes] = useState<any[]>([]);
-  // Écritures de charges (classe 6) — ventilation des dépenses par compte PCM.
-  const [ecrCharges, setEcrCharges] = useState<any[]>([]);
+  // Écritures d'exploitation : charges (classe 6) ET produits (classe 7), pour
+  // les deux donuts de répartition par compte PCM.
+  const [ecrExploitation, setEcrExploitation] = useState<any[]>([]);
+  // Intitulés du référentiel PCM (numéro → intitulé), pour nommer chaque poste.
+  const [intitulesPcm, setIntitulesPcm] = useState<Record<string, string>>({});
   const [comptesBancaires, setComptesBancaires] = useState<CompteBancaire[]>([]);
   const [releves, setReleves] = useState<ReleveResume[]>([]);
   const [flux, setFlux] = useState<FluxNonLettres>({ parReleve: {}, ok: true });
@@ -94,7 +83,7 @@ function DashboardPage() {
 
   useEffect(() => {
     (async () => {
-      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }] = await Promise.all([
+      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }, { data: pcm }] = await Promise.all([
         supabase.from("dossiers").select("nom_societe,ice,statut").eq("id", dossierId).single(),
         // Ajouter montant_paye et montant_restant pour calculs corrects + tiers pour les alertes
         supabase.from("factures").select("numero,statut,statut_paiement,montant_ht,montant_ttc,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,clients(nom)").eq("dossier_id", dossierId),
@@ -111,9 +100,15 @@ function DashboardPage() {
         // requête — la carte croirait alors qu'il n'y a aucun relevé.
         (supabase.from("releves_bancaires") as any).select("*").eq("dossier_id", dossierId).order("created_at", { ascending: false }),
         chargerFluxNonLettres(dossierId),
-        // Charges (classe 6) pour la ventilation par compte PCM. C'est la seule
-        // source portant un compte PCM : `factures_fournisseurs` n'en a pas.
-        supabase.from("ecritures_comptables").select("compte_numero,debit,credit,date_ecriture").eq("dossier_id", dossierId).like("compte_numero", "6%"),
+        // Charges (classe 6) ET produits (classe 7) pour les deux ventilations
+        // par compte PCM. Les écritures sont la seule source portant un compte :
+        // ni `factures` ni `factures_fournisseurs` n'en ont.
+        supabase.from("ecritures_comptables").select("compte_numero,debit,credit,date_ecriture")
+          .eq("dossier_id", dossierId).or("compte_numero.like.6%,compte_numero.like.7%"),
+        // Référentiel PCM (global, sans dossier_id) : donne son INTITULÉ à chaque
+        // compte. Limité aux classes 6 et 7 — le reste ne sert pas ici.
+        supabase.from("pcm_reference").select("numero,intitule")
+          .or("numero.like.6%,numero.like.7%"),
       ]);
       setDossier(d);
       setFactures(f ?? []);
@@ -122,7 +117,8 @@ function DashboardPage() {
       setComptesBancaires((cb ?? []) as CompteBancaire[]);
       setReleves((rel ?? []) as ReleveResume[]);
       setFlux(fluxNonLettres);
-      setEcrCharges(charges ?? []);
+      setEcrExploitation(charges ?? []);
+      setIntitulesPcm(Object.fromEntries(((pcm ?? []) as any[]).map(c => [c.numero, c.intitule])));
       setLoading(false);
     })();
   }, [dossierId]);
@@ -217,8 +213,13 @@ function DashboardPage() {
   const joursSimpl = echeanceSimpl ? joursAvant(echeanceSimpl, today) : null;
 
   // ── Graphiques : ventilation PCM + balance âgée ─────────────────────────────
-  const partsCharges = ventilerChargesPcm(ecrCharges);
+  // Les intitulés viennent du référentiel `pcm_reference` — la même source que le
+  // datalist des comptes de la page Comptabilité, pour qu'un compte porte le même
+  // nom partout dans l'application.
+  const partsCharges = ventilerChargesParCompte(ecrExploitation, { intitules: intitulesPcm });
   const totalCharges = partsCharges.reduce((s, p) => s + p.montant, 0);
+  const partsVentes = ventilerVentesParCompte(ecrExploitation, { intitules: intitulesPcm });
+  const totalVentes = partsVentes.reduce((s, p) => s + p.montant, 0);
   const tranchesAgees = balanceAgeeDashboard(factures, ff, today);
 
   // ── Trésorerie : marge brute réelle sur flux encaissés/décaissés ────────────
@@ -491,37 +492,27 @@ function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* ── GRAPHIQUES : dépenses PCM + balance âgée ──────────────────────── */}
+          {/* ── GRAPHIQUES : les deux ventilations PCM, côte à côte ───────────── */}
+          {/* Dépenses et ventes partagent la même échelle de lecture (donut,
+              5 postes + reliquat, mêmes couleurs) : les mettre l'un à côté de
+              l'autre permet de comparer d'où vient l'argent et où il part. */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <Card>
-              <CardHeader><CardTitle className="text-base">Répartition des dépenses par catégorie PCM</CardTitle></CardHeader>
+              <CardHeader><CardTitle className="text-base">Répartition des dépenses par compte PCM</CardTitle></CardHeader>
               <CardContent>
-                {partsCharges.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-12 text-center">
-                    Aucune charge comptabilisée (classe 6).
-                  </p>
-                ) : (
-                  <>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <PieChart>
-                        <Pie data={partsCharges} dataKey="montant" nameKey="label"
-                          innerRadius={55} outerRadius={90} paddingAngle={2}>
-                          {partsCharges.map((p) => (
-                            <Cell key={p.cle} fill={COULEURS_PCM[p.cle] ?? COULEURS_PCM.autres} />
-                          ))}
-                        </Pie>
-                        <Tooltip formatter={(v: any, n: any) => [fmt(Number(v)), n]} />
-                        <Legend wrapperStyle={{ fontSize: 11 }} />
-                      </PieChart>
-                    </ResponsiveContainer>
-                    <p className="text-xs text-muted-foreground text-center">
-                      Total charges : <span className="font-semibold text-foreground">{fmt(totalCharges)}</span>
-                    </p>
-                  </>
-                )}
+                <RepartitionDepensesPcm parts={partsCharges} total={totalCharges} />
               </CardContent>
             </Card>
 
+            <Card>
+              <CardHeader><CardTitle className="text-base">Répartition du chiffre d'affaires par compte PCM</CardTitle></CardHeader>
+              <CardContent>
+                <RepartitionVentesPcm parts={partsVentes} total={totalVentes} />
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6">
             <Card>
               <CardHeader><CardTitle className="text-base">Balance âgée — créances &amp; dettes</CardTitle></CardHeader>
               <CardContent>

@@ -2,6 +2,8 @@
 // Logique pure, testable sans rendu : c'est ici que vit la règle métier, les
 // écrans ne font que l'afficher.
 
+import { DICTIONNAIRE_PCM } from "./categorization-engine";
+
 /** Facture (vente ou achat) vue sous l'angle des montants et du règlement. */
 export interface FactureFiscale {
   montant_ht?: number | null;
@@ -117,7 +119,7 @@ export function joursAvant(echeance: Date, aujourdhui: Date = new Date()): numbe
   return Math.round((a - b) / 86400000);
 }
 
-// ─── Ventilation des charges par compte PCM ──────────────────────────────────
+// ─── Ventilation par compte PCM (charges classe 6 / ventes classe 7) ─────────
 
 export interface EcritureCharge {
   compte_numero?: string | null;
@@ -126,76 +128,204 @@ export interface EcritureCharge {
   date_ecriture?: string | null;
 }
 
-export interface GroupePcm {
-  cle: string;
-  label: string;
-  /** Préfixes de comptes PCM regroupés. */
-  prefixes: string[];
-}
+/**
+ * Rubriques PCM à 3 chiffres (CGNC) — DERNIER repli d'intitulé, quand ni le
+ * référentiel ni le dictionnaire ne connaissent le compte exact. Un compte
+ * inventé par l'OCR (6137 chez un dossier) reste ainsi rattaché à une rubrique
+ * réelle plutôt que de s'afficher « — ».
+ */
+const RUBRIQUES_PCM: Record<string, string> = {
+  "611": "Achats revendus de marchandises",
+  "612": "Achats consommés de matières et fournitures",
+  "613": "Autres charges externes",
+  "614": "Autres charges externes",
+  "616": "Impôts et taxes",
+  "617": "Charges de personnel",
+  "618": "Autres charges d'exploitation",
+  "619": "Dotations d'exploitation",
+  "631": "Charges d'intérêts",
+  "633": "Pertes de change",
+  "638": "Autres charges financières",
+  "639": "Dotations financières",
+  "651": "VNA des immobilisations cédées",
+  "656": "Subventions accordées",
+  "658": "Autres charges non courantes",
+  "659": "Dotations non courantes",
+  "670": "Impôts sur les résultats",
+  // ── Classe 7 — produits ──
+  "711": "Ventes de marchandises",
+  "712": "Ventes de biens et services produits",
+  "713": "Variation des stocks de produits",
+  "714": "Immobilisations produites par l'entreprise pour elle-même",
+  "716": "Subventions d'exploitation",
+  "718": "Autres produits d'exploitation",
+  "719": "Reprises d'exploitation ; transferts de charges",
+  "732": "Produits des titres de participation",
+  "733": "Gains de change",
+  "738": "Intérêts et autres produits financiers",
+  "739": "Reprises financières ; transferts de charges",
+  "751": "Produits de cession des immobilisations",
+  "756": "Subventions d'équilibre",
+  "757": "Reprises sur subventions d'investissement",
+  "758": "Autres produits non courants",
+  "759": "Reprises non courantes ; transferts de charges",
+};
 
 /**
- * Regroupements demandés pour la ventilation des dépenses. « Autres charges »
- * capture le reste de la classe 6 : sans lui, le total du graphique serait
- * inférieur aux charges réelles et induirait en erreur.
+ * Intitulés portés par le moteur de catégorisation : il descend PLUS FIN que le
+ * référentiel `pcm_reference` (61455 « Frais de télécommunications », 61254
+ * « Fournitures de bureau »…) parce que ce sont les comptes qu'il IMPUTE. Sans
+ * ce repli, un sous-compte s'afficherait sous l'intitulé de son parent.
  *
- * ORDRE SIGNIFICATIF — la ventilation retient le PREMIER groupe dont un préfixe
- * matche : un préfixe plus précis doit donc précéder le plus général qui le
- * contient (6125 avant 612), sinon il ne serait jamais atteint. L'ordre est
- * aussi celui de la légende du donut.
+ * Pas de filtre sur le sens : un numéro de compte n'appartient qu'à une classe,
+ * charge (6) ou produit (7), donc la table ne peut pas se contredire — et une
+ * future règle « produit » profitera automatiquement au donut des ventes.
  */
-export const GROUPES_PCM: GroupePcm[] = [
-  { cle: "marchandises", label: "Achats de marchandises",       prefixes: ["611"] },
-  // 6125 « Achats NON STOCKÉS de matières et fournitures » (CGNC) : eau 61251,
-  // électricité 61252, fournitures de bureau 61254… Ce sont des consommables du
-  // quotidien, pas de la matière première transformée — les afficher sous
-  // « Matières premières » (612) faussait la lecture du donut.
-  { cle: "non_stockes",  label: "Eau, énergie & fournitures",   prefixes: ["6125"] },
-  { cle: "matieres",     label: "Matières premières",           prefixes: ["612"] },
-  { cle: "services",     label: "Services extérieurs & Loyers", prefixes: ["613", "614"] },
-  { cle: "personnel",    label: "Charges de personnel",         prefixes: ["617"] },
-];
+const INTITULES_MOTEUR: Record<string, string> = Object.fromEntries(
+  DICTIONNAIRE_PCM.map((r) => [r.compte, r.label]),
+);
 
-export interface PartCharge {
-  cle: string;
-  label: string;
+/**
+ * Intitulé d'un compte de charge ou de produit, du plus précis au plus général :
+ *   1. le référentiel PCM du cabinet (`pcm_reference`, passé par l'appelant) ;
+ *   2. le dictionnaire du moteur de catégorisation (sous-comptes) ;
+ *   3. le compte parent (61312 → 6131) — un sous-compte hérite de son poste ;
+ *   4. la rubrique à 3 chiffres (6137 → 613 « Autres charges externes »).
+ *
+ * On n'invente jamais : à défaut, l'intitulé reste vide et l'écran n'affiche que
+ * le numéro de compte, qui lui est certain.
+ */
+export function intitulePcm(compte: string, catalogue: Record<string, string> = {}): string {
+  const c = String(compte ?? "").trim();
+  if (!c) return "";
+  for (let i = c.length; i >= 4; i--) {
+    const cle = c.slice(0, i);
+    const hit = catalogue[cle] ?? INTITULES_MOTEUR[cle];
+    if (hit) return hit;
+  }
+  return RUBRIQUES_PCM[c.slice(0, 3)] ?? "";
+}
+
+/** Un poste du donut : un compte PCM réel, ou le reliquat regroupé. */
+export interface PartComptePcm {
+  /** Numéro de compte tel qu'il est enregistré en comptabilité (« 6145 »). */
+  compte: string;
+  /** Intitulé PCM résolu (« Frais postaux et frais de télécommunications »). */
+  intitule: string;
+  /** Montant HT de la période (solde débiteur en classe 6, créditeur en 7). */
   montant: number;
+  /** Proportion EXACTE dans le total affiché, entre 0 et 1 (non arrondie). */
+  part: number;
+  /** Comptes agrégés — renseigné uniquement sur la tranche de reliquat. */
+  regroupe?: string[];
+}
+
+/** Clé de la tranche de reliquat, commune aux deux donuts. */
+export const COMPTE_AUTRES = "autres";
+export const LIBELLE_AUTRES_CHARGES = "Autres charges";
+export const LIBELLE_AUTRES_VENTES = "Autres ventes";
+/** Nombre de postes nommés affichés avant regroupement du reliquat. */
+export const MAX_POSTES_PCM = 5;
+
+interface OptionsVentilation {
+  debut?: string;
+  fin?: string;
+  max?: number;
+  intitules?: Record<string, string>;
 }
 
 /**
- * Ventile les charges (classe 6) par groupe PCM. Une charge est un solde
- * DÉBITEUR : on retranche le crédit pour que les avoirs et annulations
- * viennent en diminution plutôt que de gonfler la dépense.
+ * Ventilation par COMPTE PCM RÉEL — un poste = un compte du grand livre, jamais
+ * un regroupement maison au libellé vague. Moteur commun aux deux donuts ; seuls
+ * changent la classe retenue et le SENS du solde.
  *
- * Les groupes vides sont écartés — un donut à secteurs nuls n'apprend rien.
+ * Les écritures de classe 6 et 7 sont HT par construction : la TVA part en 34552
+ * (déductible) ou 44551 (collectée) à la saisie, elle n'entre jamais ici.
+ *
+ * Le solde est pris dans le sens NATUREL du compte — débiteur pour une charge,
+ * créditeur pour un produit — afin que les avoirs, remises et annulations
+ * viennent en diminution plutôt que de gonfler le poste. Un compte au solde nul
+ * ou inversé est écarté : un secteur négatif ne se dessine pas, un secteur nul
+ * n'apprend rien.
+ *
+ * Au-delà de `max` comptes, seuls les `max` plus gros sont nommés et TOUT le
+ * reste est regroupé, sans exception — y compris un reliquat d'un seul compte :
+ * la règle doit être lisible à l'œil (« les 5 plus gros postes, puis le reste »),
+ * pas conditionnelle. Le total reste exact, aucun montant ne disparaît, et le
+ * détail des comptes regroupés reste accessible via `regroupe`.
  */
-export function ventilerChargesPcm(
+function ventilerParCompte(
   ecritures: EcritureCharge[],
-  opts: { debut?: string; fin?: string; avecAutres?: boolean } = {},
-): PartCharge[] {
+  classe: "6" | "7",
+  libelleAutres: string,
+  opts: OptionsVentilation,
+): PartComptePcm[] {
+  const max = opts.max ?? MAX_POSTES_PCM;
   const totaux = new Map<string, number>();
-  let autres = 0;
 
   for (const e of ecritures) {
     const compte = (e.compte_numero ?? "").trim();
-    if (!compte.startsWith("6")) continue;
+    if (!compte.startsWith(classe)) continue;
     const d = (e.date_ecriture ?? "").slice(0, 10);
     if (opts.debut && (!d || d < opts.debut)) continue;
     if (opts.fin && (!d || d > opts.fin)) continue;
-
-    const montant = n(e.debit) - n(e.credit);
-    const groupe = GROUPES_PCM.find((g) => g.prefixes.some((p) => compte.startsWith(p)));
-    if (groupe) totaux.set(groupe.cle, (totaux.get(groupe.cle) ?? 0) + montant);
-    else autres += montant;
+    const solde = classe === "6" ? n(e.debit) - n(e.credit) : n(e.credit) - n(e.debit);
+    totaux.set(compte, (totaux.get(compte) ?? 0) + solde);
   }
 
-  const parts: PartCharge[] = GROUPES_PCM
-    .map((g) => ({ cle: g.cle, label: g.label, montant: round2(totaux.get(g.cle) ?? 0) }))
-    .filter((p) => p.montant > 0);
+  // Tri par poids décroissant ; à montant égal, par n° de compte pour que deux
+  // rendus successifs des mêmes données donnent exactement le même graphique.
+  const postes = [...totaux.entries()]
+    .map(([compte, montant]) => ({ compte, montant: round2(montant) }))
+    .filter((p) => p.montant > 0)
+    .sort((a, b) => b.montant - a.montant || a.compte.localeCompare(b.compte));
 
-  if (opts.avecAutres !== false && round2(autres) > 0) {
-    parts.push({ cle: "autres", label: "Autres charges", montant: round2(autres) });
+  const nommes = postes.length > max ? postes.slice(0, max) : postes;
+  const reliquat = postes.slice(nommes.length);
+
+  const parts: PartComptePcm[] = nommes.map((p) => ({
+    compte: p.compte,
+    intitule: intitulePcm(p.compte, opts.intitules),
+    montant: p.montant,
+    part: 0,
+  }));
+
+  if (reliquat.length) {
+    parts.push({
+      compte: COMPTE_AUTRES,
+      intitule: libelleAutres,
+      montant: round2(reliquat.reduce((s, p) => s + p.montant, 0)),
+      part: 0,
+      regroupe: reliquat.map((p) => p.compte),
+    });
   }
-  return parts;
+
+  const total = parts.reduce((s, p) => s + p.montant, 0);
+  return total > 0 ? parts.map((p) => ({ ...p, part: p.montant / total })) : parts;
+}
+
+/** Charges HT (classe 6) par compte PCM — solde DÉBITEUR. */
+export function ventilerChargesParCompte(
+  ecritures: EcritureCharge[],
+  opts: OptionsVentilation = {},
+): PartComptePcm[] {
+  return ventilerParCompte(ecritures, "6", LIBELLE_AUTRES_CHARGES, opts);
+}
+
+/**
+ * Chiffre d'affaires HT (classe 7) par compte PCM — solde CRÉDITEUR.
+ *
+ * Le sens inversé n'est pas un détail : le compte 7129 « Rabais, remises et
+ * ristournes ACCORDÉS » est un compte de produit qui fonctionne au débit. Pris
+ * comme une charge, il apparaîtrait en poste de vente ; pris dans son sens
+ * naturel, il vient en diminution du CA et sort du graphique — ce qui est le
+ * comportement comptable attendu.
+ */
+export function ventilerVentesParCompte(
+  ecritures: EcritureCharge[],
+  opts: OptionsVentilation = {},
+): PartComptePcm[] {
+  return ventilerParCompte(ecritures, "7", LIBELLE_AUTRES_VENTES, opts);
 }
 
 // ─── Balance âgée (dashboard) ────────────────────────────────────────────────

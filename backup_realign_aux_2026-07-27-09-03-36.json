@@ -1,0 +1,403 @@
+{
+  "date": "2026-07-27T09:03:36.370Z",
+  "dossiers": [
+    {
+      "id": "1671b2b9-10c0-48a9-a85c-108cca65bae3",
+      "nom_societe": "aaaaaaaaaaaaaa"
+    },
+    {
+      "id": "51ae4507-dd75-4d87-aa6a-40b5c39b2fdf",
+      "nom_societe": "ATLAS TECH TRADING SARL"
+    },
+    {
+      "id": "3263a50b-e763-4063-82cf-7b2ad1e26328",
+      "nom_societe": "CabinetTest"
+    },
+    {
+      "id": "b64505dd-94ec-4d3a-9ab2-aa5637aec98b",
+      "nom_societe": "DIGITAL SOLUTIONS MAROC SARL AU"
+    },
+    {
+      "id": "94991c68-923c-4259-96c1-3f6298cbed69",
+      "nom_societe": "lamasol"
+    },
+    {
+      "id": "d5f33267-5443-45f3-9275-609bf5427103",
+      "nom_societe": "Societe 1_3"
+    },
+    {
+      "id": "8c37a591-1dfa-44ee-bd31-9f15f40c0a9d",
+      "nom_societe": "SOMADIR S.A."
+    },
+    {
+      "id": "5d0e1049-f767-487e-a284-4fb842c76573",
+      "nom_societe": "STE SMERT WATER"
+    }
+  ],
+  "modifications": [
+    {
+      "id": "10e01a16-4b34-49f9-a7c2-4810e94c03f3",
+      "dossier": "ATLAS TECH TRADING SARL",
+      "journal": "ACH",
+      "libelle": "Dette GLOBAL DISTRI ELECTRONICS SARL FR-2026-9912",
+      "date": "2026-05-05",
+      "montant": 52800,
+      "ancien": "4411",
+      "nouveau": "44110001",
+      "tiers": "GLOBAL DISTRI ELECTRONICS SARL",
+      "regle": "lien",
+      "detail": "facture fournisseur FR-2026-9912"
+    },
+    {
+      "id": "5c3003dd-4b87-4f8a-b6df-25840c409c32",
+      "dossier": "ATLAS TECH TRADING SARL",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2026-088",
+      "date": "2026-05-12",
+      "montant": 92400,
+      "ancien": "3421",
+      "nouveau": "34210001",
+      "tiers": "MAROC RETAIL SOLUTIONS SARL",
+      "regle": "lien",
+      "detail": "facture FAC-2026-088"
+    },
+    {
+      "id": "aa651754-156e-46c6-94a8-c05302f73991",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "journal": "ACH",
+      "libelle": "Dette AZUR BUREAU SARL FR - 2026 - 88",
+      "date": "2026-04-15",
+      "montant": 1440,
+      "ancien": "4411",
+      "nouveau": "44110001",
+      "tiers": "AZUR BUREAU SARL",
+      "regle": "lien",
+      "detail": "facture fournisseur FR - 2026 - 88"
+    },
+    {
+      "id": "924eb941-6d50-4372-8aeb-39b7b48eabc6",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "journal": "VTE",
+      "libelle": "Vente FAC - 2026 - 001",
+      "date": "2026-04-15",
+      "montant": 9000,
+      "ancien": "3421",
+      "nouveau": "34210002",
+      "tiers": "Yn ov SARL",
+      "regle": "lien",
+      "detail": "facture FAC - 2026 - 001"
+    },
+    {
+      "id": "47f21e17-48ad-4e43-aea8-fc43d8d131ef",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2024-04-102",
+      "date": "2026-04-24",
+      "montant": 34200,
+      "ancien": "3421",
+      "nouveau": "34210001",
+      "tiers": "NEXUS RETAIL MAGHREB SARL",
+      "regle": "lien",
+      "detail": "facture FAC-2024-04-102"
+    },
+    {
+      "id": "16f4b4c5-3aff-4144-8b8a-3d6a46987300",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "journal": "BQ",
+      "libelle": "Règlement client FAC - 2026 - 001",
+      "date": "2026-07-09",
+      "montant": 9000,
+      "ancien": "3421",
+      "nouveau": "34210002",
+      "tiers": "Yn ov SARL",
+      "regle": "lien",
+      "detail": "facture FAC - 2026 - 001"
+    },
+    {
+      "id": "058983e3-46f5-437d-b7b2-614c2b9008cf",
+      "dossier": "SOMADIR S.A.",
+      "journal": "BQ",
+      "libelle": ",//VIREMENT RECU - BOULANGERIE DU SUD SARL,VIR--\"\",\"\"",
+      "date": "2024-05-05",
+      "montant": 101.2,
+      "ancien": "3421",
+      "nouveau": "34210003",
+      "tiers": "BOULANGERIE DU SUD SARL",
+      "regle": "nom",
+      "detail": "nom « BOULANGERIE DU SUD SARL » reconnu dans le libellé"
+    },
+    {
+      "id": "6f365bb9-3c46-40ae-92c2-4f133b07cba7",
+      "dossier": "SOMADIR S.A.",
+      "journal": "VTE",
+      "libelle": "Vente FA-2024-0892",
+      "date": "2024-05-12",
+      "montant": 3468,
+      "ancien": "3421",
+      "nouveau": "34210002",
+      "tiers": "DIGITAL SOLUTIONS MAROC",
+      "regle": "lien",
+      "detail": "facture FA-2024-0892"
+    },
+    {
+      "id": "4c16f33e-b3e0-4731-8351-dc640f21b02f",
+      "dossier": "SOMADIR S.A.",
+      "journal": "BQ",
+      "libelle": ",//VIREMENT RECU - DIGITAL SOLUTIONS MAROC,VIR--\"\",\"\"",
+      "date": "2024-05-25",
+      "montant": 70.85,
+      "ancien": "3421",
+      "nouveau": "34210002",
+      "tiers": "DIGITAL SOLUTIONS MAROC",
+      "regle": "nom",
+      "detail": "nom « DIGITAL SOLUTIONS MAROC » reconnu dans le libellé"
+    },
+    {
+      "id": "dbe0f13b-19ef-4a9c-9fe2-810ecc51d45c",
+      "dossier": "SOMADIR S.A.",
+      "journal": "BQ",
+      "libelle": ",//VIREMENT RECU - DISTRI-FOOD MAROC,VIR--\"\",\"\"",
+      "date": "2024-05-30",
+      "montant": 2,
+      "ancien": "3421",
+      "nouveau": "34210004",
+      "tiers": "DISTRI-FOOD MAROC",
+      "regle": "nom",
+      "detail": "nom « DISTRI-FOOD MAROC » reconnu dans le libellé"
+    },
+    {
+      "id": "583f62ed-ddbb-4744-badf-399c25a4940b",
+      "dossier": "SOMADIR S.A.",
+      "journal": "ACH",
+      "libelle": "Dette fournisseur ATLAS PACKAGING MAROC SARL",
+      "date": "2024-11-15",
+      "montant": 20160,
+      "ancien": "4411",
+      "nouveau": "44110001",
+      "tiers": "ATLAS PACKAGING MAROC SARL",
+      "regle": "lien",
+      "detail": "facture fournisseur FAC-FOURNISSEUR-2024-0055"
+    },
+    {
+      "id": "bc308153-6c11-4044-932e-c7369b4b991d",
+      "dossier": "SOMADIR S.A.",
+      "journal": "BQ",
+      "libelle": "VIR SEPA RECU / FRM SUPER-PAIN MAROC / REF  FAC-2024-306",
+      "date": "2026-02-01",
+      "montant": 10800,
+      "ancien": "3421",
+      "nouveau": "34210005",
+      "tiers": "SUPER-PAIN MAROC SARL",
+      "regle": "piece",
+      "detail": "n° de pièce FAC-2024-306"
+    },
+    {
+      "id": "7b213633-dbc1-4cdb-86a7-ec51770e30de",
+      "dossier": "SOMADIR S.A.",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2024-308",
+      "date": "2026-04-20",
+      "montant": 1200,
+      "ancien": "3421",
+      "nouveau": "34210005",
+      "tiers": "SUPER-PAIN MAROC SARL",
+      "regle": "lien",
+      "detail": "facture FAC-2024-308"
+    },
+    {
+      "id": "40bfa98c-fabf-48b3-a5fe-3fbc36bc39e6",
+      "dossier": "SOMADIR S.A.",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2024-309",
+      "date": "2026-04-21",
+      "montant": 10800,
+      "ancien": "3421",
+      "nouveau": "34210005",
+      "tiers": "SUPER-PAIN MAROC SARL",
+      "regle": "lien",
+      "detail": "facture FAC-2024-309"
+    },
+    {
+      "id": "032a0663-da65-41e5-a45c-20ecb1683062",
+      "dossier": "SOMADIR S.A.",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2024-102",
+      "date": "2026-05-02",
+      "montant": 10632,
+      "ancien": "3421",
+      "nouveau": "34210004",
+      "tiers": "DISTRI-FOOD MAROC",
+      "regle": "lien",
+      "detail": "facture FAC-2024-102"
+    },
+    {
+      "id": "10128b5b-aec1-409c-a050-00b6557e42b8",
+      "dossier": "SOMADIR S.A.",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2024-306",
+      "date": "2026-05-05",
+      "montant": 10800,
+      "ancien": "3421",
+      "nouveau": "34210005",
+      "tiers": "SUPER-PAIN MAROC SARL",
+      "regle": "lien",
+      "detail": "facture FAC-2024-306"
+    },
+    {
+      "id": "10cffc9a-c526-454a-b6bb-9915b7ba42de",
+      "dossier": "SOMADIR S.A.",
+      "journal": "VTE",
+      "libelle": "Vente FAC-2024-307",
+      "date": "2026-05-06",
+      "montant": 11280,
+      "ancien": "3421",
+      "nouveau": "34210005",
+      "tiers": "SUPER-PAIN MAROC SARL",
+      "regle": "lien",
+      "detail": "facture FAC-2024-307"
+    },
+    {
+      "id": "72b4ce41-4951-4af5-9f20-e11b6c0074a8",
+      "dossier": "SOMADIR S.A.",
+      "journal": "CAI",
+      "libelle": "Paiement 24-0892",
+      "date": "2026-05-06",
+      "montant": 3468,
+      "ancien": "3421",
+      "nouveau": "34210002",
+      "tiers": "DIGITAL SOLUTIONS MAROC",
+      "regle": "piece",
+      "detail": "n° de pièce FA-2024-0892 (rapprochement partiel + montant identique)"
+    },
+    {
+      "id": "c4a98f32-392e-4c15-b319-0ceafd467481",
+      "dossier": "STE SMERT WATER",
+      "journal": "ACH",
+      "libelle": "Dette ACOSOLUTIONS FEV-25002568",
+      "date": "2025-12-16",
+      "montant": 24600,
+      "ancien": "4411",
+      "nouveau": "44110006",
+      "tiers": "ACOSOLUTIONS",
+      "regle": "lien",
+      "detail": "facture fournisseur FEV-25002568"
+    },
+    {
+      "id": "599e65a5-ecc7-4dff-a5b1-ceca4eb41458",
+      "dossier": "STE SMERT WATER",
+      "journal": "ACH",
+      "libelle": "Dette UNIMAGRI 09/60900087",
+      "date": "2026-01-20",
+      "montant": 17500,
+      "ancien": "4411",
+      "nouveau": "44110007",
+      "tiers": "UNIMAGRI",
+      "regle": "lien",
+      "detail": "facture fournisseur 09/60900087"
+    },
+    {
+      "id": "598f03f9-e02c-4941-91cc-9fd5c8bad829",
+      "dossier": "STE SMERT WATER",
+      "journal": "VTE",
+      "libelle": "Vente 09/60900087",
+      "date": "2026-01-26",
+      "montant": 21000,
+      "ancien": "3421",
+      "nouveau": "34210003",
+      "tiers": "ENT RIEGONOR SARL",
+      "regle": "lien",
+      "detail": "facture 09/60900087"
+    },
+    {
+      "id": "c10baed1-7e10-4762-b629-e299b1d4e0d5",
+      "dossier": "STE SMERT WATER",
+      "journal": "ACH",
+      "libelle": "Dette PRO-FLUIDES MAROC SARL",
+      "date": "2026-03-10",
+      "montant": 2629.02,
+      "ancien": "4411",
+      "nouveau": "44110003",
+      "tiers": "PRO-FLUIDES MAROC SARL",
+      "regle": "lien",
+      "detail": "facture fournisseur FA-2026-00964"
+    },
+    {
+      "id": "1e4ab157-e319-44ef-93f1-7c0ba877fc92",
+      "dossier": "STE SMERT WATER",
+      "journal": "VTE",
+      "libelle": "Acompte FA 0005",
+      "date": "2026-03-11",
+      "montant": 50400,
+      "ancien": "3421",
+      "nouveau": "34210001",
+      "tiers": "AGAF",
+      "regle": "lien",
+      "detail": "facture FA 0005"
+    },
+    {
+      "id": "54a7ac6b-9f59-45b2-a06a-f6a7ed79e3d1",
+      "dossier": "STE SMERT WATER",
+      "journal": "ACH",
+      "libelle": "Dette MAROC   TELECOM (IAM) SA FA-2026-90812",
+      "date": "2026-03-24",
+      "montant": 577.99,
+      "ancien": "4411",
+      "nouveau": "44110005",
+      "tiers": "MAROC   TELECOM (IAM) SA",
+      "regle": "lien",
+      "detail": "facture fournisseur FA-2026-90812"
+    },
+    {
+      "id": "3f070f20-1051-412a-b8eb-6970439c4b32",
+      "dossier": "STE SMERT WATER",
+      "journal": "ACH",
+      "libelle": "Dette TESDRAMENVEST SARL",
+      "date": "2026-03-25",
+      "montant": 433,
+      "ancien": "4411",
+      "nouveau": "44110004",
+      "tiers": "TESDRAMENVEST SARL",
+      "regle": "lien",
+      "detail": "facture fournisseur FA-2026-0342"
+    },
+    {
+      "id": "7f6971e8-4236-49ea-95e4-15bebbc44bb5",
+      "dossier": "STE SMERT WATER",
+      "journal": "VTE",
+      "libelle": "Vente FA-2026-0084",
+      "date": "2026-05-17",
+      "montant": 31572,
+      "ancien": "3421",
+      "nouveau": "34210003",
+      "tiers": "ENT RIEGONOR SARL",
+      "regle": "lien",
+      "detail": "facture FA-2026-0084"
+    },
+    {
+      "id": "bc9bf6d9-4c0c-42d1-bd4c-40a69a868e8a",
+      "dossier": "STE SMERT WATER",
+      "journal": "ACH",
+      "libelle": "Dette REPERAL-SARL FAC002_2026",
+      "date": "2026-06-20",
+      "montant": 14785,
+      "ancien": "4411",
+      "nouveau": "44110009",
+      "tiers": "REPERAL-SARL",
+      "regle": "lien",
+      "detail": "facture fournisseur FAC002_2026"
+    },
+    {
+      "id": "d0f1903f-4dcd-4418-8cd1-13a7d6a9cdc8",
+      "dossier": "STE SMERT WATER",
+      "journal": "CAI",
+      "libelle": "Règlement client 09/60900087",
+      "date": "2026-07-22",
+      "montant": 21000,
+      "ancien": "3421",
+      "nouveau": "34210003",
+      "tiers": "ENT RIEGONOR SARL",
+      "regle": "lien",
+      "detail": "facture 09/60900087"
+    }
+  ]
+}

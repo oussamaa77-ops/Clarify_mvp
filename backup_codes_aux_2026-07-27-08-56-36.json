@@ -1,0 +1,269 @@
+{
+  "date": "2026-07-27T08:56:37.002Z",
+  "dossiers": [
+    {
+      "id": "1671b2b9-10c0-48a9-a85c-108cca65bae3",
+      "nom_societe": "aaaaaaaaaaaaaa"
+    },
+    {
+      "id": "51ae4507-dd75-4d87-aa6a-40b5c39b2fdf",
+      "nom_societe": "ATLAS TECH TRADING SARL"
+    },
+    {
+      "id": "3263a50b-e763-4063-82cf-7b2ad1e26328",
+      "nom_societe": "CabinetTest"
+    },
+    {
+      "id": "b64505dd-94ec-4d3a-9ab2-aa5637aec98b",
+      "nom_societe": "DIGITAL SOLUTIONS MAROC SARL AU"
+    },
+    {
+      "id": "94991c68-923c-4259-96c1-3f6298cbed69",
+      "nom_societe": "lamasol"
+    },
+    {
+      "id": "d5f33267-5443-45f3-9275-609bf5427103",
+      "nom_societe": "Societe 1_3"
+    },
+    {
+      "id": "8c37a591-1dfa-44ee-bd31-9f15f40c0a9d",
+      "nom_societe": "SOMADIR S.A."
+    },
+    {
+      "id": "5d0e1049-f767-487e-a284-4fb842c76573",
+      "nom_societe": "STE SMERT WATER"
+    }
+  ],
+  "attributions": [
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "69fd1e78-ab50-4406-ab14-8ecd7215c579",
+      "nom": "MAROC RETAIL SOLUTIONS SARL",
+      "dossier": "ATLAS TECH TRADING SARL",
+      "ancien": null,
+      "code": "C0001",
+      "compte": "34210001"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "3c66baf5-5220-4c72-b441-052b558e9c5b",
+      "nom": "GLOBAL DISTRI ELECTRONICS SARL",
+      "dossier": "ATLAS TECH TRADING SARL",
+      "ancien": null,
+      "code": "F0001",
+      "compte": "44110001"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "1ee4978d-2b43-4bd7-94cb-547a9827efac",
+      "nom": "NEXUS RETAIL MAGHREB SARL",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "ancien": null,
+      "code": "C0001",
+      "compte": "34210001"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "a66061d9-d4af-4e52-b1fc-16a8a910bc37",
+      "nom": "Yn ov SARL",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "ancien": null,
+      "code": "C0002",
+      "compte": "34210002"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "68c337b9-9ca5-47a2-989e-9e060484a253",
+      "nom": "AZUR BUREAU SARL",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "ancien": null,
+      "code": "F0001",
+      "compte": "44110001"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "c6d90a2f-af99-4a0c-9434-041d0a1ff788",
+      "nom": "Ynov SARL",
+      "dossier": "SOMADIR S.A.",
+      "ancien": null,
+      "code": "C0001",
+      "compte": "34210001"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "fdf16337-e0fb-4639-9be9-997a04711eb2",
+      "nom": "DIGITAL SOLUTIONS MAROC",
+      "dossier": "SOMADIR S.A.",
+      "ancien": null,
+      "code": "C0002",
+      "compte": "34210002"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "ec73ed0a-c3bb-48e0-813a-e2b4c1f2a925",
+      "nom": "BOULANGERIE DU SUD SARL",
+      "dossier": "SOMADIR S.A.",
+      "ancien": null,
+      "code": "C0003",
+      "compte": "34210003"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "6315ae66-fed8-404b-bc62-90658251cc8a",
+      "nom": "DISTRI-FOOD MAROC",
+      "dossier": "SOMADIR S.A.",
+      "ancien": null,
+      "code": "C0004",
+      "compte": "34210004"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "2f7758c0-a286-4733-a9bc-bb234317d981",
+      "nom": "SUPER-PAIN MAROC SARL",
+      "dossier": "SOMADIR S.A.",
+      "ancien": null,
+      "code": "C0005",
+      "compte": "34210005"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "f83ea6a1-fb48-4040-8825-c1b33fbc45ff",
+      "nom": "ATLAS PACKAGING MAROC SARL",
+      "dossier": "SOMADIR S.A.",
+      "ancien": null,
+      "code": "F0001",
+      "compte": "44110001"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "bb603b4d-155e-4920-a676-0c439037f764",
+      "nom": "AGAF",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "C0001",
+      "compte": "34210001"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "0030bba2-653a-4bc2-852a-4e303db029d2",
+      "nom": "Atlas Distribution",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "C0002",
+      "compte": "34210002"
+    },
+    {
+      "table": "clients",
+      "type": "client",
+      "id": "15b9cdea-73d4-46c3-9143-e9f5716c002b",
+      "nom": "ENT RIEGONOR SARL",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "C0003",
+      "compte": "34210003"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "7d984ac7-6cd4-4af5-aaa1-a93c5c3175d6",
+      "nom": "AFRICA OFFICE ADMINISTRATION AL SARL",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0001",
+      "compte": "44110001"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "4193d712-cb27-4546-992d-ad81fa3d4f30",
+      "nom": "PRO-FLUIDES MAROC SARL",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0002",
+      "compte": "44110002"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "adb59fe0-5616-44f5-852c-1b49f70eb4b4",
+      "nom": "PRO-FLUIDES MAROC SARL",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0003",
+      "compte": "44110003"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "f464543b-b31a-4efb-be27-d682a6616f1d",
+      "nom": "TESDRAMENVEST SARL",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0004",
+      "compte": "44110004"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "ad42bc6d-e19e-422b-941e-d24642d4cde2",
+      "nom": "MAROC   TELECOM (IAM) SA",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0005",
+      "compte": "44110005"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "d14f876e-fc72-414c-b43a-73a63f5eecfc",
+      "nom": "ACOSOLUTIONS",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0006",
+      "compte": "44110006"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "3b30e145-c2ab-415d-8caf-4350c2953ee5",
+      "nom": "UNIMAGRI",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0007",
+      "compte": "44110007"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "26b320dd-ebda-4959-aac4-c524b115fe88",
+      "nom": "WETRAFA Sarlu",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0008",
+      "compte": "44110008"
+    },
+    {
+      "table": "fournisseurs",
+      "type": "fournisseur",
+      "id": "dab338f3-365d-43ff-97b6-2d3cee9fd181",
+      "nom": "REPERAL-SARL",
+      "dossier": "STE SMERT WATER",
+      "ancien": null,
+      "code": "F0009",
+      "compte": "44110009"
+    }
+  ]
+}

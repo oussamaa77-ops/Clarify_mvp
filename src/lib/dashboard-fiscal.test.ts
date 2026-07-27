@@ -5,8 +5,9 @@ import {
   tvaRecuperableEnCours,
   echeanceSimplTva,
   joursAvant,
-  ventilerChargesPcm,
-  GROUPES_PCM,
+  ventilerChargesParCompte,
+  ventilerVentesParCompte,
+  intitulePcm,
   balanceAgeeDashboard,
   calculerCashFlow,
   type FactureFiscale,
@@ -131,7 +132,16 @@ describe("joursAvant", () => {
   });
 });
 
-describe("ventilerChargesPcm", () => {
+describe("ventilerChargesParCompte", () => {
+  // Référentiel PCM tel que le dashboard le passe (extrait de `pcm_reference`).
+  const PCM = {
+    "6111": "Achats de marchandises",
+    "6131": "Locations et charges locatives",
+    "6133": "Entretien et réparations",
+    "6145": "Frais postaux et frais de télécommunications",
+    "6171": "Rémunérations du personnel",
+  };
+
   const ecr = [
     { compte_numero: "6111", debit: 10000, credit: 0, date_ecriture: "2026-06-05" },
     { compte_numero: "6121", debit: 5000,  credit: 0, date_ecriture: "2026-06-06" },
@@ -141,89 +151,220 @@ describe("ventilerChargesPcm", () => {
     { compte_numero: "3421", debit: 9999,  credit: 0, date_ecriture: "2026-06-10" }, // hors classe 6
   ];
 
-  it("regroupe 613 et 614 sous Services extérieurs & Loyers", () => {
-    const parts = ventilerChargesPcm(ecr);
-    expect(parts.find(p => p.cle === "services")?.montant).toBe(5000); // 3000 + 2000
+  it("ventile par COMPTE réel, sans regroupement maison", () => {
+    const parts = ventilerChargesParCompte(ecr, { intitules: PCM });
+    expect(parts.map(p => p.compte)).toEqual(["6111", "6171", "6121", "6131", "6141"]);
+  });
+
+  it("classe du poste le plus lourd au plus léger", () => {
+    const montants = ventilerChargesParCompte(ecr).map(p => p.montant);
+    expect(montants).toEqual([...montants].sort((a, b) => b - a));
+  });
+
+  it("nomme chaque compte avec l'intitulé du référentiel PCM", () => {
+    const parts = ventilerChargesParCompte(ecr, { intitules: PCM });
+    expect(parts.find(p => p.compte === "6111")?.intitule).toBe("Achats de marchandises");
+    expect(parts.find(p => p.compte === "6171")?.intitule).toBe("Rémunérations du personnel");
   });
 
   it("ignore les comptes hors classe 6", () => {
-    const total = ventilerChargesPcm(ecr).reduce((s, p) => s + p.montant, 0);
+    const total = ventilerChargesParCompte(ecr).reduce((s, p) => s + p.montant, 0);
     expect(total).toBe(28000); // 9999 exclu
   });
 
   it("un avoir vient en diminution de la charge", () => {
-    const parts = ventilerChargesPcm([
+    const parts = ventilerChargesParCompte([
       { compte_numero: "6111", debit: 10000, credit: 0, date_ecriture: "2026-06-05" },
       { compte_numero: "6111", debit: 0, credit: 4000, date_ecriture: "2026-06-20" },
     ]);
-    expect(parts.find(p => p.cle === "marchandises")?.montant).toBe(6000);
+    expect(parts).toHaveLength(1);
+    expect(parts[0].montant).toBe(6000);
   });
 
-  it("classe le reste de la classe 6 en « Autres charges »", () => {
-    const parts = ventilerChargesPcm([
-      { compte_numero: "6182", debit: 1500, credit: 0, date_ecriture: "2026-06-05" },
+  it("écarte un compte au solde nul ou créditeur (secteur indessinable)", () => {
+    const parts = ventilerChargesParCompte([
+      { compte_numero: "6111", debit: 1000, credit: 0,    date_ecriture: "2026-06-05" },
+      { compte_numero: "6133", debit: 200,  credit: 500,  date_ecriture: "2026-06-06" }, // net créditeur
     ]);
-    expect(parts).toEqual([{ cle: "autres", label: "Autres charges", montant: 1500 }]);
-  });
-
-  it("écarte les groupes vides", () => {
-    const parts = ventilerChargesPcm([
-      { compte_numero: "6111", debit: 100, credit: 0, date_ecriture: "2026-06-05" },
-    ]);
-    expect(parts.map(p => p.cle)).toEqual(["marchandises"]);
+    expect(parts.map(p => p.compte)).toEqual(["6111"]);
   });
 
   it("borne sur la période demandée", () => {
-    const parts = ventilerChargesPcm(ecr, { debut: "2026-06-08", fin: "2026-06-09" });
-    expect(parts.map(p => p.cle).sort()).toEqual(["personnel", "services"]);
+    const parts = ventilerChargesParCompte(ecr, { debut: "2026-06-08", fin: "2026-06-09" });
+    expect(parts.map(p => p.compte)).toEqual(["6171", "6141"]);
   });
 
-  // ── 6125 « achats NON STOCKÉS » : eau, électricité, fournitures de bureau ──
-  // Le préfixe 6125 est plus précis que 612 : il doit gagner, sinon des
-  // consommables du quotidien s'affichent en « Matières premières ».
-  it("sort 6125x de « Matières premières » vers son propre poste", () => {
-    const parts = ventilerChargesPcm([
-      { compte_numero: "61251", debit: 800,  credit: 0, date_ecriture: "2026-06-05" }, // eau
-      { compte_numero: "61252", debit: 1500, credit: 0, date_ecriture: "2026-06-06" }, // électricité
-      { compte_numero: "61254", debit: 1200, credit: 0, date_ecriture: "2026-06-07" }, // fournitures de bureau
+  it("la part de chaque poste est la proportion EXACTE du total", () => {
+    const parts = ventilerChargesParCompte([
+      { compte_numero: "6111", debit: 750, credit: 0, date_ecriture: "2026-06-05" },
+      { compte_numero: "6131", debit: 250, credit: 0, date_ecriture: "2026-06-05" },
     ]);
-    expect(parts).toEqual([
-      { cle: "non_stockes", label: "Eau, énergie & fournitures", montant: 3500 },
+    expect(parts.map(p => p.part)).toEqual([0.75, 0.25]);
+    expect(parts.reduce((s, p) => s + p.part, 0)).toBeCloseTo(1, 10);
+  });
+
+  // ── Règle des 5 postes + reliquat ──
+  const beaucoup = [
+    { compte_numero: "6111", debit: 10000, credit: 0, date_ecriture: "2026-06-01" },
+    { compte_numero: "6171", debit: 8000,  credit: 0, date_ecriture: "2026-06-01" },
+    { compte_numero: "6121", debit: 5000,  credit: 0, date_ecriture: "2026-06-01" },
+    { compte_numero: "6131", debit: 3000,  credit: 0, date_ecriture: "2026-06-01" },
+    { compte_numero: "6133", debit: 2000,  credit: 0, date_ecriture: "2026-06-01" },
+    { compte_numero: "6145", debit: 500,   credit: 0, date_ecriture: "2026-06-01" },
+    { compte_numero: "6147", debit: 300,   credit: 0, date_ecriture: "2026-06-01" },
+  ];
+
+  it("au-delà de 5 comptes : 5 postes nommés + « Autres charges »", () => {
+    const parts = ventilerChargesParCompte(beaucoup, { intitules: PCM });
+    expect(parts).toHaveLength(6);
+    expect(parts.slice(0, 5).map(p => p.compte)).toEqual(["6111", "6171", "6121", "6131", "6133"]);
+    const autres = parts[5];
+    expect(autres.compte).toBe("autres");
+    expect(autres.intitule).toBe("Autres charges");
+    expect(autres.montant).toBe(800);            // 500 + 300
+    expect(autres.regroupe).toEqual(["6145", "6147"]);
+  });
+
+  it("le reliquat regroupé ne fait perdre AUCUN montant", () => {
+    const total = ventilerChargesParCompte(beaucoup).reduce((s, p) => s + p.montant, 0);
+    expect(total).toBe(28800);
+  });
+
+  // Règle STRICTE : 6 comptes → 5 postes + « Autres », même si le reliquat est
+  // un compte unique. La règle reste lisible à l'œil, sans cas particulier.
+  it("un reliquat d'un SEUL compte part quand même dans « Autres charges »", () => {
+    const parts = ventilerChargesParCompte(beaucoup.slice(0, 6), { intitules: PCM });
+    expect(parts).toHaveLength(6);
+    expect(parts[5].compte).toBe("autres");
+    expect(parts[5].regroupe).toEqual(["6145"]);
+    expect(parts[5].montant).toBe(500);
+  });
+
+  it("exactement 5 comptes : aucune tranche « Autres »", () => {
+    const parts = ventilerChargesParCompte(beaucoup.slice(0, 5), { intitules: PCM });
+    expect(parts).toHaveLength(5);
+    expect(parts.some(p => p.compte === "autres")).toBe(false);
+  });
+
+  it("à montant égal, l'ordre reste déterministe (par n° de compte)", () => {
+    const parts = ventilerChargesParCompte([
+      { compte_numero: "6145", debit: 100, credit: 0, date_ecriture: "2026-06-01" },
+      { compte_numero: "6111", debit: 100, credit: 0, date_ecriture: "2026-06-01" },
     ]);
-    expect(parts.some(p => p.cle === "matieres")).toBe(false);
+    expect(parts.map(p => p.compte)).toEqual(["6111", "6145"]);
+  });
+});
+
+describe("ventilerVentesParCompte", () => {
+  const PCM = {
+    "7111": "Ventes de marchandises",
+    "7124": "Ventes de services produits au Maroc",
+    "7126": "Ventes de produits accessoires",
+    "7129": "Rabais, remises et ristournes accordés par l'entreprise",
+    "7181": "Autres produits d'exploitation",
+    "7386": "Escomptes obtenus",
+  };
+
+  // Un produit est un solde CRÉDITEUR — miroir exact des charges.
+  const ventes = [
+    { compte_numero: "7111", debit: 0, credit: 120000, date_ecriture: "2026-06-05" },
+    { compte_numero: "7124", debit: 0, credit: 80000,  date_ecriture: "2026-06-06" },
+    { compte_numero: "7126", debit: 0, credit: 12000,  date_ecriture: "2026-06-07" },
+    { compte_numero: "6111", debit: 50000, credit: 0,  date_ecriture: "2026-06-08" }, // charge : hors champ
+  ];
+
+  it("ventile le CA par compte de produit, du plus gros au plus petit", () => {
+    const parts = ventilerVentesParCompte(ventes, { intitules: PCM });
+    expect(parts.map(p => p.compte)).toEqual(["7111", "7124", "7126"]);
+    expect(parts[0].montant).toBe(120000);
   });
 
-  it("laisse les VRAIES matières premières (6121) sous « Matières premières »", () => {
-    const parts = ventilerChargesPcm([
-      { compte_numero: "6121",  debit: 5000, credit: 0, date_ecriture: "2026-06-05" },
-      { compte_numero: "61254", debit: 1200, credit: 0, date_ecriture: "2026-06-06" },
+  it("ignore les comptes hors classe 7", () => {
+    const total = ventilerVentesParCompte(ventes).reduce((s, p) => s + p.montant, 0);
+    expect(total).toBe(212000); // la charge de 50 000 est exclue
+  });
+
+  it("nomme chaque compte avec l'intitulé du référentiel PCM", () => {
+    const parts = ventilerVentesParCompte(ventes, { intitules: PCM });
+    expect(parts[1].intitule).toBe("Ventes de services produits au Maroc");
+  });
+
+  it("un avoir client vient en diminution du poste de vente", () => {
+    const parts = ventilerVentesParCompte([
+      { compte_numero: "7111", debit: 0,     credit: 10000, date_ecriture: "2026-06-05" },
+      { compte_numero: "7111", debit: 2500,  credit: 0,     date_ecriture: "2026-06-20" }, // avoir
     ]);
-    expect(parts.find(p => p.cle === "matieres")?.montant).toBe(5000);
-    expect(parts.find(p => p.cle === "non_stockes")?.montant).toBe(1200);
+    expect(parts[0].montant).toBe(7500);
   });
 
-  it("place 6125 AVANT 612 dans l'ordre de la légende (priorité de matching)", () => {
-    const iNonStockes = GROUPES_PCM.findIndex(g => g.cle === "non_stockes");
-    const iMatieres = GROUPES_PCM.findIndex(g => g.cle === "matieres");
-    expect(iNonStockes).toBeGreaterThanOrEqual(0);
-    expect(iNonStockes).toBeLessThan(iMatieres);
+  // 7129 « RRR accordés » est un compte de PRODUIT qui fonctionne au DÉBIT :
+  // pris dans le sens des charges il apparaîtrait comme un poste de vente.
+  it("les rabais accordés (7129) ne deviennent jamais un poste de vente", () => {
+    const parts = ventilerVentesParCompte([
+      { compte_numero: "7111", debit: 0,    credit: 50000, date_ecriture: "2026-06-05" },
+      { compte_numero: "7129", debit: 3000, credit: 0,     date_ecriture: "2026-06-06" },
+    ], { intitules: PCM });
+    expect(parts.map(p => p.compte)).toEqual(["7111"]);
   });
 
-  it("6126 (travaux & études) reste dans le groupe général 612", () => {
-    const parts = ventilerChargesPcm([
-      { compte_numero: "6126", debit: 400, credit: 0, date_ecriture: "2026-06-05" },
-    ]);
-    expect(parts.map(p => p.cle)).toEqual(["matieres"]);
+  it("règle stricte : au-delà de 5 comptes, reliquat sous « Autres ventes »", () => {
+    const parts = ventilerVentesParCompte([
+      { compte_numero: "7111", debit: 0, credit: 100000, date_ecriture: "2026-06-01" },
+      { compte_numero: "7124", debit: 0, credit: 80000,  date_ecriture: "2026-06-01" },
+      { compte_numero: "7121", debit: 0, credit: 60000,  date_ecriture: "2026-06-01" },
+      { compte_numero: "7126", debit: 0, credit: 40000,  date_ecriture: "2026-06-01" },
+      { compte_numero: "7181", debit: 0, credit: 20000,  date_ecriture: "2026-06-01" },
+      { compte_numero: "7386", debit: 0, credit: 1500,   date_ecriture: "2026-06-01" },
+      { compte_numero: "7331", debit: 0, credit: 500,    date_ecriture: "2026-06-01" },
+    ], { intitules: PCM });
+    expect(parts).toHaveLength(6);
+    expect(parts[5]).toMatchObject({
+      compte: "autres",
+      intitule: "Autres ventes",
+      montant: 2000,
+      regroupe: ["7386", "7331"],
+    });
   });
 
-  it("le total des charges est insensible au regroupement", () => {
-    const lignes = [
-      { compte_numero: "6111",  debit: 1000, credit: 0, date_ecriture: "2026-06-05" },
-      { compte_numero: "6121",  debit: 2000, credit: 0, date_ecriture: "2026-06-05" },
-      { compte_numero: "61254", debit: 1200, credit: 0, date_ecriture: "2026-06-05" },
+  it("charges et ventes se lisent sur le MÊME jeu d'écritures sans interférer", () => {
+    const melange = [
+      { compte_numero: "6111", debit: 30000, credit: 0,     date_ecriture: "2026-06-01" },
+      { compte_numero: "7111", debit: 0,     credit: 90000, date_ecriture: "2026-06-01" },
     ];
-    const total = ventilerChargesPcm(lignes).reduce((s, p) => s + p.montant, 0);
-    expect(total).toBe(4200);
+    expect(ventilerChargesParCompte(melange).map(p => p.compte)).toEqual(["6111"]);
+    expect(ventilerVentesParCompte(melange).map(p => p.compte)).toEqual(["7111"]);
+  });
+});
+
+describe("intitulePcm", () => {
+  const PCM = { "6131": "Locations et charges locatives", "6145": "Frais postaux et frais de télécommunications" };
+
+  it("prend l'intitulé exact du référentiel", () => {
+    expect(intitulePcm("6145", PCM)).toBe("Frais postaux et frais de télécommunications");
+  });
+
+  it("descend au sous-compte du moteur de catégorisation", () => {
+    // 61254 n'est pas dans `pcm_reference` mais le moteur l'impute et le nomme.
+    expect(intitulePcm("61254", PCM)).toBe("Fournitures de bureau");
+  });
+
+  it("hérite du compte parent pour un sous-compte inconnu", () => {
+    expect(intitulePcm("61312", PCM)).toBe("Locations et charges locatives");
+  });
+
+  it("retombe sur la rubrique à 3 chiffres pour un compte inventé", () => {
+    // 6137 : imputé par l'OCR, absent de tous les référentiels.
+    expect(intitulePcm("6137", PCM)).toBe("Autres charges externes");
+  });
+
+  it("couvre aussi les rubriques de la classe 7 (produits)", () => {
+    expect(intitulePcm("7118", {})).toBe("Ventes de marchandises");        // rubrique 711
+    expect(intitulePcm("71241", { "7124": "Ventes de services produits au Maroc" }))
+      .toBe("Ventes de services produits au Maroc");                       // parent 7124
+  });
+
+  it("n'invente rien quand la rubrique elle-même est inconnue", () => {
+    expect(intitulePcm("6999", PCM)).toBe("");
   });
 });
 
