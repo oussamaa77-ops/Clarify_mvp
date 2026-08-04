@@ -264,7 +264,16 @@
       "Bash(python -m py_compile donut_service.py donut-service/app.py ia_services/scan/router.py ia_services/reconciliation/router.py)",
       "Bash(npx eslint *)",
       "Bash(npm test *)",
-      "Bash(python -m pytest --version)"
+      "Bash(python -m pytest --version)",
+      "Bash(git branch *)",
+      "PowerShell(npx vitest run src/lib/fiscalite-ma.test.ts)",
+      "PowerShell(npx tsc --noEmit 2>&1 | Select-Object -First 60)",
+      "PowerShell(npm test *)",
+      "PowerShell(npx vitest run src/lib/dashboard-fiscal.test.ts src/lib/fiscalite-ma.test.ts 2>&1 | Select-Object -Last 45)",
+      "PowerShell($e = npx tsc --noEmit 2>&1; \"TOTAL: $\\($e.Count\\)\"; $e | Select-String -Pattern \"fiscalite|dashboard-fiscal|Cannot find name|implicitly has an 'any'\" | Select-Object -First 15)",
+      "PowerShell(node --import tsx verify_fiscalite.mjs 2>&1)",
+      "PowerShell(node --import tsx verify_fiscalite_tva.mjs 2>&1)",
+      "PowerShell(node --import tsx verify_fiscalite.mjs 2>&1 | Select-Object -Last 8; \"=== TSC ===\"; $e = npx tsc --noEmit 2>&1; \"TOTAL: $\\($e.Count\\)\"; $e | Select-String -Pattern \"fiscalite|dashboard-fiscal\")"
     ]
   }
 }

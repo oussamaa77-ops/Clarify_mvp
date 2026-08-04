@@ -10,6 +10,8 @@ import {
   intitulePcm,
   balanceAgeeDashboard,
   calculerCashFlow,
+  periodesTva,
+  bornesDuMois,
   type FactureFiscale,
 } from "./dashboard-fiscal";
 
@@ -79,6 +81,103 @@ describe("synthetiserTva — régime de l'encaissement", () => {
     ];
     const s = synthetiserTva(ventes, [], { debut: "2026-06-01", fin: "2026-06-30" });
     expect(s.collectee).toBe(200); // seule la facture de juin
+  });
+
+  it("sans règlement daté, la couverture vaut 0 (rattachement à la facture)", () => {
+    const s = synthetiserTva([f({ montant_paye: 1200, statut_paiement: "payee" })], [], { paiements: [] });
+    expect(s.collectee).toBe(200);
+    expect(s.couverture).toBe(0);
+  });
+});
+
+describe("synthetiserTva — exigibilité à la date d'encaissement", () => {
+  const vente = f({ id: "V1", date_facture: "2026-05-10", montant_paye: 1200, montant_restant: 0, statut_paiement: "payee" });
+
+  it("rattache la TVA au mois du RÈGLEMENT, pas à celui de la facture", () => {
+    const paiements = [{ facture_id: "V1", montant: 1200, date_paiement: "2026-07-03" }];
+    // Facturée en mai, encaissée en juillet : rien n'est exigible en mai…
+    expect(synthetiserTva([vente], [], { paiements, debut: "2026-05-01", fin: "2026-05-31" }).collectee).toBe(0);
+    // …tout l'est en juillet.
+    const juillet = synthetiserTva([vente], [], { paiements, debut: "2026-07-01", fin: "2026-07-31" });
+    expect(juillet.collectee).toBe(200);
+    expect(juillet.couverture).toBe(1);
+  });
+
+  it("ventile un règlement échelonné sur ses mois d'encaissement", () => {
+    const paiements = [
+      { facture_id: "V1", montant: 300, date_paiement: "2026-06-20" },
+      { facture_id: "V1", montant: 900, date_paiement: "2026-07-05" },
+    ];
+    expect(synthetiserTva([vente], [], { paiements, debut: "2026-06-01", fin: "2026-06-30" }).collectee).toBe(50);
+    expect(synthetiserTva([vente], [], { paiements, debut: "2026-07-01", fin: "2026-07-31" }).collectee).toBe(150);
+    expect(synthetiserTva([vente], [], { paiements }).collectee).toBe(200);
+  });
+
+  it("date les décaissements d'achat de la même façon", () => {
+    const achat = f({ id: "A1", montant_tva: 50, montant_ttc: 300, montant_paye: 300, montant_restant: 0, statut_paiement: "payee" });
+    const paiements = [{ facture_fournisseur_id: "A1", montant: 300, date_paiement: "2026-08-02" }];
+    const s = synthetiserTva([], [achat], { paiements, debut: "2026-08-01", fin: "2026-08-31" });
+    expect(s.deductible).toBe(50);
+    expect(s.nette).toBe(-50);
+    expect(s.estCredit).toBe(true);
+  });
+
+  it("ne confond pas un paiement de vente avec un paiement d'achat", () => {
+    const achat = f({ id: "A1", montant_tva: 50, montant_ttc: 300, montant_paye: 300, statut_paiement: "payee" });
+    // Même identifiant des deux côtés : seule la bonne colonne doit être lue.
+    const paiements = [{ facture_id: "V1", montant: 1200, date_paiement: "2026-07-03" }];
+    const s = synthetiserTva([vente], [achat], { paiements, debut: "2026-07-01", fin: "2026-07-31" });
+    expect(s.collectee).toBe(200);
+    expect(s.deductible).toBe(0); // l'achat n'a aucun règlement daté en juillet
+  });
+
+  it("complète les règlements non datés par la date de facture, sans perdre de TVA", () => {
+    // 300 datés en juillet, 900 réglés « à l'ancienne » (montant_paye seul).
+    const paiements = [{ facture_id: "V1", montant: 300, date_paiement: "2026-07-05" }];
+    const mai = synthetiserTva([vente], [], { paiements, debut: "2026-05-01", fin: "2026-05-31" });
+    expect(mai.collectee).toBe(150);   // les 900 non datés, rattachés à la facture de mai
+    const total = synthetiserTva([vente], [], { paiements });
+    expect(total.collectee).toBe(200); // rien ne disparaît
+    expect(total.couverture).toBe(0.25);
+  });
+
+  it("ignore l'excédent d'un règlement saisi en double", () => {
+    const paiements = [
+      { facture_id: "V1", montant: 1200, date_paiement: "2026-07-05" },
+      { facture_id: "V1", montant: 1200, date_paiement: "2026-07-06" },
+    ];
+    expect(synthetiserTva([vente], [], { paiements }).collectee).toBe(200); // pas 400
+  });
+});
+
+describe("periodesTva / bornesDuMois", () => {
+  it("retient le mois d'encaissement, pas celui de la facture couverte", () => {
+    const ventes = [f({ id: "V1", date_facture: "2026-05-10", montant_paye: 1200, montant_restant: 0, statut_paiement: "payee" })];
+    const paiements = [{ facture_id: "V1", montant: 1200, date_paiement: "2026-07-03" }];
+    // Mai ne porte aucune TVA : le règlement daté de juillet couvre tout.
+    expect(periodesTva(ventes, [], paiements)).toEqual(["2026-07"]);
+  });
+
+  it("garde le mois de facture pour la part non couverte par un règlement daté", () => {
+    const ventes = [f({ id: "V1", date_facture: "2026-05-10", montant_paye: 1200, montant_restant: 0, statut_paiement: "payee" })];
+    const paiements = [{ facture_id: "V1", montant: 300, date_paiement: "2026-07-03" }];
+    expect(periodesTva(ventes, [], paiements)).toEqual(["2026-07", "2026-05"]);
+  });
+
+  it("ignore les factures non réglées (aucune TVA exigible)", () => {
+    expect(periodesTva([f()], [], [])).toEqual([]);
+  });
+
+  it("ignore les factures sans TVA (exonérées)", () => {
+    const ventes = [f({ id: "V1", montant_tva: 0, montant_paye: 1200, statut_paiement: "payee" })];
+    expect(periodesTva(ventes, [], [])).toEqual([]);
+  });
+
+  it("borne un mois sur ses premier et dernier jours", () => {
+    expect(bornesDuMois("2026-02")).toEqual({ debut: "2026-02-01", fin: "2026-02-28" });
+    expect(bornesDuMois("2024-02")).toEqual({ debut: "2024-02-01", fin: "2024-02-29" });
+    expect(bornesDuMois("2026-12")).toEqual({ debut: "2026-12-01", fin: "2026-12-31" });
+    expect(bornesDuMois("bidon")).toBeNull();
   });
 });
 

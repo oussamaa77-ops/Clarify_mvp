@@ -6,6 +6,8 @@ import { DICTIONNAIRE_PCM } from "./categorization-engine";
 
 /** Facture (vente ou achat) vue sous l'angle des montants et du règlement. */
 export interface FactureFiscale {
+  /** Requis seulement pour rattacher les règlements datés de `paiements`. */
+  id?: string | null;
   montant_ht?: number | null;
   montant_tva?: number | null;
   montant_ttc?: number | null;
@@ -45,6 +47,14 @@ export function partReglee(f: FactureFiscale): number {
   return Math.min(1, paye / ttc);
 }
 
+/** Règlement individuel daté (table `paiements`, source de vérité du reste dû). */
+export interface PaiementFiscal {
+  facture_id?: string | null;
+  facture_fournisseur_id?: string | null;
+  montant?: number | null;
+  date_paiement?: string | null;
+}
+
 export interface SyntheseTva {
   /** TVA sur les ventes effectivement encaissées. */
   collectee: number;
@@ -54,36 +64,155 @@ export interface SyntheseTva {
   nette: number;
   /** `true` quand l'entreprise est créditrice (nette < 0). */
   estCredit: boolean;
+  /**
+   * Part des règlements rattachée à un paiement DATÉ, entre 0 et 1 (1 = toute la
+   * TVA a été datée par un encaissement réel). En dessous de 1, le complément a
+   * été rattaché à la date de facture faute de mieux — l'écran doit le dire.
+   */
+  couverture: number;
+}
+
+/** Indexe les règlements par facture, dans le sens (vente / achat) demandé. */
+function grouperPaiements(
+  paiements: PaiementFiscal[],
+  cle: "facture_id" | "facture_fournisseur_id",
+): Map<string, PaiementFiscal[]> {
+  const index = new Map<string, PaiementFiscal[]>();
+  for (const p of paiements) {
+    const id = p[cle];
+    if (!id) continue;
+    const liste = index.get(id);
+    if (liste) liste.push(p); else index.set(id, [p]);
+  }
+  return index;
+}
+
+/**
+ * Décompose le règlement d'une facture entre la part adossée à des paiements
+ * DATÉS (avec leur quote-part) et le reliquat réglé mais non daté.
+ *
+ * Un cumul de règlements supérieur au TTC (saisie en double) ne doit pas créer
+ * de TVA : toutes les quotes-parts sont ramenées à 100 % du TTC.
+ */
+function decomposerReglement(f: FactureFiscale, reglements: PaiementFiscal[]) {
+  const ttc = n(f.montant_ttc);
+  const somme = reglements.reduce((s, p) => s + n(p.montant), 0);
+  const facteur = ttc > 0 && somme > ttc ? ttc / somme : 1;
+
+  const parts = reglements.map((p) => ({
+    date: p.date_paiement,
+    part: ttc > 0 ? (n(p.montant) * facteur) / ttc : 0,
+  }));
+  const partDatee = Math.min(1, parts.reduce((s, p) => s + p.part, 0));
+  return { parts, partDatee, resteNonDate: Math.max(0, partReglee(f) - partDatee) };
 }
 
 /**
  * Synthèse TVA au régime de l'encaissement, sur la période fournie (bornes
- * incluses, format YYYY-MM ou YYYY-MM-DD ; omises = tout l'historique).
+ * incluses, format YYYY-MM-DD ; omises = tout l'historique).
  *
  * Volontairement calculé depuis les FACTURES et leur règlement, et non depuis
  * les écritures 44551/34552 : ces dernières suivent le fait générateur
  * comptable, qui ne coïncide pas avec l'encaissement.
+ *
+ * DATE D'EXIGIBILITÉ : sous ce régime, la TVA est due au titre du mois de
+ * l'ENCAISSEMENT, pas de la facturation. Quand `opts.paiements` est fourni,
+ * chaque règlement daté porte donc sa quote-part de TVA dans SA période.
+ *
+ * Sans règlement daté (table `paiements` absente, ou factures antérieures au
+ * moteur de paiement qui portent seulement `montant_paye`), la part réglée non
+ * couverte est rattachée à la DATE DE FACTURE : c'est approximatif, mais aucune
+ * TVA ne disparaît de la déclaration — et `couverture` chiffre l'approximation.
  */
 export function synthetiserTva(
   ventes: FactureFiscale[],
   achats: FactureFiscale[],
-  opts: { debut?: string; fin?: string } = {},
+  opts: { debut?: string; fin?: string; paiements?: PaiementFiscal[] } = {},
 ): SyntheseTva {
-  const dansPeriode = (f: FactureFiscale) => {
+  const dansPeriode = (date: string | null | undefined) => {
     if (!opts.debut && !opts.fin) return true;
-    const d = (f.date_facture ?? "").slice(0, 10);
+    const d = (date ?? "").slice(0, 10);
     if (!d) return false;
     if (opts.debut && d < opts.debut) return false;
     if (opts.fin && d > opts.fin) return false;
     return true;
   };
-  const cumul = (fs: FactureFiscale[]) =>
-    round2(fs.filter(dansPeriode).reduce((s, f) => s + n(f.montant_tva) * partReglee(f), 0));
 
-  const collectee = cumul(ventes);
-  const deductible = cumul(achats);
-  const nette = round2(collectee - deductible);
-  return { collectee, deductible, nette, estCredit: nette < 0 };
+  const cumul = (fs: FactureFiscale[], cle: "facture_id" | "facture_fournisseur_id") => {
+    const index = opts.paiements ? grouperPaiements(opts.paiements, cle) : null;
+    let tva = 0;      // TVA retenue dans la période
+    let datee = 0;    // TVA réglée adossée à un règlement daté, toutes périodes
+    let totale = 0;   // TVA réglée toutes périodes confondues (dénominateur de couverture)
+
+    for (const f of fs) {
+      const reglements = index && f.id ? index.get(f.id) ?? [] : [];
+      const { parts, partDatee, resteNonDate } = decomposerReglement(f, reglements);
+
+      for (const p of parts) if (dansPeriode(p.date)) tva += n(f.montant_tva) * p.part;
+      datee += n(f.montant_tva) * partDatee;
+      totale += n(f.montant_tva) * partDatee;
+
+      // Reliquat réglé mais non daté → rattaché à la date de facture.
+      if (resteNonDate > 1e-9) {
+        totale += n(f.montant_tva) * resteNonDate;
+        if (dansPeriode(f.date_facture)) tva += n(f.montant_tva) * resteNonDate;
+      }
+    }
+    return { tva: round2(tva), datee: round2(datee), totale: round2(totale) };
+  };
+
+  const v = cumul(ventes, "facture_id");
+  const a = cumul(achats, "facture_fournisseur_id");
+  const nette = round2(v.tva - a.tva);
+  const totale = v.totale + a.totale;
+  return {
+    collectee: v.tva,
+    deductible: a.tva,
+    nette,
+    estCredit: nette < 0,
+    couverture: totale > 0 ? Math.min(1, (v.datee + a.datee) / totale) : 1,
+  };
+}
+
+/**
+ * Mois (YYYY-MM) où de la TVA est réellement exigible, du plus récent au plus
+ * ancien.
+ *
+ * Un mois n'est retenu que s'il PORTE de la TVA : le mois d'un encaissement daté,
+ * ou celui d'une facture dont une part réglée n'est adossée à aucun règlement
+ * daté. Le mois de facture d'une vente entièrement couverte par des paiements
+ * datés est donc écarté — sinon le tableau mensuel afficherait une ligne à 0,00.
+ */
+export function periodesTva(
+  ventes: FactureFiscale[],
+  achats: FactureFiscale[],
+  paiements: PaiementFiscal[] = [],
+): string[] {
+  const mois = new Set<string>();
+  const ajouter = (date: string | null | undefined) => {
+    const m = (date ?? "").slice(0, 7);
+    if (/^\d{4}-\d{2}$/.test(m)) mois.add(m);
+  };
+
+  for (const [fs, cle] of [[ventes, "facture_id"], [achats, "facture_fournisseur_id"]] as const) {
+    const index = grouperPaiements(paiements, cle);
+    for (const f of fs) {
+      if (n(f.montant_tva) === 0) continue;
+      const reglements = f.id ? index.get(f.id) ?? [] : [];
+      const { parts, resteNonDate } = decomposerReglement(f, reglements);
+      for (const p of parts) if (p.part > 1e-9) ajouter(p.date);
+      if (resteNonDate > 1e-9) ajouter(f.date_facture);
+    }
+  }
+  return [...mois].sort().reverse();
+}
+
+/** Bornes ISO (1er / dernier jour) d'un mois YYYY-MM. */
+export function bornesDuMois(periode: string): { debut: string; fin: string } | null {
+  const m = /^(\d{4})-(\d{2})$/.exec(periode.trim());
+  if (!m) return null;
+  const dernier = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+  return { debut: `${periode}-01`, fin: `${periode}-${String(dernier).padStart(2, "0")}` };
 }
 
 /**
