@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
 import { compteTiersAuxiliaire, suffixeAuxiliaire } from "@/lib/comptes-auxiliaires";
+import { synthetiserBalance, type LigneBalance as LigneBalanceLib } from "@/lib/balance-comptable";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,13 +32,7 @@ interface Ecriture {
   _nouveau?: boolean;
 }
 
-interface LigneBalance {
-  compte: string;
-  total_debit: number;
-  total_credit: number;
-  solde: number;
-  sens: "D" | "C";
-}
+type LigneBalance = LigneBalanceLib;
 
 const JOURNAUX = ["BQ","VTE","ACH","CAI","OD","VTE-AVR","ACH-AVR"];
 
@@ -274,6 +269,11 @@ function ComptabilitePage() {
   const totalCredit = ecritures.reduce((s, e) => s + Number(e.credit), 0);
   const equilibre = Math.abs(totalDebit - totalCredit) < 0.01;
 
+  // Pied de balance : sous-totaux par classe CGNC, total général et résultat net.
+  // Même calcul pour l'écran et pour l'export — un total affiché ne peut pas
+  // diverger d'un total exporté.
+  const { sousTotaux, total: totalBalance, resultat } = synthetiserBalance(balance);
+
   // Export Excel
   const exportExcel = async () => {
     if (!ecritures.length) { toast.error("Aucune écriture à exporter"); return; }
@@ -306,13 +306,25 @@ function ComptabilitePage() {
         XLSX.utils.book_append_sheet(wb, ws, nomOnglet(LIVRES[k].court));
       });
 
-      // Balance
-      const balData = [
-        ["Compte", "Total Débit", "Total Crédit", "Solde", "Sens"],
-        ...balance.map(l => [l.compte, l.total_debit, l.total_credit, l.solde, l.sens]),
-        ["TOTAL", totalDebit, totalCredit, Math.abs(totalDebit-totalCredit), equilibre?"✅":"⚠️"],
-      ];
+      // Balance : comptes groupés par classe, chaque classe suivie de son
+      // sous-total, puis le total général et le résultat net.
+      const balData: (string | number)[][] = [["Compte", "Total Débit", "Total Crédit", "Solde", "Sens"]];
+      for (const st of sousTotaux) {
+        for (const l of balance.filter(x => (/^[0-9]/.test(x.compte) ? x.compte.charAt(0) : "?") === st.classe)) {
+          balData.push([l.compte, l.total_debit, l.total_credit, l.solde, l.sens]);
+        }
+        balData.push([`${st.label} — ${st.intitule}`, st.total_debit, st.total_credit, st.solde, st.sens]);
+      }
+      balData.push(
+        ["TOTAL GÉNÉRAL DE LA BALANCE", totalBalance.total_debit, totalBalance.total_credit, totalBalance.ecart, totalBalance.equilibre ? "✅" : "⚠️"],
+        [],
+        ["RÉSULTAT NET DE L'EXERCICE"],
+        ["Produits (classe 7)", "", resultat.produits, "", "C"],
+        ["Charges (classe 6)", resultat.charges, "", "", "D"],
+        [resultat.label, "", "", resultat.montant, resultat.benefice ? "C" : "D"],
+      );
       const wsBal = XLSX.utils.aoa_to_sheet(balData);
+      wsBal["!cols"] = [{wch:36},{wch:16},{wch:16},{wch:16},{wch:8}];
       XLSX.utils.book_append_sheet(wb, wsBal, nomOnglet("Balance"));
 
       XLSX.writeFile(wb, `Comptabilite_${dossierId.slice(0,8)}_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -496,31 +508,72 @@ function ComptabilitePage() {
               <div className="col-span-1 text-center">Sens</div>
             </div>
             <div className="max-h-[60vh] overflow-y-auto">
-              {balance.map((l, i) => (
-                <div key={l.compte} className={`grid grid-cols-10 gap-1 px-4 py-1.5 border-b text-sm ${i%2===0?"bg-white dark:bg-background":"bg-muted/20"}`}>
-                  <div className="col-span-2 font-mono font-medium">
-                    {l.compte}
-                    {(intitulesAux[l.compte] || suffixeAuxiliaire(l.compte)) && (
-                      <span className="ml-2 font-sans text-xs text-muted-foreground">
-                        {intitulesAux[l.compte] ?? "tiers auxiliaire"}
-                      </span>
-                    )}
-                  </div>
-                  <div className="col-span-3 text-right font-mono text-red-600">{l.total_debit>0?fmt(l.total_debit):"—"}</div>
-                  <div className="col-span-3 text-right font-mono text-green-600">{l.total_credit>0?fmt(l.total_credit):"—"}</div>
-                  <div className="col-span-1 text-right font-mono font-semibold">{fmt(l.solde)}</div>
-                  <div className="col-span-1 text-center">
-                    <Badge className={l.sens==="D"?"bg-red-100 text-red-700 text-xs":"bg-green-100 text-green-700 text-xs"}>{l.sens}</Badge>
+              {/* Les comptes d'une classe, puis SON sous-total : c'est la lecture
+                  d'une balance — on ne renvoie pas les totaux de classe en pied. */}
+              {sousTotaux.map(st => (
+                <div key={st.classe}>
+                  {balance
+                    .filter(l => (/^[0-9]/.test(l.compte) ? l.compte.charAt(0) : "?") === st.classe)
+                    .map((l, i) => (
+                      <div key={l.compte} className={`grid grid-cols-10 gap-1 px-4 py-1.5 border-b text-sm ${i%2===0?"bg-white dark:bg-background":"bg-muted/20"}`}>
+                        <div className="col-span-2 font-mono font-medium">
+                          {l.compte}
+                          {(intitulesAux[l.compte] || suffixeAuxiliaire(l.compte)) && (
+                            <span className="ml-2 font-sans text-xs text-muted-foreground">
+                              {intitulesAux[l.compte] ?? "tiers auxiliaire"}
+                            </span>
+                          )}
+                        </div>
+                        <div className="col-span-3 text-right font-mono text-red-600">{l.total_debit>0?fmt(l.total_debit):"—"}</div>
+                        <div className="col-span-3 text-right font-mono text-green-600">{l.total_credit>0?fmt(l.total_credit):"—"}</div>
+                        <div className="col-span-1 text-right font-mono font-semibold">{fmt(l.solde)}</div>
+                        <div className="col-span-1 text-center">
+                          <Badge className={l.sens==="D"?"bg-red-100 text-red-700 text-xs":"bg-green-100 text-green-700 text-xs"}>{l.sens}</Badge>
+                        </div>
+                      </div>
+                    ))}
+                  <div className="grid grid-cols-10 gap-1 px-4 py-1.5 border-b-2 border-muted-foreground/20 bg-muted/60 text-sm font-semibold">
+                    <div className="col-span-2">
+                      {st.label}
+                      <span className="ml-2 font-normal text-xs text-muted-foreground">{st.intitule}</span>
+                    </div>
+                    <div className="col-span-3 text-right font-mono text-red-600">{fmt(st.total_debit)}</div>
+                    <div className="col-span-3 text-right font-mono text-green-600">{fmt(st.total_credit)}</div>
+                    <div className="col-span-1 text-right font-mono">{fmt(st.solde)}</div>
+                    <div className="col-span-1 text-center">
+                      <Badge className={st.sens==="D"?"bg-red-100 text-red-700 text-xs":"bg-green-100 text-green-700 text-xs"}>{st.sens}</Badge>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
-            <div className="grid grid-cols-10 gap-1 px-4 py-2 bg-muted font-semibold text-sm border-t">
-              <div className="col-span-2">TOTAL</div>
-              <div className="col-span-3 text-right font-mono text-red-600">{fmt(totalDebit)}</div>
-              <div className="col-span-3 text-right font-mono text-green-600">{fmt(totalCredit)}</div>
+            <div className="grid grid-cols-10 gap-1 px-4 py-2 bg-muted font-bold text-sm border-t-2">
+              <div className="col-span-2">TOTAL GÉNÉRAL DE LA BALANCE</div>
+              <div className="col-span-3 text-right font-mono text-red-600">{fmt(totalBalance.total_debit)}</div>
+              <div className="col-span-3 text-right font-mono text-green-600">{fmt(totalBalance.total_credit)}</div>
               <div className="col-span-2 text-right">
-                {equilibre ? <span className="text-green-600 text-xs">✅ Équilibrée</span> : <span className="text-red-600 text-xs">⚠️ {fmt(Math.abs(totalDebit-totalCredit))}</span>}
+                {totalBalance.equilibre
+                  ? <span className="text-green-600 text-xs">✅ Équilibrée</span>
+                  : <span className="text-red-600 text-xs">⚠️ Écart {fmt(totalBalance.ecart)}</span>}
+              </div>
+            </div>
+
+            {/* Résultat net — formation du résultat par les classes 6 et 7. */}
+            <div className={`px-4 py-3 border-t ${resultat.benefice ? "bg-emerald-50 dark:bg-emerald-950/20" : "bg-red-50 dark:bg-red-950/20"}`}>
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div className="text-xs text-muted-foreground font-mono">
+                  Produits (classe 7) <strong className="text-green-600">{fmt(resultat.produits)}</strong>
+                  <span className="mx-2">−</span>
+                  Charges (classe 6) <strong className="text-red-600">{fmt(resultat.charges)}</strong>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className={`text-sm font-bold ${resultat.benefice ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
+                    {resultat.label}
+                  </span>
+                  <span className={`font-mono text-xl font-bold ${resultat.benefice ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
+                    {fmt(resultat.montant)} MAD
+                  </span>
+                </div>
               </div>
             </div>
           </div>

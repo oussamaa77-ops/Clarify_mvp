@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { DatePicker } from "@/components/ui/date-picker";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, Calculator, AlertCircle, CheckCircle, Clock, Settings2, Info, Loader2, ShieldCheck } from "lucide-react";
+import { Download, Calculator, AlertCircle, CheckCircle, Clock, Settings2, Info, Loader2, ShieldCheck, FileSpreadsheet } from "lucide-react";
 import { toast } from "sonner";
 import {
   BAREME_IS, CLASSES_TP, CLASSE_TP_DEFAUT, REGIME_TVA_LABEL, TAUX_CM_DROIT_COMMUN,
@@ -21,6 +21,11 @@ import {
 import {
   synthetiserTva, tvaRecuperableEnCours, periodesTva, bornesDuMois,
 } from "@/lib/dashboard-fiscal";
+import {
+  COLONNES_RELEVE_DEDUCTIONS, construireReleveDeductions, indexerComptesCharge,
+  ligneVersCellules, totauxReleveDeductions,
+} from "@/lib/releve-deductions";
+import { indexerModesPaiement } from "@/lib/mode-paiement";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/fiscalite")({ component: FiscalitePage });
 
@@ -212,6 +217,84 @@ function FiscalitePage() {
     a.download = `tva_${dossierId}_${periodeTVA !== "all" ? periodeTVA : exercice}.csv`; a.click();
   };
 
+  // ── Relevé des déductions (SIMPL-TVA) ────────────────────────────────────────
+  // Pièce jointe de la déclaration : 14 colonnes DGI, UNE LIGNE PAR RÈGLEMENT.
+  // L'identité fiscale des fournisseurs (IF/ICE) et l'instrument de paiement ne
+  // sont pas dans les états déjà chargés : on les lit au moment de l'export.
+  const [exportEnCours, setExportEnCours] = useState(false);
+  const exportReleveDeductions = async () => {
+    setExportEnCours(true);
+    try {
+      const [{ data: fournisseurs }, { data: tx }, { data: enc }, { data: pcm }] = await Promise.all([
+        // Annuaire COMPLET : la jointure consolide les fiches en double, il ne
+        // faut donc pas le restreindre au seul fournisseur pointé par la facture.
+        supabase.from("fournisseurs").select("id,nom,ice,if_fiscal").eq("dossier_id", dossierId),
+        (supabase.from("transactions_bancaires") as any)
+          .select("facture_id,document_type,libelle,reference")
+          .eq("dossier_id", dossierId).not("facture_id", "is", null),
+        (supabase.from("encaissements") as any)
+          .select("facture_fournisseur_id,type")
+          .eq("dossier_id", dossierId).not("facture_fournisseur_id", "is", null),
+        // Intitulés PCM du cabinet : nomment la catégorie de charge quand la
+        // facture n'a pas de ligne détaillée.
+        supabase.from("pcm_reference").select("numero,intitule").like("numero", "6%"),
+      ]);
+
+      const lignes = construireReleveDeductions({
+        achats,
+        paiements,
+        fournisseurs: (fournisseurs ?? []) as any[],
+        modes: indexerModesPaiement("fournisseur", { transactions: tx ?? [], encaissements: enc ?? [] }),
+        // `ecritures_comptables.reference_piece` porte l'id de la facture : c'est
+        // ce lien qui donne le compte de charge, donc la nature de la dépense.
+        comptesCharge: indexerComptesCharge(ecritures),
+        intitulesPcm: Object.fromEntries(((pcm ?? []) as any[]).map(c => [c.numero, c.intitule])),
+        ...bornesPeriode,
+      });
+
+      if (!lignes.length) {
+        toast.error("Aucun règlement d'achat soumis à TVA sur la période — relevé vide");
+        return;
+      }
+
+      const totaux = totauxReleveDeductions(lignes);
+      const XLSX = await import("xlsx");
+      const data = [
+        [...COLONNES_RELEVE_DEDUCTIONS],
+        ...lignes.map(ligneVersCellules),
+        // Ligne de contrôle : ne fait pas partie du format DGI, elle sert au
+        // pointage avant dépôt (à supprimer si le portail refuse un pied).
+        ["TOTAUX", "", "", totaux.totalHt, totaux.totalTva, totaux.totalTtc, "", "", "", "", "", "", "", ""],
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      ws["!cols"] = [
+        { wch: 8 }, { wch: 16 }, { wch: 38 }, { wch: 14 }, { wch: 13 }, { wch: 14 },
+        { wch: 14 }, { wch: 32 }, { wch: 18 }, { wch: 10 }, { wch: 9 }, { wch: 16 },
+        { wch: 13 }, { wch: 13 },
+      ];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Releve des deductions");
+      const periode = periodeTVA !== "all" ? periodeTVA : exercice;
+      XLSX.writeFile(wb, `Releve_deductions_TVA_${periode}_${dossierId.slice(0, 8)}.xlsx`);
+
+      toast.success(`Relevé généré — ${totaux.lignes} ligne(s), TVA ${fmtMAD(totaux.totalTva)}`);
+      // Contrôles avant dépôt : mieux vaut les voir ici que dans un rejet SIMPL.
+      if (totaux.sansIdentiteFiscale > 0) {
+        toast.error(`${totaux.sansIdentiteFiscale} ligne(s) sans IF ni ICE fournisseur — la DGI rejette le dépôt sur ce motif. Complétez l'annuaire Fournisseurs.`, { duration: 10000 });
+      }
+      if (totaux.sansReglementDate > 0) {
+        toast.warning(`${totaux.sansReglementDate} ligne(s) datée(s) d'après la facture faute de règlement lettré — à vérifier avant dépôt`);
+      }
+      if (totaux.paiementAvantFacture > 0) {
+        toast.warning(`${totaux.paiementAvantFacture} ligne(s) avec un règlement antérieur à la facture — anomalie de saisie à corriger`);
+      }
+    } catch (e: any) {
+      // Un échec silencieux sur un dépôt fiscal est le pire des cas.
+      console.error("[RELEVÉ DÉDUCTIONS]", e);
+      toast.error(`Export impossible : ${e?.message ?? e}`);
+    } finally { setExportEnCours(false); }
+  };
+
   // ── Calendrier échéances ─────────────────────────────────────────────────────
   const now = new Date();
   const echeances = [
@@ -299,7 +382,11 @@ function FiscalitePage() {
                   ))}
                 </SelectContent>
               </Select>
-              <Button size="sm" variant="outline" onClick={exportTVA}><Download className="h-4 w-4 mr-2" />Exporter</Button>
+              <Button size="sm" variant="outline" onClick={exportTVA}><Download className="h-4 w-4 mr-2" />Synthèse CSV</Button>
+              <Button size="sm" onClick={exportReleveDeductions} disabled={exportEnCours}>
+                {exportEnCours ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FileSpreadsheet className="h-4 w-4 mr-2" />}
+                Relevé des déductions
+              </Button>
             </div>
           </div>
 
@@ -331,13 +418,10 @@ function FiscalitePage() {
               est approchée par la date de facture. On chiffre l'approximation. */}
           {synthese.couverture < 0.999 && (
             <Card className="border-amber-300 bg-amber-50 dark:bg-amber-950/20">
-              <CardContent className="pt-3 pb-3 text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              <CardContent className="pt-3 pb-3 text-xs text-amber-800 dark:text-amber-300">
                 <span>
-                  {Math.round((1 - synthese.couverture) * 100)} % de la TVA réglée ne s'adosse à aucun
-                  règlement daté (factures antérieures au moteur de paiement, ou paiements saisis sans date) :
-                  cette part est rattachée à la <strong>date de facture</strong>. Le total reste exact,
-                  seule sa <strong>répartition par mois</strong> est approchée.
+                  ⚠️ <strong>Rapprochement partiel</strong> : Certaines lignes de TVA sont ventilées à la
+                  date de facture faute de règlement lettré dans le bancaire.
                 </span>
               </CardContent>
             </Card>
@@ -410,14 +494,21 @@ function FiscalitePage() {
 
         {/* ── IS ── */}
         <TabsContent value="is" className="mt-4 space-y-4">
-          <div className="flex items-center gap-3">
-            <h2 className="font-semibold">Impôt sur les Sociétés — {exercice}</h2>
-            {is.situation.premierExercice && (
-              <Badge variant="outline" className="text-sky-700 border-sky-300">1er exercice</Badge>
-            )}
-            {is.regime === "taux_specifique" && (
-              <Badge variant="outline" className="text-violet-700 border-violet-300">Statut spécifique — 20 % plafonné</Badge>
-            )}
+          <div>
+            <div className="flex items-center gap-3">
+              <h2 className="font-semibold">Impôt sur les Sociétés — {exercice}</h2>
+              {is.situation.premierExercice && (
+                <Badge variant="outline" className="text-sky-700 border-sky-300">1er exercice</Badge>
+              )}
+              {is.regime === "taux_specifique" && (
+                <Badge variant="outline" className="text-violet-700 border-violet-300">Statut spécifique — 20 % plafonné</Badge>
+              )}
+            </div>
+            {/* Le résultat comptable n'est pas le résultat fiscal : réintégrations,
+                déductions et reports déficitaires n'arrivent qu'à la liasse. */}
+            <Badge variant="secondary" className="mt-2 font-normal text-muted-foreground">
+              Calcul indicatif au fil de l'eau (avant retraitements extra-comptables de fin d'exercice).
+            </Badge>
           </div>
 
           <div className="grid grid-cols-2 gap-6">
@@ -644,11 +735,18 @@ function FiscalitePage() {
               <div className="grid grid-cols-4 gap-4 mb-6">
                 <div className="p-4 bg-muted rounded-xl">
                   <p className="text-xs text-muted-foreground mb-1">Base imposable — valeur locative annuelle</p>
-                  <p className="font-mono font-bold text-xl">{fmtMAD(tp.base)}</p>
-                  {tp.baseManquante && (
-                    <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={ouvrirParams}>
-                      Renseigner le bail / loyer annuel
-                    </Button>
+                  {tp.baseManquante ? (
+                    // Afficher « 0,00 MAD » ferait passer une donnée MANQUANTE pour une
+                    // base réelle, et donc une TP à 0 pour un calcul abouti.
+                    <>
+                      <p className="font-mono font-bold text-xl text-muted-foreground">Non renseignée</p>
+                      <Button variant="outline" size="sm" className="mt-2 h-7 text-xs" onClick={ouvrirParams}>
+                        <Settings2 className="h-3.5 w-3.5 mr-1.5" />
+                        Renseigner le bail / loyer annuel
+                      </Button>
+                    </>
+                  ) : (
+                    <p className="font-mono font-bold text-xl">{fmtMAD(tp.base)}</p>
                   )}
                 </div>
                 <div className="p-4 bg-muted rounded-xl">
@@ -657,7 +755,13 @@ function FiscalitePage() {
                 </div>
                 <div className="p-4 bg-muted rounded-xl">
                   <p className="text-xs text-muted-foreground mb-1">TP {exercice}</p>
-                  <p className={`font-mono font-bold text-xl ${tp.exonere ? "text-emerald-600" : "text-orange-600"}`}>{fmtMAD(tp.montant)}</p>
+                  {/* Hors exonération, une base absente ne donne pas une TP nulle :
+                      elle donne une TP non calculable. */}
+                  {tp.baseManquante && !tp.exonere ? (
+                    <p className="font-mono font-bold text-xl text-muted-foreground">—</p>
+                  ) : (
+                    <p className={`font-mono font-bold text-xl ${tp.exonere ? "text-emerald-600" : "text-orange-600"}`}>{fmtMAD(tp.montant)}</p>
+                  )}
                 </div>
                 <div className="p-4 bg-muted rounded-xl">
                   <p className="text-xs text-muted-foreground mb-1">Échéance déclaration</p>
