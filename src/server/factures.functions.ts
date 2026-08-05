@@ -22,6 +22,9 @@ import { sendMail } from "./mailer";
 import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
 import { compteTiersAuxiliaire } from "../lib/comptes-auxiliaires";
+// TVA au régime des encaissements : la vente crédite le compte d'ATTENTE, la
+// bascule vers la TVA collectée exigible se fait au lettrage du règlement.
+import { COMPTES_TVA } from "../services/lettrage";
 import { puTtcToHt, reconcilierLignesHtTtc } from "../lib/tva";
 import { rappelerMemoire } from "./tiers-memoire.functions";
 import { logUsage, logUsageBatch, estimerCoutIA } from "./analytics.functions";
@@ -739,13 +742,13 @@ ${lignesXml}
         await supabase.from("ecritures_comptables").insert([
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Acompte ${ref}`,     debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "4191",  date_ecriture: facture.date_facture, libelle: `Avance reçue ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "44551", date_ecriture: facture.date_facture, libelle: `TVA acompte ${ref}`,  debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA acompte en attente ${ref}`,  debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
         ]);
       } else if (typeFacture === "solde") {
         await supabase.from("ecritures_comptables").insert([
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Solde ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "44551", date_ecriture: facture.date_facture, libelle: `TVA ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA en attente ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: "4191",  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: Number(facture.montant_ht), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
         ]);
@@ -753,7 +756,7 @@ ${lignesXml}
         await supabase.from("ecritures_comptables").insert([
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "44551", date_ecriture: facture.date_facture, libelle: `TVA collectée ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA en attente ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
         ]);
       }
       await supabase.from("ged_documents").insert({

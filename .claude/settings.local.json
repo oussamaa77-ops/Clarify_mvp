@@ -280,7 +280,30 @@
       "PowerShell(node --import tsx verify_releve_deductions.mjs 2>&1)",
       "PowerShell(node \"C:\\\\Users\\\\O6C96~1.KAR\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main\\\\38bc3e08-f5cd-434f-b8b4-527b1133046f\\\\scratchpad\\\\probe_achats.mjs\" 2>&1 | Select-Object -First 70)",
       "PowerShell(node probe_achats.mjs 2>&1 | Select-Object -First 75)",
-      "PowerShell(node --import tsx verify_releve_deductions.mjs 2>&1 | Select-Object -Last 20; \"=== TSC ===\"; $e = npx tsc --noEmit 2>&1; \"TOTAL: $\\($e.Count\\)\"; $e | Select-String -Pattern \"fiscalite|releve-deductions|balance-comptable|comptabilite\")"
+      "PowerShell(node --import tsx verify_releve_deductions.mjs 2>&1 | Select-Object -Last 20; \"=== TSC ===\"; $e = npx tsc --noEmit 2>&1; \"TOTAL: $\\($e.Count\\)\"; $e | Select-String -Pattern \"fiscalite|releve-deductions|balance-comptable|comptabilite\")",
+      "PowerShell(node --import tsx verify_releve_deductions.mjs)",
+      "PowerShell(npx vitest run src/lib/releve-deductions.test.ts --reporter=dot 2>&1 | Select-Object -Last 25)",
+      "Bash(xargs cat)",
+      "PowerShell(npx vitest run src/services/lettrage.test.ts --reporter=dot 2>&1 | Select-Object -Last 40)",
+      "PowerShell(npx vitest run src/services/lettrage.test.ts --reporter=dot 2>&1 | Select-Object -Last 20)",
+      "PowerShell(npx vitest run src/services/exportSage.test.ts --reporter=dot 2>&1 | Select-Object -Last 35)",
+      "PowerShell(npx vitest run src/services/exportSage.test.ts --reporter=dot 2>&1 | Select-Object -Last 25)",
+      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 60)",
+      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 45)",
+      "PowerShell(node --import tsx verify_lettrage.mjs --apply 2>&1 | Select-Object -Last 60)",
+      "PowerShell(node --import tsx verify_lettrage.mjs --apply 2>&1 | Select-Object -Last 30)",
+      "PowerShell(node --import tsx \"C:\\\\Users\\\\O6C96~1.KAR\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main\\\\520b52b1-a340-41b6-abe4-a6879b5d57cf\\\\scratchpad\\\\chk.mjs\")",
+      "Bash(cp \"C:/Users/O6C96~1.KAR/AppData/Local/Temp/claude/C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main/520b52b1-a340-41b6-abe4-a6879b5d57cf/scratchpad/chk.mjs\" ./chk_tmp.mjs)",
+      "Bash(rm -f ./chk_tmp.mjs)",
+      "PowerShell(node --import tsx verify_lettrage.mjs --apply 2>&1 | Select-Object -Last 35)",
+      "PowerShell(node --import tsx verify_lettrage.mjs --apply 2>&1 | Select-Object -Last 26)",
+      "PowerShell(node --import tsx scripts/reclasser-tva-encaissement.ts 2>&1 | Select-Object -Last 60)",
+      "PowerShell(node --import tsx scripts/reclasser-tva-encaissement.ts --apply 2>&1 | Select-Object -Last 40)",
+      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 22)",
+      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 20)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"TS errors: $\\($e.Count\\) \\(baseline 32\\)\")",
+      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 32)",
+      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 16)"
     ]
   }
 }

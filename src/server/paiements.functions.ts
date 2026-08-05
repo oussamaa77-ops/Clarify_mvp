@@ -56,6 +56,8 @@ export interface AnnulationPaiement {
   txDeliees: number;              // lignes de relevé délettrées (jamais supprimées)
   encaissementsSupprimes: number;
   ecrituresSupprimees: number;
+  /** Codes de lettrage annulés, et donc bascules de TVA défaites. */
+  lettragesAnnules: string[];
 }
 
 export const annulerPaiementFacture = createServerFn({ method: "POST" })
@@ -72,11 +74,41 @@ export const annulerPaiementFacture = createServerFn({ method: "POST" })
     const colEncaissement = estClient ? "facture_id" : "facture_fournisseur_id";
 
     const { data: f, error: eF } = await (sb as any)
-      .from(table).select("id,dossier_id,montant_ttc,statut_paiement").eq("id", data.facture_id).single();
+      // `numero` sert d'ancre au délettrage : c'est lui que portent les
+      // écritures en reference_piece quand la facture en a un.
+      .from(table).select("id,dossier_id,numero,montant_ttc,statut_paiement").eq("id", data.facture_id).single();
     if (eF || !f) throw new Error("Facture introuvable");
 
     if (f.statut_paiement === "non_payee") {
-      return { ok: true, dejaImpayee: true, txDeliees: 0, encaissementsSupprimes: 0, ecrituresSupprimees: 0 };
+      return { ok: true, dejaImpayee: true, txDeliees: 0, encaissementsSupprimes: 0, ecrituresSupprimees: 0, lettragesAnnules: [] };
+    }
+
+    // ── 0. DÉLETTRAGE COMPTABLE, AVANT toute suppression ──────────────────────
+    // La facture n'est plus réglée : sous le régime des encaissements, sa TVA
+    // n'est plus exigible. Il faut donc défaire le lettrage ET l'OD de bascule
+    // qui l'accompagne. On le fait EN PREMIER, tant que les écritures de
+    // règlement portent encore leur code — une fois supprimées (étapes 2 et 3),
+    // le lien serait perdu et la TVA resterait exigible à tort.
+    const lettragesAnnules: string[] = [];
+    try {
+      const ref = String(f.numero ?? f.id);
+      const { data: lettrees } = await (sb as any).from("ecritures_comptables")
+        .select("lettrage_code")
+        .eq("dossier_id", f.dossier_id)
+        .in("reference_piece", [ref, f.id])
+        .not("lettrage_code", "is", null);
+      const codes = [...new Set(((lettrees ?? []) as any[])
+        .map((l) => String(l.lettrage_code ?? "").trim()).filter(Boolean))];
+      if (codes.length) {
+        // Appel DIRECT au cœur : la server function ne rendrait rien à un
+        // appelant serveur, et on croirait le délettrage sans effet.
+        const { executerDelettrage } = await import("./lettrage-compta.functions");
+        const r = await executerDelettrage(sb, { dossierId: f.dossier_id, codes });
+        if (r.ok) lettragesAnnules.push(...r.codes);
+      }
+    } catch (e) {
+      // Migration lettrage non appliquée → rien à défaire, l'annulation continue.
+      console.warn("[ANNULATION] délettrage ignoré :", (e as any)?.message ?? e);
     }
 
     let txDeliees = 0, encaissementsSupprimes = 0, ecrituresSupprimees = 0;
@@ -170,5 +202,5 @@ export const annulerPaiementFacture = createServerFn({ method: "POST" })
       if (eMaj) throw new Error(`Mise à jour de la facture impossible : ${eMaj.message}`);
     }
 
-    return { ok: true, dejaImpayee: false, txDeliees, encaissementsSupprimes, ecrituresSupprimees };
+    return { ok: true, dejaImpayee: false, txDeliees, encaissementsSupprimes, ecrituresSupprimees, lettragesAnnules };
   });

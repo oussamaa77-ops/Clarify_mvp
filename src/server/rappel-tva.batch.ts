@@ -19,6 +19,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { sendMail } from "./mailer";
 import { rappelEcheanceTVA } from "./email.templates";
+import { COMPTES_TVA } from "../services/lettrage";
 
 // fetch tolérant au proxy TLS d'entreprise (repli undici sans vérif TLS).
 let PROXY_DIRECT = false;
@@ -115,17 +116,25 @@ export async function executerRappelsTVAJ3(
     const nomSociete = d.nom_societe ?? "Dossier";
 
     // Écritures TVA du dossier (mêmes comptes que la carte Dashboard / Fiscalité).
+    // Depuis le passage au régime des ENCAISSEMENTS, la TVA exigible vit sur
+    // 4455 / 3455 (alimentés par l'OD de bascule au lettrage). On garde 44551 /
+    // 34552 : c'est là que sont les écritures ANTÉRIEURES à la bascule, et les
+    // omettre rendrait le rappel muet sur tout l'historique.
+    const COMPTES_TVA_DECLARATION = [
+      COMPTES_TVA.client.exigible, COMPTES_TVA.fournisseur.exigible, "44551", "34552",
+    ];
+    const COLLECTEE = new Set([COMPTES_TVA.client.exigible, "44551"]);
     const { data: ecr } = await (sb as any).from("ecritures_comptables")
       .select("compte_numero,debit,credit,date_ecriture")
-      .eq("dossier_id", d.id).in("compte_numero", ["44551", "34552"]);
+      .eq("dossier_id", d.id).in("compte_numero", COMPTES_TVA_DECLARATION);
 
     const mois = [...new Set((ecr ?? []).map((e: any) => e.date_ecriture?.slice(0, 7)).filter(Boolean))].sort() as string[];
     const periode = mois[mois.length - 1] ?? null;
     if (!periode) { res.details.push({ dossier: nomSociete, periode: null, montant: 0, echeance: null, jours: null, statut: "aucune écriture TVA" }); res.ignores++; continue; }
 
     const ecrMois = (ecr ?? []).filter((e: any) => e.date_ecriture?.startsWith(periode));
-    const collectee = ecrMois.filter((e: any) => e.compte_numero === "44551").reduce((s: number, e: any) => s + Number(e.credit) - Number(e.debit), 0);
-    const recup = ecrMois.filter((e: any) => e.compte_numero === "34552").reduce((s: number, e: any) => s + Number(e.debit) - Number(e.credit), 0);
+    const collectee = ecrMois.filter((e: any) => COLLECTEE.has(e.compte_numero)).reduce((s: number, e: any) => s + Number(e.credit) - Number(e.debit), 0);
+    const recup = ecrMois.filter((e: any) => !COLLECTEE.has(e.compte_numero)).reduce((s: number, e: any) => s + Number(e.debit) - Number(e.credit), 0);
     const nette = Number((collectee - recup).toFixed(2));
     // Échéance = 20 du mois SUIVANT le mois déclaré (JS month index = Number(MM)).
     const echeance = new Date(Number(periode.slice(0, 4)), Number(periode.slice(5, 7)), 20);

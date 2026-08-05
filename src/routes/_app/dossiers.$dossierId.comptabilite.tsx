@@ -10,9 +10,13 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Loader2, Download, Trash2, Plus, Save, RefreshCw, AlertTriangle, CheckCircle } from "lucide-react";
+import { Loader2, Download, FileDown, Trash2, Plus, Save, RefreshCw, AlertTriangle, CheckCircle } from "lucide-react";
+import {
+  FORMATS_EXPORT, controlerExport, telechargerExport, type FormatExport,
+} from "@/services/exportSage";
 import { toast } from "sonner";
 import ImportGrandLivre from "@/components/ImportGrandLivre";
+import LettrageManuel from "@/components/compta/LettrageManuel";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/comptabilite")({
   component: ComptabilitePage,
@@ -28,6 +32,10 @@ interface Ecriture {
   credit: number;
   reference_piece: string | null;
   valide: boolean;
+  /** Code de lettrage GÉNÉRÉ (AA, AB…). Lecture seule ici : il n'a de sens
+      qu'attaché à un groupe équilibré, posé depuis l'onglet Lettrage. */
+  lettrage_code?: string | null;
+  lettrage_origine?: "auto" | "manuel" | null;
   _modifie?: boolean;
   _nouveau?: boolean;
 }
@@ -58,7 +66,7 @@ const nomOnglet = (nom: string) => nom.replace(/[\\/?*[\]:]/g, "-").slice(0, 31)
 
 function ComptabilitePage() {
   const { dossierId } = Route.useParams();
-  const [tab, setTab] = useState<"grandlivre"|"balance"|"saisie"|"import">("grandlivre");
+  const [tab, setTab] = useState<"grandlivre"|"balance"|"saisie"|"lettrage"|"import">("grandlivre");
   const [livre, setLivre] = useState<LivreKey>("tous");
   const [ecritures, setEcritures] = useState<Ecriture[]>([]);
   const [pcmComptes, setPcmComptes] = useState<{ numero: string; intitule: string }[]>([]);
@@ -275,6 +283,43 @@ function ComptabilitePage() {
   const { sousTotaux, total: totalBalance, resultat } = synthetiserBalance(balance);
 
   // Export Excel
+  // Export vers un logiciel comptable tiers (Sage 100 / FEC / CSV). Le code de
+  // lettrage voyage avec les écritures : c'est ce qui évite au cabinet de
+  // refaire le rapprochement à la main dans l'outil de destination.
+  const exporterVers = async (format: FormatExport) => {
+    if (!format) return;
+    if (!ecritures.length) { toast.error("Aucune écriture à exporter"); return; }
+    try {
+      const controle = controlerExport(ecritures as any[]);
+      // Un fichier déséquilibré est rejeté à l'import : le dire ici, où l'on
+      // sait encore quoi corriger, plutôt que de le découvrir dans Sage.
+      if (!controle.equilibre) {
+        toast.warning(`Export déséquilibré : débit ${fmt(controle.totalDebit)} ≠ crédit ${fmt(controle.totalCredit)} — le fichier sera probablement refusé à l'import.`, { duration: 9000 });
+      }
+      if (controle.lettragesDesequilibres.length) {
+        toast.warning(`Lettrage incohérent sur ${controle.lettragesDesequilibres.join(", ")} — à corriger dans l'onglet Lettrage.`, { duration: 9000 });
+      }
+      // Colonne de lettrage vide sur TOUT le fichier : ce n'est pas un défaut de
+      // l'export mais un dossier jamais lettré. Le dire explicitement, sinon on
+      // cherche le bug dans le générateur — ce qui est exactement ce qui est arrivé.
+      if (controle.nbLettrees === 0) {
+        toast.info("Aucune écriture lettrée dans ce dossier : la colonne « Lettrage » sortira vide. Lettrez d'abord depuis l'onglet Lettrage.", { duration: 9000 });
+      }
+      const intitules = Object.fromEntries(
+        (pcmComptes ?? []).map((c) => [c.numero, c.intitule]),
+      );
+      telechargerExport(
+        format, ecritures as any[],
+        dossierId,
+        filtreDateFin || `${new Date().getFullYear()}-12-31`,
+        { intitules },
+      );
+      toast.success(`${FORMATS_EXPORT[format].label} — ${controle.lignes} écriture(s), dont ${controle.nbLettrees} lettrée(s)`);
+    } catch (e: any) {
+      toast.error(`Export impossible : ${e?.message ?? e}`);
+    }
+  };
+
   const exportExcel = async () => {
     if (!ecritures.length) { toast.error("Aucune écriture à exporter"); return; }
     try {
@@ -283,11 +328,11 @@ function ComptabilitePage() {
 
       // Grand livre
       const glData = [
-        ["Date", "Journal", "Compte", "Libellé", "Débit", "Crédit", "Réf."],
-        ...ecritures.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
+        ["Date", "Journal", "Compte", "Libellé", "Lettrage", "Débit", "Crédit", "Réf."],
+        ...ecritures.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, e.lettrage_code||"", Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
       ];
       const wsGL = XLSX.utils.aoa_to_sheet(glData);
-      const glCols = [{wch:12},{wch:8},{wch:10},{wch:50},{wch:14},{wch:14},{wch:15}];
+      const glCols = [{wch:12},{wch:8},{wch:10},{wch:50},{wch:10},{wch:14},{wch:14},{wch:15}];
       wsGL["!cols"] = glCols;
       XLSX.utils.book_append_sheet(wb, wsGL, nomOnglet("Grand Livre"));
 
@@ -297,9 +342,9 @@ function ComptabilitePage() {
         const td = lignes.reduce((s,e)=>s+Number(e.debit),0);
         const tc = lignes.reduce((s,e)=>s+Number(e.credit),0);
         const data = [
-          ["Date","Journal","Compte","Libellé","Débit","Crédit","Réf."],
-          ...lignes.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
-          ["TOTAL","","","", td, tc, ""],
+          ["Date","Journal","Compte","Libellé","Lettrage","Débit","Crédit","Réf."],
+          ...lignes.map(e => [e.date_ecriture, e.journal_code, e.compte_numero, e.libelle, e.lettrage_code||"", Number(e.debit)||"", Number(e.credit)||"", e.reference_piece||""]),
+          ["TOTAL","","","","", td, tc, ""],
         ];
         const ws = XLSX.utils.aoa_to_sheet(data);
         ws["!cols"] = glCols;
@@ -360,6 +405,21 @@ function ComptabilitePage() {
             </Button>
           )}
           <Button variant="outline" onClick={exportExcel}><Download className="h-4 w-4 mr-2"/>Export Excel</Button>
+          {/* Export vers un AUTRE logiciel comptable : le lettrage part avec les
+              écritures, pour que le cabinet n'ait pas à le refaire à la main. */}
+          <Select value="" onValueChange={(v)=>exporterVers(v as FormatExport)}>
+            <SelectTrigger className="w-[190px]">
+              <FileDown className="h-4 w-4 mr-2 shrink-0"/>
+              <SelectValue placeholder="Export comptable…"/>
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(FORMATS_EXPORT) as FormatExport[]).map(f => (
+                <SelectItem key={f} value={f}>
+                  {FORMATS_EXPORT[f].label} — {FORMATS_EXPORT[f].description}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button variant="outline" onClick={load}><RefreshCw className="h-4 w-4 mr-2"/>Actualiser</Button>
         </div>
       </div>
@@ -398,6 +458,7 @@ function ComptabilitePage() {
           <TabsTrigger value="grandlivre">Grand Livre ({ecritures.length})</TabsTrigger>
           <TabsTrigger value="balance">Balance ({balance.length} comptes)</TabsTrigger>
           <TabsTrigger value="saisie">Saisie manuelle</TabsTrigger>
+          <TabsTrigger value="lettrage">Lettrage</TabsTrigger>
           <TabsTrigger value="import">+ Import</TabsTrigger>
         </TabsList>
 
@@ -435,7 +496,10 @@ function ComptabilitePage() {
                 <div className="col-span-1">Date</div>
                 <div className="col-span-1">Journal</div>
                 <div className="col-span-1">Compte</div>
-                <div className="col-span-4">Libellé</div>
+                {/* Libellé passe de 4 à 3 colonnes : la grille est en 12 et
+                    Lettrage doit tenir sans déborder (1+1+1+1+3+1+2+2 = 12). */}
+                <div className="col-span-3">Libellé</div>
+                <div className="col-span-1 text-center">Lettrage</div>
                 <div className="col-span-2 text-right">Débit</div>
                 <div className="col-span-2 text-right">Crédit</div>
               </div>
@@ -468,10 +532,19 @@ function ComptabilitePage() {
                         onChange={ev=>updateEcriture(e.id,"compte_numero",ev.target.value)}
                         className="w-full text-xs font-mono bg-transparent border-0 focus:outline-none focus:ring-1 focus:ring-primary rounded px-1"/>
                     </div>
-                    <div className="col-span-4">
+                    <div className="col-span-3">
                       <input value={e.libelle||""}
                         onChange={ev=>updateEcriture(e.id,"libelle",ev.target.value)}
                         className="w-full text-xs bg-transparent border-0 focus:outline-none focus:ring-1 focus:ring-primary rounded px-1"/>
+                    </div>
+                    {/* Lettrage : lecture seule. Le code n'est PAS éditable ici —
+                        il n'a de sens qu'attaché à un groupe équilibré, et le
+                        saisir à la main casserait l'appariement. On passe par
+                        l'onglet Lettrage, seul endroit qui contrôle l'équilibre. */}
+                    <div className="col-span-1 flex justify-center" title={e.lettrage_code ? `Lettré ${e.lettrage_code}${e.lettrage_origine ? ` (${e.lettrage_origine})` : ""}` : "Non lettré"}>
+                      {e.lettrage_code
+                        ? <Badge variant="secondary" className="font-mono text-[10px] px-1.5 py-0">{e.lettrage_code}</Badge>
+                        : <span className="text-muted-foreground/40 text-[10px]">—</span>}
                     </div>
                     <div className="col-span-2">
                       <input type="number" step="0.01" value={e.debit||""}
@@ -634,6 +707,11 @@ function ComptabilitePage() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ── LETTRAGE & RAPPROCHEMENT DES COMPTES DE TIERS ── */}
+        <TabsContent value="lettrage" className="mt-4">
+          <LettrageManuel dossierId={dossierId} />
         </TabsContent>
 
         {/* ── IMPORT EXCEL (réversible) ── */}

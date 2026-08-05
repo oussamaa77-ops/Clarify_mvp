@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
+import { COMPTES_TVA } from "@/services/lettrage";
 import { useServerFn } from "@tanstack/react-start";
 import { ocrFacture, matcherDocumentAvecTransactions } from "@/server/factures.functions";
 import { memoriserTiers } from "@/server/tiers-memoire.functions";
@@ -736,9 +737,12 @@ function FournisseursPage() {
         {
           dossier_id: dossierId,
           journal_code: "ACH",
-          compte_numero: "34552",
+          // TVA au régime des ENCAISSEMENTS : le droit à déduction ne naît qu'au
+          // décaissement. La TVA attend donc en 3458 et ne rejoint 3455
+          // (récupérable exigible) qu'au lettrage du règlement.
+          compte_numero: COMPTES_TVA.fournisseur.attente,
           date_ecriture: dateFacture,
-          libelle: `TVA ${nomFourn} ${ref}`,
+          libelle: `TVA en attente ${nomFourn} ${ref}`,
           debit: montantTva,
           credit: 0,
           valide: true,

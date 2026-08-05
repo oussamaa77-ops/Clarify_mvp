@@ -102,6 +102,40 @@ const donnees = (label, cond, detail = "") => {
       sansIce.length ? sansIce.map((l) => l.nomFournisseur).join(", ") : "OK");
     donnees("IF renseigné sur toutes les lignes", sansIf.length === 0,
       sansIf.length ? `à compléter dans l'annuaire : ${sansIf.map((l) => l.nomFournisseur).join(", ")}` : "OK");
+
+    // ── L'identité portée au relevé est bien CELLE DE L'ANNUAIRE ───────────────
+    // Non-vide ne suffit pas : la colonne doit reprendre la valeur saisie sur la
+    // fiche. On rejoue la résolution à l'envers, depuis les fiches, et on exige
+    // que toute valeur présente dans l'annuaire ressorte dans le fichier.
+    const fiches = fournisseurs.data ?? [];
+    const norm = (v) => String(v ?? "").trim().toUpperCase().replace(/\s+/g, " ");
+    const perdus = [];
+    for (const l of lignes) {
+      const fiche = fiches.find((t) => norm(t.nom) === norm(l.nomFournisseur));
+      if (!fiche) continue;
+      if (String(fiche.ice ?? "").trim() && !l.iceFournisseur) perdus.push(`${l.nomFournisseur} : ICE`);
+      if (String(fiche.if_fiscal ?? "").trim() && !l.ifFournisseur) perdus.push(`${l.nomFournisseur} : IF`);
+    }
+    check("aucune valeur de l'annuaire perdue en route (ICE/IF)", perdus.length === 0,
+      perdus.join(", ") || `${fiches.length} fiche(s) confrontée(s)`);
+
+    // ── RÉGRESSION : le générateur n'invente pas la clé de rattachement ────────
+    // La panne constatée en production ne venait pas d'ici mais de l'APPELANT :
+    // l'onglet Fiscalité chargeait les achats pour le seul calcul de la TVA, avec
+    // un select réduit aux montants — donc sans `fournisseur_id` ni
+    // `fournisseur_nom`. Privée de clé, la jointure ne trouvait rien et les trois
+    // colonnes partaient vides malgré un annuaire complet. On fige le constat :
+    // toute lecture d'achats qui omet ces deux colonnes vide le relevé.
+    const achatsSansLien = (achats.data ?? []).map(({ fournisseur_id, fournisseur_nom, ...reste }) => reste);
+    const degrade = construireReleveDeductions({
+      achats: achatsSansLien,
+      paiements: paiements.data ?? [],
+      fournisseurs: fiches,
+    });
+    const encoreIdentifiees = degrade.filter((l) => l.iceFournisseur || l.ifFournisseur || l.nomFournisseur);
+    check("témoin : sans fournisseur_id/nom, l'identité est bien perdue",
+      degrade.length > 0 && encoreIdentifiees.length === 0,
+      `${encoreIdentifiees.length}/${degrade.length} ligne(s) encore identifiée(s)`);
     if (sansIf.length) {
       const manquants = [...new Set(sansIf.map((l) => l.nomFournisseur))];
       console.log(`\n  ⚠️  ACTION REQUISE avant dépôt SIMPL : renseigner l'IF de ${manquants.length} fournisseur(s)`);

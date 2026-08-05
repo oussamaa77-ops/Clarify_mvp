@@ -225,7 +225,17 @@ function FiscalitePage() {
   const exportReleveDeductions = async () => {
     setExportEnCours(true);
     try {
-      const [{ data: fournisseurs }, { data: tx }, { data: enc }, { data: pcm }] = await Promise.all([
+      const [{ data: detailAchats }, { data: fournisseurs }, { data: tx }, { data: enc }, { data: pcm }] = await Promise.all([
+        // RATTACHEMENT AU FOURNISSEUR : `achats` est chargé pour le calcul de la
+        // TVA, qui n'a besoin que des montants — il ne porte donc ni
+        // `fournisseur_id` ni `fournisseur_nom`. Sans cette clé, la jointure sur
+        // l'annuaire n'a rien à chercher et les colonnes IF / Nom / ICE partent
+        // vides alors que les fiches sont renseignées. On complète ici, à
+        // l'export, plutôt qu'au chargement de la page : `lignes` est un jsonb
+        // volumineux qui n'a d'utilité que pour la désignation DGI.
+        supabase.from("factures_fournisseurs")
+          .select("id,numero,fournisseur_id,fournisseur_nom,mode_reglement,date_paiement,lignes")
+          .eq("dossier_id", dossierId),
         // Annuaire COMPLET : la jointure consolide les fiches en double, il ne
         // faut donc pas le restreindre au seul fournisseur pointé par la facture.
         supabase.from("fournisseurs").select("id,nom,ice,if_fiscal").eq("dossier_id", dossierId),
@@ -240,8 +250,12 @@ function FiscalitePage() {
         supabase.from("pcm_reference").select("numero,intitule").like("numero", "6%"),
       ]);
 
+      // Montants (déjà chargés) + identité du fournisseur et détail de la pièce.
+      const detail = new Map(((detailAchats ?? []) as any[]).map(d => [d.id, d]));
+      const achatsComplets = achats.map(f => ({ ...f, ...(detail.get(f.id) ?? {}) }));
+
       const lignes = construireReleveDeductions({
-        achats,
+        achats: achatsComplets,
         paiements,
         fournisseurs: (fournisseurs ?? []) as any[],
         modes: indexerModesPaiement("fournisseur", { transactions: tx ?? [], encaissements: enc ?? [] }),

@@ -15,6 +15,20 @@ import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { CLIENT_PREFIXES, FOURNISSEUR_PREFIXES } from "@/lib/import-grandlivre";
 
+// Le proxy TLS d'entreprise fait échouer le `fetch` global côté serveur : sans
+// ce repli undici, supabase-js rend des erreurs réseau opaques et le lettrage
+// paraît « ne rien faire ». Même dispositif que paiements.functions.ts.
+let PROXY_DIRECT = false;
+async function proxyFetch(input: any, init?: any): Promise<Response> {
+  const direct = async () => {
+    const { fetch: uf, Agent } = await import("undici");
+    return (uf as any)(String(input), { ...init, dispatcher: new Agent({ connect: { rejectUnauthorized: false } }) });
+  };
+  if (PROXY_DIRECT) return direct();
+  try { return await fetch(String(input), init); }
+  catch { PROXY_DIRECT = true; return direct(); }
+}
+
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
   const key =
@@ -22,7 +36,7 @@ function getSupabase() {
     process.env.SUPABASE_PUBLISHABLE_KEY ??
     process.env.VITE_SUPABASE_PUBLISHABLE_KEY ??
     "";
-  return createClient(url, key);
+  return createClient(url, key, { global: { fetch: (i: any, init?: any) => proxyFetch(i, init) } });
 }
 
 export type DocKind = "facture_client" | "facture_fournisseur" | "justificatif" | "ecriture";
@@ -350,7 +364,26 @@ export const lettrerDossier = createServerFn({ method: "POST" })
       }
     }
 
-    return { lies: details.length, details };
+    // 4) LETTRAGE COMPTABLE : le rapprochement bancaire a créé/soldé des pièces,
+    // donc de nouveaux postes s'apparient au grand livre. On enchaîne la passe
+    // d'appariement sûr, qui pose les codes AA/AB ET rend la TVA exigible.
+    //
+    // Best-effort : un échec ici (migration lettrage non appliquée, par exemple)
+    // ne doit pas annuler le rapprochement bancaire, qui lui a réussi.
+    let lettresComptables: string[] = [];
+    if (details.length) {
+      try {
+        // Appel DIRECT au cœur : la server function ne rendrait rien à un
+        // appelant serveur, et les codes posés seraient perdus.
+        const { executerLettrageAuto } = await import("./lettrage-compta.functions");
+        const r = await executerLettrageAuto(supabase, { dossierId: data.dossierId });
+        if (r.ok) lettresComptables = r.codes;
+      } catch (e) {
+        console.warn("[LETTRAGE] passe comptable ignorée :", (e as any)?.message ?? e);
+      }
+    }
+
+    return { lies: details.length, details, lettresComptables };
   });
 
 // ─── getRapprochementGL : données pour l'UI Banque (candidats GL + audit) ──────

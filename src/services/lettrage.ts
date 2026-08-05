@@ -1,0 +1,496 @@
+// ============================================================================
+// lettrage.ts — Moteur de lettrage comptable (PUR, sans I/O).
+//
+// Le lettrage apparie les lignes d'un compte de tiers qui se soldent entre
+// elles : la facture (débit chez un client, crédit chez un fournisseur) et son
+// ou ses règlements. Les lignes appariées reçoivent un même CODE — AA, AB, AC…
+// — qui matérialise le rapprochement dans le grand livre et dans les exports.
+//
+// Deux règles gouvernent tout ce fichier :
+//
+//  1. UN LETTRAGE EST ÉQUILIBRÉ. Σdébit == Σcrédit sur la sélection, sinon on
+//     refuse. Un lettrage déséquilibré ferait disparaître un résidu de créance
+//     ou de dette du suivi des postes ouverts — c'est-à-dire de la balance âgée
+//     et des relances. Le partiel se traite en lettrant la quote-part réglée,
+//     jamais en forçant l'appariement.
+//
+//  2. LE LETTRAGE DÉCLENCHE LA TVA. Sous le régime marocain des encaissements,
+//     la TVA n'est exigible qu'au règlement. Le moment où l'on lettre est donc
+//     exactement le moment où la TVA bascule du compte d'attente vers le compte
+//     exigible. Les deux opérations partagent le même code : délettrer, c'est
+//     annuler la bascule, sans exception possible.
+//
+// Ce module ne touche NI la base NI le réseau : il transforme des lignes en
+// décisions. La persistance vit dans src/server/lettrage.functions.ts.
+// ============================================================================
+
+import { CLIENT_PREFIXES, FOURNISSEUR_PREFIXES } from "@/lib/import-grandlivre";
+
+const round2 = (x: number) => Math.round(x * 100) / 100;
+const n = (v: unknown): number => {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+};
+
+/** Tolérance d'équilibre : le centime. En deçà, deux montants sont « égaux ». */
+export const TOLERANCE_LETTRAGE = 0.005;
+
+// ─── Comptes de TVA du régime des encaissements ──────────────────────────────
+// La TVA transite par un compte d'ATTENTE tant que la pièce n'est pas réglée,
+// puis bascule vers le compte EXIGIBLE, qui seul alimente la déclaration.
+//
+// Ces numéros sont regroupés ici — et pas disséminés dans le code — parce qu'un
+// cabinet peut imposer ses propres sous-comptes (44581 plutôt que 4458, par
+// exemple) : le jour où cela arrive, c'est cette constante qu'on paramètre.
+// Clés = le SENS DU TIERS (et non « vente »/« achat ») : c'est le compte lettré
+// qui désigne le couple, et l'indexer directement par `sens` supprime toute
+// possibilité de désaccord entre les deux vocabulaires.
+export const COMPTES_TVA = {
+  /** Vente : TVA facturée en attente → TVA collectée exigible. */
+  client:      { attente: "4458", exigible: "4455" },
+  /** Achat : TVA sur achats en attente → TVA récupérable exigible. */
+  fournisseur: { attente: "3458", exigible: "3455" },
+} as const;
+
+export type SensTiers = "client" | "fournisseur";
+export type ComptesTva = Record<SensTiers, { attente: string; exigible: string }>;
+
+// ─── 1. Génération des codes de lettrage ─────────────────────────────────────
+
+/**
+ * Code de lettrage à partir d'un rang (1 → AA, 2 → AB, …).
+ *
+ * La séquence est bijective base 26 sur DEUX lettres au minimum : AA…AZ, BA…ZZ,
+ * puis AAA au-delà de 676. Le minimum à deux lettres est délibéré — il évite
+ * toute confusion avec les codes à une lettre (A, B, C…) que les logiciels
+ * comptables produisent et que `code_lettrage` conserve à l'import.
+ */
+export function codeLettrageDepuisRang(rang: number): string {
+  if (!Number.isInteger(rang) || rang < 1) {
+    throw new Error(`Rang de lettrage invalide : ${rang}`);
+  }
+  // Base 26 à largeur FIXE, élargie quand la largeur courante est saturée :
+  // 2 lettres couvrent 676 codes (AA…ZZ), puis on passe à 3 (AAA…). Une
+  // numération bijective ferait collisionner le rang 1 et le rang 27 sur « AA »
+  // dès qu'on impose un minimum de deux lettres.
+  let idx = rang - 1;
+  let largeur = 2;
+  let capacite = 26 ** largeur;
+  while (idx >= capacite) {
+    idx -= capacite;
+    largeur += 1;
+    capacite = 26 ** largeur;
+  }
+  let code = "";
+  for (let i = 0; i < largeur; i++) {
+    code = String.fromCharCode(65 + (idx % 26)) + code;
+    idx = Math.floor(idx / 26);
+  }
+  return code;
+}
+
+/** Rang d'un code de lettrage (AA → 1). Inverse exact de `codeLettrageDepuisRang`. */
+export function rangDepuisCodeLettrage(code: string): number | null {
+  const c = String(code ?? "").trim().toUpperCase();
+  if (!/^[A-Z]{2,}$/.test(c)) return null;
+  let idx = 0;
+  for (const ch of c) idx = idx * 26 + (ch.charCodeAt(0) - 65);
+  // Décale du nombre total de codes que couvrent les largeurs inférieures.
+  let base = 0;
+  for (let w = 2; w < c.length; w++) base += 26 ** w;
+  return base + idx + 1;
+}
+
+/**
+ * Prochain code libre d'un dossier, en repartant du plus grand code DÉJÀ ATTRIBUÉ.
+ *
+ * On ne compte pas les codes existants, on prend le maximum : un délettrage
+ * laisse un trou dans la séquence, et réattribuer ce trou ferait resurgir un
+ * code déjà vu dans un export antérieur — deux rapprochements différents
+ * porteraient alors la même lettre dans les archives du cabinet.
+ */
+export function prochainCodeLettrage(codesExistants: (string | null | undefined)[]): string {
+  let max = 0;
+  for (const c of codesExistants) {
+    const r = rangDepuisCodeLettrage(c ?? "");
+    if (r !== null && r > max) max = r;
+  }
+  return codeLettrageDepuisRang(max + 1);
+}
+
+/** Suite de `n` codes libres — pour lettrer plusieurs groupes en une passe. */
+export function suiteCodesLettrage(codesExistants: (string | null | undefined)[], combien: number): string[] {
+  const depart = rangDepuisCodeLettrage(prochainCodeLettrage(codesExistants)) ?? 1;
+  return Array.from({ length: Math.max(0, combien) }, (_, i) => codeLettrageDepuisRang(depart + i));
+}
+
+// ─── 2. Contrôle d'équilibre ─────────────────────────────────────────────────
+
+/** Ligne du grand livre, vue sous l'angle du lettrage. */
+export interface LigneLettrable {
+  id: string;
+  compte_numero?: string | null;
+  libelle?: string | null;
+  debit?: number | string | null;
+  credit?: number | string | null;
+  date_ecriture?: string | null;
+  reference_piece?: string | null;
+  lettrage_code?: string | null;
+}
+
+export interface ControleEquilibre {
+  ok: boolean;
+  totalDebit: number;
+  totalCredit: number;
+  ecart: number;
+  raison: string | null;
+}
+
+/**
+ * Une sélection est lettrable si elle porte au moins deux lignes, ne mélange pas
+ * plusieurs comptes de tiers, et se solde exactement.
+ *
+ * Le contrôle « un seul compte » n'est pas une coquetterie : lettrer ensemble
+ * deux comptes auxiliaires différents solderait la dette d'un tiers avec la
+ * créance d'un autre. Cela n'a de sens qu'en compensation, qui suppose une
+ * convention signée entre les parties et se passe alors en OD explicite.
+ */
+export function controlerEquilibre(lignes: LigneLettrable[]): ControleEquilibre {
+  const totalDebit = round2(lignes.reduce((s, l) => s + n(l.debit), 0));
+  const totalCredit = round2(lignes.reduce((s, l) => s + n(l.credit), 0));
+  const ecart = round2(totalDebit - totalCredit);
+  const base = { totalDebit, totalCredit, ecart };
+
+  if (lignes.length < 2) {
+    return { ...base, ok: false, raison: "Sélectionnez au moins deux lignes à apparier." };
+  }
+  const comptes = new Set(lignes.map((l) => String(l.compte_numero ?? "").trim()).filter(Boolean));
+  if (comptes.size > 1) {
+    return { ...base, ok: false, raison: `Lettrage impossible entre comptes différents (${[...comptes].join(", ")}).` };
+  }
+  if (Math.abs(ecart) > TOLERANCE_LETTRAGE) {
+    return {
+      ...base, ok: false,
+      raison: `Sélection déséquilibrée : débit ${totalDebit.toFixed(2)} ≠ crédit ${totalCredit.toFixed(2)} (écart ${ecart.toFixed(2)}).`,
+    };
+  }
+  if (totalDebit === 0 && totalCredit === 0) {
+    return { ...base, ok: false, raison: "Sélection sans montant : rien à lettrer." };
+  }
+  return { ...base, ok: true, raison: null };
+}
+
+/** Sens d'un compte de tiers, d'après son préfixe PCM (342x client / 441x fournisseur). */
+export function sensDuCompte(compte: string | null | undefined): SensTiers | null {
+  const c = String(compte ?? "").trim();
+  if (!c) return null;
+  if (FOURNISSEUR_PREFIXES.some((p) => c.startsWith(p))) return "fournisseur";
+  if (CLIENT_PREFIXES.some((p) => c.startsWith(p))) return "client";
+  return null;
+}
+
+// ─── 3. Bascule de TVA (régime des encaissements) ────────────────────────────
+
+/** Ligne d'OD à insérer, exprimée sans dépendance à la base. */
+export interface LigneOD {
+  journal_code: "OD";
+  compte_numero: string;
+  date_ecriture: string;
+  libelle: string;
+  debit: number;
+  credit: number;
+  reference_piece: string | null;
+  lettrage_code: string;
+}
+
+export interface OptionsBasculeTva {
+  sens: SensTiers;
+  /** TVA de la pièce, au prorata de ce qui vient d'être réglé. */
+  montantTva: number;
+  date: string;
+  /** Référence de la pièce d'origine — relie l'OD à la facture réglée. */
+  reference?: string | null;
+  libelle?: string | null;
+  lettrageCode: string;
+  comptes?: ComptesTva;
+}
+
+/**
+ * Écriture d'OD qui rend la TVA exigible au moment du règlement.
+ *
+ *   VENTE   : D 4458 (attente) / C 4455 (exigible)  → la TVA devient due
+ *   ACHAT   : D 3455 (exigible) / C 3458 (attente)  → le droit à déduction naît
+ *
+ * Rend un tableau VIDE si la TVA est nulle : une pièce exonérée ou hors champ
+ * ne déclenche aucune bascule, et une OD à zéro ne ferait que polluer le journal.
+ */
+export function construireBasculeTva(opts: OptionsBasculeTva): LigneOD[] {
+  const tva = round2(n(opts.montantTva));
+  if (tva <= 0) return [];
+
+  const comptes = (opts.comptes ?? COMPTES_TVA)[opts.sens];
+  const ref = opts.reference ? String(opts.reference) : null;
+  const quoi = opts.libelle ? ` ${opts.libelle}` : ref ? ` ${ref}` : "";
+  const libelle = opts.sens === "client"
+    ? `TVA exigible sur encaissement${quoi}`
+    : `TVA déductible sur décaissement${quoi}`;
+
+  const commun = {
+    journal_code: "OD" as const,
+    date_ecriture: opts.date,
+    libelle: libelle.slice(0, 200),
+    reference_piece: ref,
+    lettrage_code: opts.lettrageCode,
+  };
+
+  // L'ordre débit puis crédit n'a pas d'effet comptable, mais rend le journal
+  // lisible tel quel dans le grand livre et dans les exports.
+  return opts.sens === "client"
+    ? [
+        { ...commun, compte_numero: comptes.attente,  debit: tva, credit: 0 },
+        { ...commun, compte_numero: comptes.exigible, debit: 0,   credit: tva },
+      ]
+    : [
+        { ...commun, compte_numero: comptes.exigible, debit: tva, credit: 0 },
+        { ...commun, compte_numero: comptes.attente,  debit: 0,   credit: tva },
+      ];
+}
+
+/**
+ * Quote-part de TVA à basculer quand le règlement est PARTIEL.
+ *
+ * Le droit à déduction naît à proportion du décaissement : régler 40 % d'une
+ * facture rend 40 % de sa TVA exigible. On borne à la TVA totale — un cumul de
+ * règlements supérieur au TTC (saisie en double) ne crée pas de TVA nouvelle.
+ */
+export function tvaProportionnelle(montantRegle: number, montantTtc: number, tvaTotale: number): number {
+  const ttc = n(montantTtc);
+  const tva = n(tvaTotale);
+  if (ttc <= 0 || tva <= 0) return 0;
+  const part = Math.min(1, Math.max(0, n(montantRegle) / ttc));
+  return round2(tva * part);
+}
+
+// ─── 4. Décision de lettrage ─────────────────────────────────────────────────
+
+export interface PieceReglee {
+  /** TTC de la pièce, base du prorata de TVA. */
+  montantTtc: number;
+  montantTva: number;
+  reference?: string | null;
+}
+
+export interface PlanLettrage {
+  ok: boolean;
+  raison: string | null;
+  code: string;
+  ligneIds: string[];
+  sens: SensTiers | null;
+  /** OD de bascule à insérer — vide si la pièce ne porte pas de TVA. */
+  od: LigneOD[];
+  montantLettre: number;
+}
+
+export interface OptionsPlanLettrage {
+  lignes: LigneLettrable[];
+  codesExistants: (string | null | undefined)[];
+  /** Pièce réglée : sans elle, on lettre sans basculer de TVA. */
+  piece?: PieceReglee | null;
+  date?: string;
+  comptes?: ComptesTva;
+}
+
+/**
+ * Plan complet d'un lettrage : le code à poser, les lignes à estampiller et
+ * l'OD de TVA à passer. Ne fait AUCUN accès base — l'appelant exécute le plan.
+ *
+ * Refuser tôt (équilibre, comptes mélangés, lignes déjà lettrées) évite qu'un
+ * lettrage partiellement appliqué laisse la base dans un état bâtard : soit le
+ * plan est valide et s'exécute en entier, soit rien n'est écrit.
+ */
+export function planifierLettrage(opts: OptionsPlanLettrage): PlanLettrage {
+  const vide: Omit<PlanLettrage, "ok" | "raison"> = {
+    code: "", ligneIds: [], sens: null, od: [], montantLettre: 0,
+  };
+
+  const dejaLettrees = opts.lignes.filter((l) => String(l.lettrage_code ?? "").trim());
+  if (dejaLettrees.length) {
+    const codes = [...new Set(dejaLettrees.map((l) => l.lettrage_code))].join(", ");
+    return { ...vide, ok: false, raison: `Sélection déjà lettrée (${codes}) — délettrez d'abord.` };
+  }
+
+  const eq = controlerEquilibre(opts.lignes);
+  if (!eq.ok) return { ...vide, ok: false, raison: eq.raison };
+
+  const compte = String(opts.lignes[0]?.compte_numero ?? "").trim();
+  const sens = sensDuCompte(compte);
+  const code = prochainCodeLettrage(opts.codesExistants);
+  const date = opts.date ?? new Date().toISOString().slice(0, 10);
+
+  // La bascule de TVA n'a de sens que sur un compte de tiers identifié : c'est
+  // le sens (client / fournisseur) qui désigne le couple de comptes de TVA.
+  // Sur un compte non auxiliaire, on lettre sans basculer — et on le dit.
+  const od = sens && opts.piece
+    ? construireBasculeTva({
+        sens,
+        montantTva: tvaProportionnelle(eq.totalDebit, opts.piece.montantTtc, opts.piece.montantTva),
+        date,
+        reference: opts.piece.reference ?? null,
+        lettrageCode: code,
+        comptes: opts.comptes,
+      })
+    : [];
+
+  return {
+    ok: true,
+    raison: sens ? null : `Compte ${compte} hors comptes de tiers : lettrage sans bascule de TVA.`,
+    code,
+    ligneIds: opts.lignes.map((l) => l.id),
+    sens,
+    od,
+    montantLettre: eq.totalDebit,
+  };
+}
+
+// ─── 5. Délettrage ───────────────────────────────────────────────────────────
+
+export interface PlanDelettrage {
+  ok: boolean;
+  raison: string | null;
+  codes: string[];
+  /** Lignes à dé-estampiller (lettrage_code → NULL). */
+  ligneIds: string[];
+  /** OD de bascule TVA à SUPPRIMER — elles portent le code et vivent en journal OD. */
+  odASupprimer: string[];
+}
+
+/**
+ * Plan de délettrage d'une sélection.
+ *
+ * Le délettrage est un TOUT-OU-RIEN par code : on ne peut pas retirer une seule
+ * ligne d'un lettrage à trois lignes sans déséquilibrer les deux qui restent.
+ * Sélectionner une ligne lettrée délettre donc l'intégralité de son code — y
+ * compris les lignes non sélectionnées, qu'on renvoie explicitement pour que
+ * l'appelant puisse le signaler à l'utilisateur.
+ */
+export function planifierDelettrage(
+  selection: LigneLettrable[],
+  toutesLignesDuDossier: LigneLettrable[],
+  comptes: ComptesTva = COMPTES_TVA,
+): PlanDelettrage {
+  const codes = [...new Set(
+    selection.map((l) => String(l.lettrage_code ?? "").trim()).filter(Boolean),
+  )];
+  if (!codes.length) {
+    return { ok: false, raison: "Aucune ligne lettrée dans la sélection.", codes: [], ligneIds: [], odASupprimer: [] };
+  }
+
+  // Toutes les lignes portant l'un de ces codes, sélectionnées ou non.
+  const concernees = toutesLignesDuDossier.filter((l) =>
+    codes.includes(String(l.lettrage_code ?? "").trim()));
+
+  // Les OD de bascule TVA sont reconnaissables : même code, comptes de TVA.
+  const comptesTva = new Set<string>(
+    Object.values(comptes).flatMap((c) => [c.attente, c.exigible]),
+  );
+  const estBasculeTva = (l: LigneLettrable) =>
+    comptesTva.has(String(l.compte_numero ?? "").trim());
+
+  return {
+    ok: true,
+    raison: null,
+    codes,
+    ligneIds: concernees.filter((l) => !estBasculeTva(l)).map((l) => l.id),
+    odASupprimer: concernees.filter(estBasculeTva).map((l) => l.id),
+  };
+}
+
+// ─── 6. Postes ouverts d'un compte de tiers (alimente l'écran) ───────────────
+
+export interface PosteTiers {
+  compte: string;
+  lignes: LigneLettrable[];
+  totalDebit: number;
+  totalCredit: number;
+  /** Résidu non soldé : > 0 = créance (client) ou dette (fournisseur) restante. */
+  solde: number;
+  nbLettrees: number;
+}
+
+/** Regroupe les lignes par compte de tiers et calcule le résidu de chacun. */
+export function regrouperParCompte(lignes: LigneLettrable[]): PosteTiers[] {
+  const parCompte = new Map<string, LigneLettrable[]>();
+  for (const l of lignes) {
+    const c = String(l.compte_numero ?? "").trim();
+    if (!c) continue;
+    const liste = parCompte.get(c);
+    if (liste) liste.push(l); else parCompte.set(c, [l]);
+  }
+  return [...parCompte.entries()]
+    .map(([compte, ls]) => {
+      const totalDebit = round2(ls.reduce((s, l) => s + n(l.debit), 0));
+      const totalCredit = round2(ls.reduce((s, l) => s + n(l.credit), 0));
+      return {
+        compte,
+        lignes: ls,
+        totalDebit,
+        totalCredit,
+        solde: round2(totalDebit - totalCredit),
+        nbLettrees: ls.filter((l) => String(l.lettrage_code ?? "").trim()).length,
+      };
+    })
+    .sort((a, b) => a.compte.localeCompare(b.compte));
+}
+
+/**
+ * Appariement AUTOMATIQUE des postes d'un compte : rapproche les lignes qui se
+ * soldent exactement, du plus simple au moins évident.
+ *
+ *  1. même `reference_piece` de part et d'autre et solde nul → cas le plus sûr,
+ *     c'est la facture et son règlement portant la même référence ;
+ *  2. montant exact et UNIQUE en face → une facture de 1 234,56 et un unique
+ *     règlement de 1 234,56 ne peuvent guère être autre chose.
+ *
+ * On s'arrête là volontairement. Apparier « au plus proche » ou combiner N
+ * lignes contre M produit des rapprochements plausibles mais faux, que le
+ * comptable devra défaire un par un : l'écran manuel est fait pour ces cas.
+ */
+export function apparierAutomatiquement(lignes: LigneLettrable[]): LigneLettrable[][] {
+  const ouvertes = lignes.filter((l) => !String(l.lettrage_code ?? "").trim());
+  const debits = ouvertes.filter((l) => n(l.debit) > 0);
+  const credits = ouvertes.filter((l) => n(l.credit) > 0);
+  const consommees = new Set<string>();
+  const groupes: LigneLettrable[][] = [];
+
+  // 1) Par référence de pièce commune.
+  const parRef = new Map<string, LigneLettrable[]>();
+  for (const l of ouvertes) {
+    const ref = String(l.reference_piece ?? "").trim();
+    if (!ref) continue;
+    const g = parRef.get(ref);
+    if (g) g.push(l); else parRef.set(ref, [l]);
+  }
+  for (const [, groupe] of parRef) {
+    if (groupe.length < 2) continue;
+    if (groupe.some((l) => consommees.has(l.id))) continue;
+    if (controlerEquilibre(groupe).ok) {
+      groupe.forEach((l) => consommees.add(l.id));
+      groupes.push(groupe);
+    }
+  }
+
+  // 2) Montant exact et unique en face.
+  for (const d of debits) {
+    if (consommees.has(d.id)) continue;
+    const montant = n(d.debit);
+    const enFace = credits.filter((c) =>
+      !consommees.has(c.id) && Math.abs(n(c.credit) - montant) <= TOLERANCE_LETTRAGE);
+    if (enFace.length !== 1) continue;      // ambigu → laissé au comptable
+    const paire = [d, enFace[0]];
+    if (!controlerEquilibre(paire).ok) continue;
+    paire.forEach((l) => consommees.add(l.id));
+    groupes.push(paire);
+  }
+
+  return groupes;
+}
