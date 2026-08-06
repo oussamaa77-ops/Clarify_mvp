@@ -26,6 +26,21 @@ export interface LigneBalance {
   sens: "D" | "C";
 }
 
+/**
+ * Ventilation du solde d'un compte sur DEUX colonnes (norme Sage 100 / CGNC) :
+ * un compte alimente soit « solde débiteur », soit « solde créditeur », jamais
+ * les deux. C'est cette ventilation — et non un badge de sens — qui rend les
+ * colonnes additionnables, donc la balance contrôlable.
+ *
+ * Le solde est recalculé depuis les cumuls plutôt que lu dans `solde`/`sens` :
+ * les deux champs sont dérivés côté appelant et ne peuvent pas servir de source
+ * de vérité pour un total.
+ */
+export function ventilerSolde(l: LigneBalance): { debiteur: number; crediteur: number } {
+  const delta = round2(n(l.total_debit) - n(l.total_credit));
+  return delta >= 0 ? { debiteur: delta, crediteur: 0 } : { debiteur: 0, crediteur: -delta };
+}
+
 /** Intitulés CGNC des classes de comptes. */
 export const CLASSES_CGNC: Record<string, string> = {
   "1": "Financement permanent",
@@ -53,6 +68,10 @@ export interface SousTotalClasse {
   /** Solde de la classe, en valeur absolue. */
   solde: number;
   sens: "D" | "C";
+  /** Σ des soldes DÉBITEURS des comptes de la classe (colonne Sage). */
+  solde_debiteur: number;
+  /** Σ des soldes CRÉDITEURS des comptes de la classe (colonne Sage). */
+  solde_crediteur: number;
 }
 
 /**
@@ -64,15 +83,20 @@ export interface SousTotalClasse {
  * pseudo-classe « ? » plutôt que d'être silencieusement perdu.
  */
 export function sousTotauxParClasse(balance: LigneBalance[]): SousTotalClasse[] {
-  const acc = new Map<string, { nb: number; debit: number; credit: number }>();
+  const acc = new Map<string, { nb: number; debit: number; credit: number; sd: number; sc: number }>();
 
   for (const l of balance) {
     const premier = String(l.compte ?? "").trim().charAt(0);
     const classe = /^[0-9]$/.test(premier) ? premier : "?";
-    const cell = acc.get(classe) ?? { nb: 0, debit: 0, credit: 0 };
+    const cell = acc.get(classe) ?? { nb: 0, debit: 0, credit: 0, sd: 0, sc: 0 };
+    const { debiteur, crediteur } = ventilerSolde(l);
     cell.nb += 1;
     cell.debit += n(l.total_debit);
     cell.credit += n(l.total_credit);
+    // Ventilation ligne à ligne, jamais sur le net de la classe : un fournisseur
+    // débiteur ne doit pas être compensé par un fournisseur créditeur.
+    cell.sd += debiteur;
+    cell.sc += crediteur;
     acc.set(classe, cell);
   }
 
@@ -90,6 +114,8 @@ export function sousTotauxParClasse(balance: LigneBalance[]): SousTotalClasse[] 
         total_credit: credit,
         solde: round2(Math.abs(debit - credit)),
         sens: debit >= credit ? "D" : "C",
+        solde_debiteur: round2(v.sd),
+        solde_crediteur: round2(v.sc),
       };
     });
 }
@@ -98,17 +124,41 @@ export interface TotalGeneralBalance {
   nbComptes: number;
   total_debit: number;
   total_credit: number;
+  /** Σ des soldes débiteurs de tous les comptes. */
+  total_solde_debiteur: number;
+  /** Σ des soldes créditeurs de tous les comptes. */
+  total_solde_crediteur: number;
   /** |Σ débits − Σ crédits| : 0 sur une balance équilibrée. */
   ecart: number;
+  /** |Σ soldes débiteurs − Σ soldes créditeurs| — égal à `ecart`, cf. ci-dessous. */
+  ecart_soldes: number;
   equilibre: boolean;
 }
 
-/** Total général — le contrôle de la partie double. */
+/**
+ * Total général — le double contrôle de la partie double.
+ *
+ * Les deux couples de colonnes doivent s'égaliser : Σ débits = Σ crédits ET
+ * Σ soldes débiteurs = Σ soldes créditeurs. Ce n'est pas une coïncidence mais
+ * une identité — Σ SD − Σ SC = Σ(Dᵢ − Cᵢ) = Σ D − Σ C — donc `ecart_soldes`
+ * vaut toujours `ecart` : les soldes ne s'égalisent que si les mouvements
+ * s'égalisent. On calcule quand même les deux séparément pour que l'écran
+ * affiche l'anomalie plutôt que de la masquer par un total recopié.
+ */
 export function totalGeneralBalance(balance: LigneBalance[]): TotalGeneralBalance {
   const total_debit = round2(balance.reduce((s, l) => s + n(l.total_debit), 0));
   const total_credit = round2(balance.reduce((s, l) => s + n(l.total_credit), 0));
+  const total_solde_debiteur = round2(balance.reduce((s, l) => s + ventilerSolde(l).debiteur, 0));
+  const total_solde_crediteur = round2(balance.reduce((s, l) => s + ventilerSolde(l).crediteur, 0));
   const ecart = round2(Math.abs(total_debit - total_credit));
-  return { nbComptes: balance.length, total_debit, total_credit, ecart, equilibre: ecart < 0.01 };
+  const ecart_soldes = round2(Math.abs(total_solde_debiteur - total_solde_crediteur));
+  return {
+    nbComptes: balance.length,
+    total_debit, total_credit,
+    total_solde_debiteur, total_solde_crediteur,
+    ecart, ecart_soldes,
+    equilibre: ecart < 0.01 && ecart_soldes < 0.01,
+  };
 }
 
 export interface ResultatNet {

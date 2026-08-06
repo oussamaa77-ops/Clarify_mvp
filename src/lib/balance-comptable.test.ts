@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   sousTotauxParClasse, totalGeneralBalance, resultatNetBalance, synthetiserBalance,
-  CLASSES_CGNC, type LigneBalance,
+  ventilerSolde, CLASSES_CGNC, type LigneBalance,
 } from "./balance-comptable";
 
 /** Ligne de balance ; le solde/sens sont dérivés comme dans l'écran. */
@@ -19,6 +19,26 @@ const BALANCE: LigneBalance[] = [
   l("61110", 1000, 0),     // achats
   l("71110", 0, 3000),     // ventes
 ];
+
+describe("ventilerSolde", () => {
+  it("porte le solde sur la SEULE colonne débiteur quand le débit l'emporte", () => {
+    expect(ventilerSolde(l("34210", 3600, 600))).toEqual({ debiteur: 3000, crediteur: 0 });
+  });
+
+  it("porte le solde sur la SEULE colonne créditeur quand le crédit l'emporte", () => {
+    expect(ventilerSolde(l("44110", 200, 1200))).toEqual({ debiteur: 0, crediteur: 1000 });
+  });
+
+  it("laisse les deux colonnes à zéro sur un compte soldé", () => {
+    expect(ventilerSolde(l("51110", 5000, 5000))).toEqual({ debiteur: 0, crediteur: 0 });
+  });
+
+  it("ignore les champs solde/sens de l'appelant et recalcule depuis les cumuls", () => {
+    // Ligne volontairement incohérente : le sens dit « C », les cumuls disent « D ».
+    const menteuse: LigneBalance = { compte: "61110", total_debit: 900, total_credit: 100, solde: 42, sens: "C" };
+    expect(ventilerSolde(menteuse)).toEqual({ debiteur: 800, crediteur: 0 });
+  });
+});
 
 describe("sousTotauxParClasse", () => {
   it("produit une ligne TOTAUX par classe présente, dans l'ordre", () => {
@@ -39,6 +59,16 @@ describe("sousTotauxParClasse", () => {
     const c4 = sousTotauxParClasse(BALANCE).find(s => s.classe === "4")!;
     expect(c4.total_credit).toBe(1800);      // 44551 + 44110
     expect(c4.sens).toBe("C");
+  });
+
+  it("ventile les soldes de la classe SANS compenser entre comptes", () => {
+    // Un fournisseur débiteur (avance) ne doit pas s'annuler avec un fournisseur
+    // créditeur : les deux colonnes de la classe sont servies simultanément.
+    const c4 = sousTotauxParClasse([l("44110", 0, 1200), l("44111", 300, 0)]).find(s => s.classe === "4")!;
+    expect(c4.solde_debiteur).toBe(300);
+    expect(c4.solde_crediteur).toBe(1200);
+    // Le solde net historique reste la différence des deux colonnes.
+    expect(c4.solde).toBe(Math.abs(c4.solde_debiteur - c4.solde_crediteur));
   });
 
   it("n'invente pas les classes absentes", () => {
@@ -75,6 +105,30 @@ describe("totalGeneralBalance", () => {
     expect(t.total_credit).toBe(4800);
     expect(t.ecart).toBe(0);
     expect(t.equilibre).toBe(true);
+  });
+
+  it("égalise rigoureusement les deux totaux de soldes sur une balance juste", () => {
+    const t = totalGeneralBalance(BALANCE);
+    expect(t.total_solde_debiteur).toBe(4800);
+    expect(t.total_solde_crediteur).toBe(4800);
+    expect(t.total_solde_debiteur).toBe(t.total_solde_crediteur);
+    expect(t.ecart_soldes).toBe(0);
+  });
+
+  it("somme les colonnes de solde des sous-totaux jusqu'au total général", () => {
+    // Le pied de balance doit être la somme des lignes TOTAUX affichées au-dessus,
+    // sinon l'écran additionne autre chose que ce qu'il montre.
+    const st = sousTotauxParClasse(BALANCE);
+    const t = totalGeneralBalance(BALANCE);
+    expect(st.reduce((s, c) => s + c.solde_debiteur, 0)).toBe(t.total_solde_debiteur);
+    expect(st.reduce((s, c) => s + c.solde_crediteur, 0)).toBe(t.total_solde_crediteur);
+  });
+
+  it("répercute un déséquilibre sur les soldes autant que sur les mouvements", () => {
+    const t = totalGeneralBalance([...BALANCE, l("61200", 250, 0)]);
+    expect(t.ecart_soldes).toBe(250);
+    expect(t.ecart_soldes).toBe(t.ecart);
+    expect(t.equilibre).toBe(false);
   });
 
   it("signale un déséquilibre et le chiffre", () => {

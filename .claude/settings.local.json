@@ -303,7 +303,9 @@
       "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 20)",
       "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"TS errors: $\\($e.Count\\) \\(baseline 32\\)\")",
       "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 32)",
-      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 16)"
+      "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 16)",
+      "PowerShell(npx vitest run src/lib/balance-comptable.test.ts 2>&1 | Select-Object -Last 40)",
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"Total erreurs TS: $\\($e.Count\\)\")"
     ]
   }
 }

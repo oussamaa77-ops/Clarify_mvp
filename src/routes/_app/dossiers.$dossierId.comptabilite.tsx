@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
 import { compteTiersAuxiliaire, suffixeAuxiliaire } from "@/lib/comptes-auxiliaires";
-import { synthetiserBalance, type LigneBalance as LigneBalanceLib } from "@/lib/balance-comptable";
+import { synthetiserBalance, ventilerSolde, type LigneBalance as LigneBalanceLib } from "@/lib/balance-comptable";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -353,23 +353,27 @@ function ComptabilitePage() {
 
       // Balance : comptes groupés par classe, chaque classe suivie de son
       // sous-total, puis le total général et le résultat net.
-      const balData: (string | number)[][] = [["Compte", "Total Débit", "Total Crédit", "Solde", "Sens"]];
+      // Mêmes colonnes qu'à l'écran (norme Sage 100) : solde ventilé sur deux
+      // colonnes, pas de colonne « sens ».
+      const balData: (string | number)[][] = [["Compte", "Total Débit", "Total Crédit", "Solde Débiteur", "Solde Créditeur"]];
       for (const st of sousTotaux) {
         for (const l of balance.filter(x => (/^[0-9]/.test(x.compte) ? x.compte.charAt(0) : "?") === st.classe)) {
-          balData.push([l.compte, l.total_debit, l.total_credit, l.solde, l.sens]);
+          const s = ventilerSolde(l);
+          balData.push([l.compte, l.total_debit, l.total_credit, s.debiteur || "", s.crediteur || ""]);
         }
-        balData.push([`${st.label} — ${st.intitule}`, st.total_debit, st.total_credit, st.solde, st.sens]);
+        balData.push([`${st.label} — ${st.intitule}`, st.total_debit, st.total_credit, st.solde_debiteur || "", st.solde_crediteur || ""]);
       }
       balData.push(
-        ["TOTAL GÉNÉRAL DE LA BALANCE", totalBalance.total_debit, totalBalance.total_credit, totalBalance.ecart, totalBalance.equilibre ? "✅" : "⚠️"],
+        ["TOTAL GÉNÉRAL DE LA BALANCE", totalBalance.total_debit, totalBalance.total_credit, totalBalance.total_solde_debiteur, totalBalance.total_solde_crediteur],
+        [totalBalance.equilibre ? "✅ Balance équilibrée" : `⚠️ Écart ${fmt(totalBalance.ecart || totalBalance.ecart_soldes)}`],
         [],
         ["RÉSULTAT NET DE L'EXERCICE"],
-        ["Produits (classe 7)", "", resultat.produits, "", "C"],
-        ["Charges (classe 6)", resultat.charges, "", "", "D"],
-        [resultat.label, "", "", resultat.montant, resultat.benefice ? "C" : "D"],
+        ["Produits (classe 7)", "", resultat.produits],
+        ["Charges (classe 6)", resultat.charges, ""],
+        [resultat.label, "", "", resultat.benefice ? "" : resultat.montant, resultat.benefice ? resultat.montant : ""],
       );
       const wsBal = XLSX.utils.aoa_to_sheet(balData);
-      wsBal["!cols"] = [{wch:36},{wch:16},{wch:16},{wch:16},{wch:8}];
+      wsBal["!cols"] = [{wch:36},{wch:16},{wch:16},{wch:16},{wch:16}];
       XLSX.utils.book_append_sheet(wb, wsBal, nomOnglet("Balance"));
 
       XLSX.writeFile(wb, `Comptabilite_${dossierId.slice(0,8)}_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -573,12 +577,16 @@ function ComptabilitePage() {
         {/* ── BALANCE ── */}
         <TabsContent value="balance" className="mt-4">
           <div className="rounded-lg border overflow-hidden">
-            <div className="grid grid-cols-10 gap-1 px-4 py-2 bg-muted text-xs font-semibold uppercase text-muted-foreground">
-              <div className="col-span-2">Compte</div>
-              <div className="col-span-3 text-right">Total Débit</div>
-              <div className="col-span-3 text-right">Total Crédit</div>
-              <div className="col-span-1 text-right">Solde</div>
-              <div className="col-span-1 text-center">Sens</div>
+            {/* Présentation normalisée Sage 100 / CGNC : les mouvements de la
+                période, puis le solde ventilé sur DEUX colonnes exclusives.
+                Un badge « sens » n'est pas additionnable — deux colonnes le sont,
+                et c'est ce qui permet le contrôle Σ SD = Σ SC en pied. */}
+            <div className="grid grid-cols-12 gap-1 px-4 py-2 bg-muted text-[11px] font-semibold uppercase text-muted-foreground">
+              <div className="col-span-4">Compte</div>
+              <div className="col-span-2 text-right">Total Débit</div>
+              <div className="col-span-2 text-right">Total Crédit</div>
+              <div className="col-span-2 text-right">Solde Débiteur</div>
+              <div className="col-span-2 text-right">Solde Créditeur</div>
             </div>
             <div className="max-h-[60vh] overflow-y-auto">
               {/* Les comptes d'une classe, puis SON sous-total : c'est la lecture
@@ -587,9 +595,13 @@ function ComptabilitePage() {
                 <div key={st.classe}>
                   {balance
                     .filter(l => (/^[0-9]/.test(l.compte) ? l.compte.charAt(0) : "?") === st.classe)
-                    .map((l, i) => (
-                      <div key={l.compte} className={`grid grid-cols-10 gap-1 px-4 py-1.5 border-b text-sm ${i%2===0?"bg-white dark:bg-background":"bg-muted/20"}`}>
-                        <div className="col-span-2 font-mono font-medium">
+                    .map((l, i) => {
+                      // Un compte alimente UNE des deux colonnes de solde ;
+                      // l'autre reste vide, c'est la lecture d'une balance Sage.
+                      const s = ventilerSolde(l);
+                      return (
+                      <div key={l.compte} className={`grid grid-cols-12 gap-1 px-4 py-1.5 border-b text-sm ${i%2===0?"bg-white dark:bg-background":"bg-muted/20"}`}>
+                        <div className="col-span-4 font-mono font-medium">
                           {l.compte}
                           {(intitulesAux[l.compte] || suffixeAuxiliaire(l.compte)) && (
                             <span className="ml-2 font-sans text-xs text-muted-foreground">
@@ -597,38 +609,39 @@ function ComptabilitePage() {
                             </span>
                           )}
                         </div>
-                        <div className="col-span-3 text-right font-mono text-red-600">{l.total_debit>0?fmt(l.total_debit):"—"}</div>
-                        <div className="col-span-3 text-right font-mono text-green-600">{l.total_credit>0?fmt(l.total_credit):"—"}</div>
-                        <div className="col-span-1 text-right font-mono font-semibold">{fmt(l.solde)}</div>
-                        <div className="col-span-1 text-center">
-                          <Badge className={l.sens==="D"?"bg-red-100 text-red-700 text-xs":"bg-green-100 text-green-700 text-xs"}>{l.sens}</Badge>
-                        </div>
+                        <div className="col-span-2 text-right font-mono text-red-600">{l.total_debit>0?fmt(l.total_debit):"—"}</div>
+                        <div className="col-span-2 text-right font-mono text-green-600">{l.total_credit>0?fmt(l.total_credit):"—"}</div>
+                        <div className="col-span-2 text-right font-mono font-semibold text-red-600">{s.debiteur>0?fmt(s.debiteur):""}</div>
+                        <div className="col-span-2 text-right font-mono font-semibold text-green-600">{s.crediteur>0?fmt(s.crediteur):""}</div>
                       </div>
-                    ))}
-                  <div className="grid grid-cols-10 gap-1 px-4 py-1.5 border-b-2 border-muted-foreground/20 bg-muted/60 text-sm font-semibold">
-                    <div className="col-span-2">
+                      );
+                    })}
+                  <div className="grid grid-cols-12 gap-1 px-4 py-1.5 border-b-2 border-muted-foreground/20 bg-muted/60 text-sm font-semibold">
+                    <div className="col-span-4">
                       {st.label}
                       <span className="ml-2 font-normal text-xs text-muted-foreground">{st.intitule}</span>
                     </div>
-                    <div className="col-span-3 text-right font-mono text-red-600">{fmt(st.total_debit)}</div>
-                    <div className="col-span-3 text-right font-mono text-green-600">{fmt(st.total_credit)}</div>
-                    <div className="col-span-1 text-right font-mono">{fmt(st.solde)}</div>
-                    <div className="col-span-1 text-center">
-                      <Badge className={st.sens==="D"?"bg-red-100 text-red-700 text-xs":"bg-green-100 text-green-700 text-xs"}>{st.sens}</Badge>
-                    </div>
+                    <div className="col-span-2 text-right font-mono text-red-600">{fmt(st.total_debit)}</div>
+                    <div className="col-span-2 text-right font-mono text-green-600">{fmt(st.total_credit)}</div>
+                    <div className="col-span-2 text-right font-mono text-red-600">{st.solde_debiteur>0?fmt(st.solde_debiteur):""}</div>
+                    <div className="col-span-2 text-right font-mono text-green-600">{st.solde_crediteur>0?fmt(st.solde_crediteur):""}</div>
                   </div>
                 </div>
               ))}
             </div>
-            <div className="grid grid-cols-10 gap-1 px-4 py-2 bg-muted font-bold text-sm border-t-2">
-              <div className="col-span-2">TOTAL GÉNÉRAL DE LA BALANCE</div>
-              <div className="col-span-3 text-right font-mono text-red-600">{fmt(totalBalance.total_debit)}</div>
-              <div className="col-span-3 text-right font-mono text-green-600">{fmt(totalBalance.total_credit)}</div>
-              <div className="col-span-2 text-right">
+            {/* Total général : les DEUX contrôles d'une balance Sage —
+                Σ débits = Σ crédits et Σ soldes débiteurs = Σ soldes créditeurs. */}
+            <div className="grid grid-cols-12 gap-1 px-4 py-2 bg-muted font-bold text-sm border-t-2">
+              <div className="col-span-4 flex items-center gap-2 flex-wrap">
+                <span>TOTAL GÉNÉRAL DE LA BALANCE</span>
                 {totalBalance.equilibre
-                  ? <span className="text-green-600 text-xs">✅ Équilibrée</span>
-                  : <span className="text-red-600 text-xs">⚠️ Écart {fmt(totalBalance.ecart)}</span>}
+                  ? <span className="text-green-600 text-xs font-normal">✅ Équilibrée</span>
+                  : <span className="text-red-600 text-xs font-normal">⚠️ Écart {fmt(totalBalance.ecart || totalBalance.ecart_soldes)}</span>}
               </div>
+              <div className="col-span-2 text-right font-mono text-red-600">{fmt(totalBalance.total_debit)}</div>
+              <div className="col-span-2 text-right font-mono text-green-600">{fmt(totalBalance.total_credit)}</div>
+              <div className="col-span-2 text-right font-mono text-red-600">{fmt(totalBalance.total_solde_debiteur)}</div>
+              <div className="col-span-2 text-right font-mono text-green-600">{fmt(totalBalance.total_solde_crediteur)}</div>
             </div>
 
             {/* Résultat net — formation du résultat par les classes 6 et 7. */}
