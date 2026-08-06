@@ -26,7 +26,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { connect } from "node:net";
 import { verifyApprovalToken } from "@/server/approval.token";
 import { getAdminEmail, getAppUrl } from "@/server/approval.functions";
-import { sendMail, sendMailEssai } from "@/server/mailer";
+import { sendMail, sendMailEssai, ordreTransports } from "@/server/mailer";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body, null, 2), {
@@ -140,13 +140,16 @@ export const Route = createFileRoute("/api/diag-mail")({
           RESEND_API_KEY: etat(process.env.RESEND_API_KEY),
           RESEND_FROM: process.env.RESEND_FROM ?? "(défaut : Clarify <onboarding@resend.dev>)",
           BREVO_API_KEY: etat(process.env.BREVO_API_KEY),
-          MAIL_TRANSPORT: process.env.MAIL_TRANSPORT ?? "(auto : Resend d'abord, puis SMTP, puis Brevo)",
+          MAIL_TRANSPORT: process.env.MAIL_TRANSPORT ?? "(auto)",
+          // L'ordre RÉELLEMENT appliqué, et non la variable brute : c'est lui
+          // qui explique quel transport a envoyé (ou refusé) le message.
+          ordre_effectif: ordreTransports().join(" → "),
           SMTP_HOST: process.env.SMTP_HOST ?? "❌ ABSENT",
           SMTP_PORT: process.env.SMTP_PORT ?? "(défaut 587)",
           SMTP_USER: process.env.SMTP_USER ?? "❌ ABSENT",
           SMTP_PASS: etat(process.env.SMTP_PASS),
-          SMTP_SECURE: process.env.SMTP_SECURE ?? "(auto d'après le port)",
-          FROM_EMAIL: process.env.FROM_EMAIL ?? "(repli sur SMTP_USER)",
+          SMTP_SECURE: process.env.SMTP_SECURE ?? "(auto d'après le port : 465 ⇒ TLS implicite)",
+          FROM_EMAIL: process.env.FROM_EMAIL ?? process.env.EMAIL_FROM ?? "(repli sur SMTP_USER)",
           APPROVAL_TOKEN_SECRET: etat(process.env.APPROVAL_TOKEN_SECRET),
           destinataire_admin: getAdminEmail(),
           url_des_liens: getAppUrl(),

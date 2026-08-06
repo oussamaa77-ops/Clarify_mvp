@@ -2,12 +2,21 @@
 // mailer.ts — Point d'entrée UNIQUE de l'envoi d'e-mails. Aiguille vers le
 // transport disponible ; tout le reste de l'app n'appelle que `sendMail`.
 //
-// ORDRE DES TRANSPORTS :
-//   1. API Resend  (HTTPS/443) — DÉFAUT en production, dès que RESEND_API_KEY
-//      est posée. Voir mailer.resend.ts.
-//   2. SMTP        (nodemailer, ce fichier) — utilisé si aucune clé HTTP n'est
-//      posée, et sur un réseau qui laisse sortir le 587/465.
+// ORDRE DES TRANSPORTS — piloté par MAIL_TRANSPORT (cf. `ordreTransports`) :
+//   • `auto` (défaut)  → Resend, puis SMTP, puis Brevo.
+//   • `smtp`           → SMTP seul.
+//   • `smtp,resend`    → SMTP principal, Resend en secours.
+// Les trois transports disponibles :
+//   1. API Resend  (HTTPS/443) — voir mailer.resend.ts.
+//   2. SMTP        (nodemailer, ce fichier) — sur un réseau qui laisse sortir
+//      le 587/465.
 //   3. API Brevo   (HTTPS/443) — filet historique, conservé.
+//
+// ⚠ QUAND PRÉFÉRER SMTP À RESEND : tant qu'aucun domaine n'est vérifié chez
+//   Resend, celui-ci n'écrit QU'À l'adresse propriétaire du compte (403 pour
+//   tout autre destinataire). Le SMTP Gmail, lui, écrit à n'importe qui — mais
+//   seulement si l'hébergeur laisse sortir le port. D'où l'ordre configurable :
+//   le choix dépend de l'environnement, pas du code.
 //
 // ⚠ POURQUOI RESEND EN PREMIER : Railway filtre le SMTP sortant
 //   (smtp.gmail.com:587 → ENETUNREACH / ETIMEDOUT au bout de 10 s), tout comme
@@ -80,8 +89,19 @@ function readConfig(o?: SmtpOverride) {
   // celui du proxy → la vérif échoue. On autorise à la désactiver explicitement.
   const rejectUnauthorized = (process.env.SMTP_TLS_REJECT_UNAUTHORIZED ?? "true").trim().toLowerCase() !== "false";
 
-  const fromEmail = (process.env.FROM_EMAIL ?? user ?? "noreply@localhost").trim();
-  const fromName = (process.env.FROM_NAME ?? "HisabPro").trim();
+  // FROM_EMAIL est le nom historique ; EMAIL_FROM est accepté en alias car c'est
+  // l'ordre de mots que tout le monde écrit de mémoire — une variable posée sous
+  // le mauvais nom serait silencieusement ignorée, et l'expéditeur retomberait
+  // sur SMTP_USER sans que rien ne le signale.
+  // Chaînage en `||` et non `??` : une variable posée mais VIDE doit être
+  // traitée comme absente, sinon l'en-tête From part vide.
+  const fromEmail = (
+    (process.env.FROM_EMAIL ?? "").trim() ||
+    (process.env.EMAIL_FROM ?? "").trim() ||
+    user ||
+    "noreply@localhost"
+  ).trim();
+  const fromName = ((process.env.FROM_NAME ?? "").trim() || "HisabPro").trim();
   return { host, port, user, pass, secure, rejectUnauthorized, fromEmail, fromName };
 }
 
@@ -158,57 +178,126 @@ function estBlocageReseau(e: any): boolean {
  *  (changer de réseau implique de toute façon un redéploiement). */
 let SMTP_BLOQUE = false;
 
+export type NomTransport = "resend" | "smtp" | "brevo";
+
+/** Ordre par défaut : HTTPS/443 d'abord, le seul port ouvert partout. */
+const ORDRE_AUTO: NomTransport[] = ["resend", "smtp", "brevo"];
+
 /**
- * Envoie un e-mail. Resend (HTTPS) est le transport par défaut ; SMTP prend le
- * relais si aucune clé HTTP n'est posée, avec Brevo en dernier filet quand le
- * port se révèle filtré. Lève une erreur explicite et actionnable sinon.
+ * Ordre des transports à essayer, lu dans MAIL_TRANSPORT.
+ *
+ * Trois écritures, de la plus simple à la plus fine :
+ *   • `auto` (défaut)      → resend, smtp, brevo
+ *   • `smtp`               → SMTP UNIQUEMENT (compatible avec l'ancien sens de
+ *                            la variable : une valeur seule force ce transport)
+ *   • `smtp,resend`        → SMTP en principal, Resend en secours
+ *
+ * La liste ordonnée existe pour une raison concrète : tant qu'aucun domaine
+ * n'est vérifié chez Resend, celui-ci ne peut écrire qu'au propriétaire du
+ * compte. Basculer sur SMTP doit alors être un changement de VARIABLE, pas de
+ * code — et le retour en arrière aussi, le jour où le domaine est acheté.
+ */
+export function ordreTransports(): NomTransport[] {
+  const brut = (process.env.MAIL_TRANSPORT ?? "auto").trim().toLowerCase();
+  if (!brut || brut === "auto") return ORDRE_AUTO;
+
+  const demandes = brut.split(/[,\s;]+/).filter(Boolean);
+  const valides = demandes.filter((t): t is NomTransport =>
+    (ORDRE_AUTO as string[]).includes(t)
+  );
+  // Une valeur inconnue (faute de frappe dans Railway) ne doit pas priver
+  // l'application de tout envoi en silence : on le dit et on retombe sur auto.
+  const inconnus = demandes.filter((t) => !(ORDRE_AUTO as string[]).includes(t));
+  if (inconnus.length) {
+    console.warn(
+      `[mail] MAIL_TRANSPORT : valeur(s) inconnue(s) « ${inconnus.join(", ")} » ignorée(s). ` +
+        `Attendu : resend | smtp | brevo, ou une liste ordonnée (ex. « smtp,resend »), ou « auto ».`
+    );
+  }
+  if (!valides.length) return ORDRE_AUTO;
+  return [...new Set(valides)];
+}
+
+/**
+ * Envoie un e-mail en essayant les transports dans l'ordre de MAIL_TRANSPORT
+ * (voir `ordreTransports`). Le premier qui aboutit gagne ; si tous échouent,
+ * l'erreur levée porte le diagnostic de CHACUN — ne remonter que le dernier
+ * ferait accuser le transport de secours à la place du principal.
  */
 export async function sendMail(
   input: SendMailInput
 ): Promise<{ success: true; messageId: string }> {
   const cfg = readConfig();
   const { sendMailBrevo, brevoApiKey } = await import("./mailer.brevo");
-  const { sendMailResend, resendApiKey } = await import("./mailer.resend");
-
-  const force = (process.env.MAIL_TRANSPORT ?? "auto").trim().toLowerCase();
-  const resendDispo = !!resendApiKey() && (force === "auto" || force === "resend");
-  const brevoDispo = !!brevoApiKey() && (force === "auto" || force === "brevo");
-  const smtpDispo = !!cfg.host && (force === "auto" || force === "smtp");
-
-  if (!resendDispo && !brevoDispo && !smtpDispo) {
-    throw new Error(
-      "Aucun transport e-mail configuré : posez RESEND_API_KEY dans les variables " +
-        "d'environnement du serveur (voir .env.example), puis redémarrez. " +
-        "À défaut, renseignez SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS."
-    );
-  }
+  const { sendMailResend, resendApiKey, resendFrom, resendEnBacASable } = await import("./mailer.resend");
 
   const from = { name: cfg.fromName, email: cfg.fromEmail };
   const text = input.text?.trim() || htmlToText(input.html);
-  const repli = brevoDispo ? { sendMailBrevo, from } : null;
 
-  // Resend d'abord : HTTPS/443, le seul port ouvert sur Railway.
-  if (resendDispo) {
+  const configure: Record<NomTransport, boolean> = {
+    resend: !!resendApiKey(),
+    smtp: !!cfg.host,
+    brevo: !!brevoApiKey(),
+  };
+
+  const ordre = ordreTransports().filter((t) => configure[t]);
+
+  if (!ordre.length) {
+    const demandes = ordreTransports().join(", ");
+    throw new Error(
+      `Aucun transport e-mail utilisable (MAIL_TRANSPORT demande : ${demandes}). ` +
+        `Renseignez SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS pour le SMTP, ` +
+        `ou RESEND_API_KEY pour l'API HTTPS (voir .env.example), puis redémarrez.`
+    );
+  }
+
+  // Brevo reste le filet de sécurité de la branche SMTP : quand le port se
+  // révèle filtré, sendMailSmtp bascule directement au lieu d'attendre le tour
+  // de Brevo dans la boucle.
+  const repli = configure.brevo && ordre.includes("brevo") ? { sendMailBrevo, from } : null;
+
+  const echecs: string[] = [];
+
+  for (const transport of ordre) {
     try {
-      const r = await sendMailResend(input, text);
-      console.log(`[Resend] Email envoyé à ${input.to} | ID: ${r.messageId}`);
+      if (transport === "resend") {
+        const r = await sendMailResend(input, text);
+        // L'expéditeur figure dans le log : « accepté » depuis le bac à sable ne
+        // veut pas dire « délivré », et c'est invérifiable après coup sans lui.
+        console.log(
+          `[Resend] Email accepté pour ${input.to} | from: ${resendFrom()} | ID: ${r.messageId}` +
+            (resendEnBacASable() ? " | ⚠ bac à sable : livraison limitée au propriétaire du compte" : "")
+        );
+        return r;
+      }
+
+      if (transport === "smtp") {
+        // Port déjà constaté filtré sur ce serveur : ne pas repayer 10 s de
+        // timeout à chaque envoi, l'inscription attend ce mail.
+        if (SMTP_BLOQUE) {
+          echecs.push("SMTP : port déjà constaté filtré sur ce serveur (essai ignoré)");
+          continue;
+        }
+        return await sendMailSmtp(input, cfg, text, repli);
+      }
+
+      const r = await sendMailBrevo(input, from, text);
+      console.log(`[Brevo] Email envoyé à ${input.to} | ID: ${r.messageId}`);
       return r;
     } catch (e: any) {
-      // Sans transport de repli, l'erreur Resend est LA cause : on la remonte
-      // telle quelle (domaine non vérifié, clé révoquée… tous actionnables).
-      if (!smtpDispo && !brevoDispo) throw e;
-      console.warn(`[Resend] Échec (${e?.message ?? e}) — bascule sur le transport de secours.`);
+      const msg = e?.message ?? String(e);
+      // console.error et non warn : dès qu'un transport de secours existait,
+      // l'échec du transport principal était rétrogradé en avertissement —
+      // donc invisible dans les logs Railway, alors que c'est LA cause.
+      console.error(`[${transport}] ÉCHEC — ${msg}`);
+      echecs.push(`${transport} : ${msg}`);
     }
   }
 
-  // SMTP ensuite — sauf si le port a DÉJÀ été constaté filtré sur ce serveur :
-  // inutile de repayer 10 s de timeout à chaque envoi.
-  if (smtpDispo && !SMTP_BLOQUE) return sendMailSmtp(input, cfg, text, repli);
-
-  if (!repli) return sendMailSmtp(input, cfg, text, null);
-  const r = await sendMailBrevo(input, from, text);
-  console.log(`[Brevo] Email envoyé à ${input.to} | ID: ${r.messageId}`);
-  return r;
+  throw new Error(
+    `Aucun transport n'a pu envoyer l'e-mail à ${input.to} (ordre essayé : ${ordre.join(" → ")}).\n` +
+      echecs.map((l) => `  • ${l}`).join("\n")
+  );
 }
 
 /**
@@ -233,6 +322,18 @@ async function sendMailSmtp(
   repli: { sendMailBrevo: any; from: { name: string; email: string } } | null
 ): Promise<{ success: true; messageId: string }> {
   const transporter = getTransporter(cfg);
+
+  // Gmail RÉÉCRIT l'en-tête From quand il ne correspond ni au compte authentifié
+  // ni à un alias « Envoyer des e-mails en tant que » vérifié. Le mail part quand
+  // même, mais sous une autre adresse que celle configurée — d'où des heures
+  // perdues à chercher pourquoi FROM_EMAIL « ne serait pas pris en compte ».
+  if (/gmail\.com|googlemail\.com/i.test(cfg.host) && cfg.user && cfg.fromEmail !== cfg.user) {
+    console.warn(
+      `[SMTP] From (${cfg.fromEmail}) ≠ compte authentifié (${cfg.user}) : Gmail réécrira ` +
+        `l'expéditeur, sauf si cette adresse est un alias vérifié du compte. ` +
+        `Alignez FROM_EMAIL sur SMTP_USER pour éviter la surprise.`
+    );
+  }
 
   // Domaine de l'expéditeur → sert au Message-ID (aligné avec le From, meilleur
   // pour la réputation) et au lien de désabonnement RFC 8058.

@@ -49,6 +49,50 @@ function adresseNue(from: string): string {
   return from.match(/<([^>]+)>/)?.[1]?.trim() ?? from;
 }
 
+/** Vrai quand l'expéditeur est resté sur le bac à sable Resend. Ce mode ne
+ *  délivre QU'À l'adresse propriétaire du compte : tout autre destinataire est
+ *  refusé (403) ou perdu. C'est la première chose à savoir en lisant un log. */
+export function resendEnBacASable(): boolean {
+  return /@resend\.dev>?\s*$/i.test(resendFrom());
+}
+
+/**
+ * Message d'erreur EXPLOITABLE à partir d'un refus Resend.
+ *
+ * Le SDK rend un objet `{ name, message, statusCode }` ; n'en garder que
+ * `message` supprime justement ce qui distingue une clé révoquée d'un domaine
+ * non vérifié. On conserve les trois, plus l'expéditeur et le destinataire —
+ * sans eux, un log « API Resend : ... » n'apprend pas de QUEL envoi il parle.
+ */
+export function decrireErreurResend(err: any, from: string, to: string): string {
+  const nom = err?.name ? `${err.name}` : "";
+  const code = err?.statusCode ?? err?.status ?? "";
+  const msg = err?.message ?? (typeof err === "string" ? err : JSON.stringify(err));
+  const entete = [code && `HTTP ${code}`, nom].filter(Boolean).join(" ");
+  const indice = indiceResend(nom, msg);
+  return `API Resend${entete ? ` [${entete}]` : ""} : ${msg} (from=${from} → to=${to})${indice ? ` — ${indice}` : ""}`;
+}
+
+/** Traduction des refus Resend récurrents en action concrète. Sans ça, chaque
+ *  incident recommence par une demi-heure de recherche dans leur documentation. */
+function indiceResend(nom: string, msg: string): string {
+  const t = `${nom} ${msg}`.toLowerCase();
+  if (/validation_error|only send testing emails|your own email address/.test(t)) {
+    return "le bac à sable onboarding@resend.dev n'écrit QU'À l'adresse propriétaire du compte Resend ; vérifiez un domaine sur https://resend.com/domains puis posez RESEND_FROM dessus";
+  }
+  if (/domain is not verified|not verified/.test(t)) {
+    return "le domaine de RESEND_FROM n'est pas vérifié dans le compte Resend (https://resend.com/domains)";
+  }
+  if (/restricted_api_key|restricted to only send/.test(t)) {
+    return "clé à permission « sending only » : normale pour envoyer, mais elle ne peut pas lire /domains ni /emails";
+  }
+  if (/invalid.*api.*key|unauthorized|missing_api_key/.test(t)) {
+    return "RESEND_API_KEY invalide ou révoquée — régénérez-la sur https://resend.com/api-keys";
+  }
+  if (/rate.?limit|too many/.test(t)) return "quota d'envoi Resend atteint";
+  return "";
+}
+
 let _client: Resend | null = null;
 let _cle = "";
 function getClient(key: string): Resend {
@@ -93,9 +137,17 @@ async function mapAttachments(input: SendMailInput) {
 /** Panne RÉSEAU (proxy, DNS, socket) par opposition à un refus applicatif de
  *  Resend (clé invalide, domaine non vérifié). Seule la première justifie de
  *  refaire l'appel par undici : réessayer un 403 serait vain. */
-function estPanneReseau(e: any): boolean {
-  const m = `${e?.message ?? e} ${e?.cause?.message ?? ""} ${e?.code ?? ""}`;
-  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|self.signed|unable to verify|certificate|network|socket|abort/i.test(m);
+export function estPanneReseau(e: any): boolean {
+  const m = `${e?.message ?? e} ${e?.cause?.message ?? ""} ${e?.code ?? ""} ${e?.name ?? ""}`;
+  return (
+    /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|self.signed|unable to verify|certificate|network|socket|abort/i.test(m) ||
+    // Le SDK Resend n'expose PAS l'erreur réseau brute : il la remplace par
+    // « application_error / Unable to fetch data. The request could not be
+    // resolved. », sans code ni cause. Faute de reconnaître cette formulation,
+    // le repli undici ne se déclenchait jamais derrière le proxy TLS — le SDK
+    // échouait et l'on concluait à tort que l'API refusait le message.
+    /unable to fetch data|could not be resolved|application_error/i.test(m)
+  );
 }
 
 /**
@@ -122,12 +174,32 @@ export async function sendMailResend(
     attachments,
   };
 
+  // Tracer l'expéditeur RÉELLEMENT utilisé : un envoi « accepté » depuis le bac
+  // à sable qui n'arrive jamais chez le destinataire est le scénario qui coûte
+  // le plus de temps à diagnostiquer, faute de trace.
+  if (resendEnBacASable()) {
+    console.warn(
+      `[Resend] Expéditeur bac à sable (${from}) — Resend ne délivrera QU'À l'adresse ` +
+        `propriétaire du compte ; destinataire visé : ${input.to}. ` +
+        `Vérifiez un domaine sur https://resend.com/domains puis posez RESEND_FROM.`
+    );
+  }
+
   // 1) Le SDK d'abord (chemin nominal, celui de la production).
   try {
     const { data, error } = await avecTimeout(getClient(key).emails.send(payload));
     // Erreur APPLICATIVE : le SDK la rend au lieu de la lever. Elle est
     // définitive, inutile de retenter par un autre chemin réseau.
-    if (error) throw new Error(`API Resend : ${error.message ?? JSON.stringify(error)}`);
+    if (error) {
+      // L'objet brut, mais au bon NIVEAU : une panne réseau va être rattrapée
+      // par le repli undici juste en dessous — la logger en `error` ferait
+      // apparaître un incident dans les logs Railway pour un envoi qui, au
+      // final, part très bien.
+      const brutJson = JSON.stringify(error);
+      if (estPanneReseau(error)) console.warn("[Resend] SDK en échec réseau (objet brut) :", brutJson);
+      else console.error("[Resend] Refus de l'API (objet brut) :", brutJson);
+      throw new Error(decrireErreurResend(error, from, input.to));
+    }
     return { success: true, messageId: data?.id ?? "" };
   } catch (e: any) {
     if (!estPanneReseau(e)) throw e;
@@ -153,7 +225,18 @@ export async function sendMailResend(
   });
 
   const brut = await res.text();
-  if (!res.ok) throw new Error(`API Resend ${res.status} : ${brut.slice(0, 400)}`);
+  if (!res.ok) {
+    console.error(`[Resend] Refus de l'API (HTTP ${res.status}, corps brut) : ${brut.slice(0, 800)}`);
+    let detail: any = brut.slice(0, 400);
+    try { detail = JSON.parse(brut); } catch { /* corps non-JSON : on garde le texte */ }
+    throw new Error(
+      decrireErreurResend(
+        typeof detail === "string" ? { message: detail, statusCode: res.status } : { ...detail, statusCode: detail?.statusCode ?? res.status },
+        from,
+        input.to
+      )
+    );
+  }
 
   let messageId = "";
   try {

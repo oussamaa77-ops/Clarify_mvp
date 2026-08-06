@@ -149,7 +149,13 @@ export const inscrireEnAttente = createServerFn({ method: "POST" })
     try {
       await envoyerDemandeApprobation(sb, userId);
     } catch (err: any) {
-      console.warn("[inscription] mail d'approbation non envoyé:", err?.message ?? err);
+      // console.error et non warn : sans cette ligne visible dans les logs
+      // Railway, un mail d'approbation qui ne part pas ressemble à un bug de
+      // l'inscription. Le destinataire attendu est journalisé avec la cause,
+      // sinon on ignore si l'échec vient du transport ou de l'adresse admin.
+      console.error(
+        `[inscription] mail d'approbation NON ENVOYÉ à ${getAdminEmail()} — ${err?.message ?? err}`
+      );
       return { cree: true as const, mailEnvoye: false as const };
     }
     return { cree: true as const, mailEnvoye: true as const };
