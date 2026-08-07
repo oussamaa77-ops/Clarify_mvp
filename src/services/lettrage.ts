@@ -55,6 +55,47 @@ export const COMPTES_TVA = {
 export type SensTiers = "client" | "fournisseur";
 export type ComptesTva = Record<SensTiers, { attente: string; exigible: string }>;
 
+// ─── Référence propre des OD de reclassement ─────────────────────────────────
+//
+// Le reclassement (passage de la TVA du régime des débits à celui des
+// encaissements) portait la référence de la FACTURE, comme les écritures de la
+// pièce elle-même. Il devenait alors indiscernable d'une bascule au règlement :
+// mêmes comptes, aucun code de lettrage, même référence — seul le sens différait.
+// C'est ce qui a permis à une annulation de paiement de le mutiler (FAC-2024-307).
+//
+// Il porte désormais une référence PRÉFIXÉE. Le préfixe lui donne une identité
+// propre — aucune requête sur la référence de la pièce ne peut plus le ramener
+// par accident, et le lot entier se retrouve par `like 'RECLASS-TVA-%'`.
+//
+// Le préfixe CONSERVE la référence d'origine, et ce n'est pas un détail : c'est
+// par `reference_piece` que `tvaEnAttenteDeLaPiece` retrouve la TVA en attente
+// d'une pièce. Une référence entièrement disjointe (un horodatage, par exemple)
+// couperait ce lien : les factures reclassées n'auraient plus de TVA visible en
+// attente, et leur règlement ne basculerait plus rien.
+export const PREFIXE_RECLASS_TVA = "RECLASS-TVA-";
+
+/** Référence à poser sur une OD de reclassement de la pièce `ref`. */
+export const referenceReclassement = (ref: string | null | undefined): string =>
+  `${PREFIXE_RECLASS_TVA}${String(ref ?? "").trim()}`;
+
+/** Vraie référence d'une pièce, préfixe de reclassement retiré s'il y est. */
+export const referenceSansPrefixe = (ref: string | null | undefined): string => {
+  const r = String(ref ?? "").trim();
+  return r.startsWith(PREFIXE_RECLASS_TVA) ? r.slice(PREFIXE_RECLASS_TVA.length) : r;
+};
+
+/**
+ * Toutes les références sous lesquelles vivent les écritures d'une pièce : la
+ * sienne, et celle de son éventuel reclassement. À employer dans TOUT filtre
+ * qui doit voir la pièce en entier — lecture de la TVA en attente, suppression
+ * d'une facture. Une requête qui n'utiliserait que `ref` laisserait le
+ * reclassement invisible, donc orphelin.
+ */
+export const referencesPiece = (...refs: (string | null | undefined)[]): string[] => {
+  const base = [...new Set(refs.map((r) => String(r ?? "").trim()).filter(Boolean))];
+  return [...base, ...base.map(referenceReclassement)];
+};
+
 // ─── 1. Génération des codes de lettrage ─────────────────────────────────────
 
 /**
@@ -136,6 +177,123 @@ export interface LigneLettrable {
   date_ecriture?: string | null;
   reference_piece?: string | null;
   lettrage_code?: string | null;
+  /** Journal — seul le journal OD peut porter une écriture de bascule de TVA. */
+  journal_code?: string | null;
+}
+
+/**
+ * Un compte est-il un compte de TVA du régime des encaissements ?
+ *
+ * Reconnaissance par PRÉFIXE, et c'est tout l'enjeu : le plan comptable réel
+ * emploie des SOUS-COMPTES (44551 « TVA facturée », 34552 « TVA récupérable »,
+ * 44581…) là où `COMPTES_TVA` ne nomme que les racines 4455 / 4458 / 3455 / 3458.
+ *
+ * Une égalité stricte laissait donc échapper toute ligne sur un sous-compte. Au
+ * délettrage, la ligne 4458 de l'OD était supprimée et sa contrepartie 44551
+ * survivait : une demi-écriture orpheline, et un grand livre déséquilibré du
+ * montant de la TVA (constaté sur FAC-2024-307 : 1 880,00 MAD d'écart).
+ */
+export function estCompteTva(
+  compte: string | null | undefined,
+  comptes: ComptesTva = COMPTES_TVA,
+): boolean {
+  const c = String(compte ?? "").trim();
+  if (!c) return false;
+  return Object.values(comptes)
+    .flatMap((x) => [x.attente, x.exigible])
+    .some((racine) => c === racine || c.startsWith(racine));
+}
+
+/**
+ * Ce groupe d'OD est-il une bascule de RÈGLEMENT, et non une autre écriture de
+ * TVA qui aurait la même allure ?
+ *
+ * Le sens tranche, et il n'y a que lui pour trancher :
+ *
+ *   bascule au règlement (VENTE)   D attente (4458)   / C exigible (4455/44551)
+ *   reclassement vers l'attente    D exigible (44551) / C attente  (4458)
+ *
+ * Ce sont deux écritures EXACTEMENT inverses, sur les deux mêmes comptes, sans
+ * code de lettrage, portant la même référence de facture. Sans ce test, annuler
+ * un paiement supprimait le RECLASSEMENT — une écriture qui n'a rien à voir avec
+ * le règlement (constaté sur FAC-2024-307 : la moitié du reclassement effacée,
+ * 1 880,00 MAD d'écart au grand livre, et la TVA de la facture disparue du
+ * passif alors que la facture était redevenue impayée).
+ */
+export function estBasculeReglement(
+  groupe: LigneLettrable[],
+  comptes: ComptesTva = COMPTES_TVA,
+): boolean {
+  const surCompte = (racine: string, cote: "debit" | "credit") =>
+    groupe.some((l) =>
+      String(l.compte_numero ?? "").trim().startsWith(racine) && n(l[cote]) > 0);
+
+  // Vente : l'attente est DÉBITÉE (on la solde) et l'exigible CRÉDITÉ.
+  const vente = surCompte(comptes.client.attente, "debit")
+    && surCompte(comptes.client.exigible, "credit");
+  // Achat : le déductible est DÉBITÉ (le droit naît) et l'attente CRÉDITÉE.
+  const achat = surCompte(comptes.fournisseur.exigible, "debit")
+    && surCompte(comptes.fournisseur.attente, "credit");
+  return vente || achat;
+}
+
+/**
+ * Regroupe les lignes de bascule de TVA en ÉCRITURES, et rend les identifiants
+ * de toutes les lignes des écritures concernées.
+ *
+ * L'unité de suppression est l'ÉCRITURE, jamais la ligne : c'est la seule
+ * formulation qui garantisse la partie double. Dès qu'une ligne d'une OD est
+ * reconnue comme TVA, TOUTES les lignes de cette OD partent avec elle — y
+ * compris une contrepartie sur un compte qu'on n'aurait pas su classer.
+ *
+ * Clé de regroupement : le code de lettrage quand il existe (les deux lignes
+ * d'une bascule le partagent), sinon la référence de pièce + la date — cas des
+ * bascules d'acompte, qui ne portent aucun code.
+ */
+export function grouperOdBascule(
+  lignes: LigneLettrable[],
+  comptes: ComptesTva = COMPTES_TVA,
+  opts: {
+    /**
+     * N'emporter que les groupes dont le SENS est celui d'une bascule de
+     * règlement. Indispensable quand on cible des OD SANS code (annulation d'un
+     * acompte) : sans ce filtre on emporte le reclassement, qui a la même
+     * signature à la direction près. Inutile sur les OD portant un code — le
+     * code prouve à lui seul qu'elles viennent d'un lettrage.
+     */
+    seulementBascules?: boolean;
+  } = {},
+): string[] {
+  const journal = (l: LigneLettrable) => String(l.journal_code ?? "").trim().toUpperCase();
+  const ids = new Set<string>();
+
+  // 1) Journal OD CONNU → regroupement, et le groupe part en entier.
+  const groupes = new Map<string, LigneLettrable[]>();
+  for (const l of lignes.filter((x) => journal(x) === "OD")) {
+    const code = String(l.lettrage_code ?? "").trim();
+    const cle = code
+      ? `C:${code}`
+      : `R:${String(l.reference_piece ?? "").trim()}|${String(l.date_ecriture ?? "").trim()}`;
+    const g = groupes.get(cle);
+    if (g) g.push(l); else groupes.set(cle, [l]);
+  }
+  for (const [, groupe] of groupes) {
+    if (!groupe.some((l) => estCompteTva(l.compte_numero, comptes))) continue;
+    if (opts.seulementBascules && !estBasculeReglement(groupe, comptes)) continue;
+    for (const l of groupe) ids.add(l.id);
+  }
+
+  // 2) Journal INCONNU (appelant qui ne l'a pas chargé) → on retombe sur le seul
+  // test du compte, sans regroupement. Compléter un groupe dont on ignore le
+  // journal emporterait la ligne de FACTURE, qui partage code et référence avec
+  // sa bascule : on supprimerait la vente pour annuler un règlement.
+  if (!opts.seulementBascules) {
+    for (const l of lignes.filter((x) => journal(x) === "")) {
+      if (estCompteTva(l.compte_numero, comptes)) ids.add(l.id);
+    }
+  }
+
+  return [...ids];
 }
 
 export interface ControleEquilibre {
@@ -389,19 +547,18 @@ export function planifierDelettrage(
   const concernees = toutesLignesDuDossier.filter((l) =>
     codes.includes(String(l.lettrage_code ?? "").trim()));
 
-  // Les OD de bascule TVA sont reconnaissables : même code, comptes de TVA.
-  const comptesTva = new Set<string>(
-    Object.values(comptes).flatMap((c) => [c.attente, c.exigible]),
-  );
-  const estBasculeTva = (l: LigneLettrable) =>
-    comptesTva.has(String(l.compte_numero ?? "").trim());
+  // L'OD de bascule se supprime par ÉCRITURE ENTIÈRE (partie double), pas ligne
+  // à ligne : sinon une contrepartie sur un sous-compte non reconnu survit et
+  // déséquilibre le grand livre. Le reste des lignes est simplement dé-estampillé.
+  const odASupprimer = grouperOdBascule(concernees, comptes);
+  const aSupprimer = new Set(odASupprimer);
 
   return {
     ok: true,
     raison: null,
     codes,
-    ligneIds: concernees.filter((l) => !estBasculeTva(l)).map((l) => l.id),
-    odASupprimer: concernees.filter(estBasculeTva).map((l) => l.id),
+    ligneIds: concernees.filter((l) => !aSupprimer.has(l.id)).map((l) => l.id),
+    odASupprimer,
   };
 }
 

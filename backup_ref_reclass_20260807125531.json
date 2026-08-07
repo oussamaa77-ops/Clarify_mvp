@@ -1,0 +1,145 @@
+{
+  "date": "2026-08-07T12:55:21.147Z",
+  "lignes": [
+    {
+      "id": "66001e3e-1bcd-455f-a8af-82d2429619ed",
+      "avant": "542208b1-8091-41c6-8844-c77929f6e33f",
+      "apres": "RECLASS-TVA-542208b1-8091-41c6-8844-c77929f6e33f"
+    },
+    {
+      "id": "7bbb7c03-1dec-4cc3-a656-49f493734bbd",
+      "avant": "542208b1-8091-41c6-8844-c77929f6e33f",
+      "apres": "RECLASS-TVA-542208b1-8091-41c6-8844-c77929f6e33f"
+    },
+    {
+      "id": "87d88e43-abb1-4092-8019-25a478e840af",
+      "avant": "6e959ff7-020e-42df-9ac1-7ba83614a82a",
+      "apres": "RECLASS-TVA-6e959ff7-020e-42df-9ac1-7ba83614a82a"
+    },
+    {
+      "id": "452e0e28-c75d-4528-89c9-e815af40b9d2",
+      "avant": "6e959ff7-020e-42df-9ac1-7ba83614a82a",
+      "apres": "RECLASS-TVA-6e959ff7-020e-42df-9ac1-7ba83614a82a"
+    },
+    {
+      "id": "3ef8dd01-c08e-41e5-82e5-8da005f8d962",
+      "avant": "abb23253-3d72-40f9-9586-db875a47c03b",
+      "apres": "RECLASS-TVA-abb23253-3d72-40f9-9586-db875a47c03b"
+    },
+    {
+      "id": "83cf08c5-227a-467b-b15d-014e537478b9",
+      "avant": "abb23253-3d72-40f9-9586-db875a47c03b",
+      "apres": "RECLASS-TVA-abb23253-3d72-40f9-9586-db875a47c03b"
+    },
+    {
+      "id": "1a5998d6-a391-49f3-ae61-ff53a7221c7e",
+      "avant": "FAC-2024-102",
+      "apres": "RECLASS-TVA-FAC-2024-102"
+    },
+    {
+      "id": "8ccf1f16-4ece-4288-8dd9-8259b4399a9f",
+      "avant": "FAC-2024-102",
+      "apres": "RECLASS-TVA-FAC-2024-102"
+    },
+    {
+      "id": "9f084186-8d5b-470b-b23f-c4473af18651",
+      "avant": "FAC-2024-306",
+      "apres": "RECLASS-TVA-FAC-2024-306"
+    },
+    {
+      "id": "b637e580-2019-4a7a-b4ef-6126312ce10b",
+      "avant": "FAC-2024-306",
+      "apres": "RECLASS-TVA-FAC-2024-306"
+    },
+    {
+      "id": "54564f6a-0537-402e-9c6a-23af654ca41f",
+      "avant": "FAC-2024-307",
+      "apres": "RECLASS-TVA-FAC-2024-307"
+    },
+    {
+      "id": "87999cc0-079a-460c-b09b-d218c787e8f4",
+      "avant": "FAC-2024-307",
+      "apres": "RECLASS-TVA-FAC-2024-307"
+    },
+    {
+      "id": "faace927-c467-430c-87ea-ecd521a5aab8",
+      "avant": "FAC-2024-308",
+      "apres": "RECLASS-TVA-FAC-2024-308"
+    },
+    {
+      "id": "893cc27e-3661-4b40-a2ea-5e19621836ef",
+      "avant": "FAC-2024-308",
+      "apres": "RECLASS-TVA-FAC-2024-308"
+    },
+    {
+      "id": "9b04bda2-710c-456e-b055-4191ad21476d",
+      "avant": "FAC-2024-309",
+      "apres": "RECLASS-TVA-FAC-2024-309"
+    },
+    {
+      "id": "243676bc-08ca-4f70-b68a-9637c83f1e6e",
+      "avant": "FAC-2024-309",
+      "apres": "RECLASS-TVA-FAC-2024-309"
+    },
+    {
+      "id": "9a2c0bf2-49a8-4c45-816e-652b7bbf5896",
+      "avant": "FAC-2024-04-102",
+      "apres": "RECLASS-TVA-FAC-2024-04-102"
+    },
+    {
+      "id": "c142f8a0-f627-4489-9752-e628ee28b78b",
+      "avant": "FAC-2024-04-102",
+      "apres": "RECLASS-TVA-FAC-2024-04-102"
+    },
+    {
+      "id": "ead09539-e30d-4b8b-88f1-ccbf664752c7",
+      "avant": "FAC - 2026 - 001",
+      "apres": "RECLASS-TVA-FAC - 2026 - 001"
+    },
+    {
+      "id": "d3542ccf-d6b7-40a2-b94f-02710cc04969",
+      "avant": "FAC - 2026 - 001",
+      "apres": "RECLASS-TVA-FAC - 2026 - 001"
+    },
+    {
+      "id": "d4e14be4-15dc-40f8-b21b-1ded86575250",
+      "avant": "36f3d530-d5ae-4c9c-879f-0a086925080e",
+      "apres": "RECLASS-TVA-36f3d530-d5ae-4c9c-879f-0a086925080e"
+    },
+    {
+      "id": "31a53072-c045-47c3-a66e-867f9f4f4d53",
+      "avant": "36f3d530-d5ae-4c9c-879f-0a086925080e",
+      "apres": "RECLASS-TVA-36f3d530-d5ae-4c9c-879f-0a086925080e"
+    },
+    {
+      "id": "9de50cd4-2070-45e5-9b73-170524aba1c8",
+      "avant": "FAC-2026-088",
+      "apres": "RECLASS-TVA-FAC-2026-088"
+    },
+    {
+      "id": "9387eefd-a65c-4e2e-9158-27ca854cd369",
+      "avant": "FAC-2026-088",
+      "apres": "RECLASS-TVA-FAC-2026-088"
+    },
+    {
+      "id": "34fdd2c4-63bd-4270-8651-82d9485af456",
+      "avant": "39b485d0-7a37-4a0e-a49e-02f23a55ab70",
+      "apres": "RECLASS-TVA-39b485d0-7a37-4a0e-a49e-02f23a55ab70"
+    },
+    {
+      "id": "5de3a556-2028-468b-b298-60c3533a39ae",
+      "avant": "39b485d0-7a37-4a0e-a49e-02f23a55ab70",
+      "apres": "RECLASS-TVA-39b485d0-7a37-4a0e-a49e-02f23a55ab70"
+    },
+    {
+      "id": "dbc82d92-1f73-48a2-995f-b8eb2ea888c8",
+      "avant": "7e9953b1-2e50-4c70-b198-7b9056f0d662",
+      "apres": "RECLASS-TVA-7e9953b1-2e50-4c70-b198-7b9056f0d662"
+    },
+    {
+      "id": "8b15592e-8e4c-4e9e-ab4a-1e685edc188c",
+      "avant": "7e9953b1-2e50-4c70-b198-7b9056f0d662",
+      "apres": "RECLASS-TVA-7e9953b1-2e50-4c70-b198-7b9056f0d662"
+    }
+  ]
+}

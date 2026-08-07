@@ -22,6 +22,7 @@ import { sendMail } from "./mailer";
 import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
 import { compteTiersAuxiliaire } from "../lib/comptes-auxiliaires";
+import { imputationTresorerie, COMPTE_CAISSE_DEFAUT } from "../lib/comptes-tresorerie";
 // TVA au régime des encaissements : la vente crédite le compte d'ATTENTE, la
 // bascule vers la TVA collectée exigible se fait au lettrage du règlement.
 import { COMPTES_TVA } from "../services/lettrage";
@@ -1328,58 +1329,139 @@ export const ocrFacture = createServerFn({ method: "POST" })
   });
 
 // ─── marquerPayee ─────────────────────────────────────────────────────────────
+// Règlement au comptant saisi depuis la colonne « Actions », côté CLIENT
+// (encaissement) comme côté FOURNISSEUR (décaissement).
+//
+// `montant` est le montant RÉELLEMENT réglé, saisi dans la boîte de dialogue : un
+// règlement partiel est donc pris tel quel, et c'est LUI qui part en écriture. La
+// version précédente passait toujours `montant_ttc` au journal alors que le
+// paiement, lui, était borné au solde — un acompte de 500 sur une facture de 1 200
+// écrivait 1 200 en caisse et déséquilibrait le compte de tiers.
+// `montant` absent = solde intégral (compat. avec l'ancien appel sans dialogue).
 export const marquerPayee = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z.object({
       facture_id: z.string().uuid(),
       date_paiement: z.string(),
       mode: z.string().default("especes"),
+      type: z.enum(["client", "fournisseur"]).default("client"),
+      montant: z.number().positive().optional(),
     }).parse(input)
   )
   .handler(async ({ data }) => {
     const supabase = getSupabase();
-    const { data: f } = await supabase
-      .from("factures")
-      .select("dossier_id,montant_ttc,montant_paye,numero,statut,client_id")
+    const estClient = data.type === "client";
+    const table = estClient ? "factures" : "factures_fournisseurs";
+    const { data: f } = await (supabase as any)
+      .from(table)
+      .select(`dossier_id,montant_ttc,montant_paye,numero,${estClient ? "client_id" : "fournisseur_id"}`)
       .eq("id", data.facture_id)
       .single();
     if (!f) throw new Error("Facture introuvable");
-    // Le règlement doit SOLDER le compte exact qu'a débité la vente : si la vente
-    // est partie sur l'auxiliaire 34210002, un crédit sur le collectif 3421
+
+    // Le règlement doit SOLDER le compte exact qu'a mouvementé la facture : si la
+    // vente est partie sur l'auxiliaire 34210002, un crédit sur le collectif 3421
     // laisserait les deux comptes ouverts et fausserait la balance auxiliaire.
-    const { data: cliPaie } = (f as any).client_id
-      ? await supabase.from("clients").select("code_auxiliaire").eq("id", (f as any).client_id).maybeSingle()
+    const tiersId = estClient ? f.client_id : f.fournisseur_id;
+    const { data: tiers } = tiersId
+      ? await (supabase as any).from(estClient ? "clients" : "fournisseurs")
+          .select("code_auxiliaire").eq("id", tiersId).maybeSingle()
       : { data: null as any };
-    const compteClient = compteTiersAuxiliaire("client", cliPaie?.code_auxiliaire ?? null);
+    const compteTiers = compteTiersAuxiliaire(data.type, tiers?.code_auxiliaire ?? null);
+
     // Ce bouton est le règlement COMPTANT du guichet : les espèces passent par la
-    // caisse (journal CAI / 5143, comme l'encaissement manuel de la page Banque),
-    // tout autre mode par la banque (BQ / 5141). Sans ce couple, le libellé du
-    // bouton dirait « espèces » pendant que l'écriture débiterait la banque.
-    const especes = data.mode === "especes";
-    const journal = especes ? "CAI" : "BQ";
-    const compteTresorerie = especes ? "5143" : "5141";
-    // Le règlement passe par un paiement `manuel` couvrant le reste dû ; le trigger
-    // recalcule montant_paye/montant_restant/statut. Le montant du paiement = solde
-    // restant (TTC − déjà payé), pour ne pas sur-payer une facture partiellement réglée.
-    const dejaPaye = Number((f as any).montant_paye ?? 0);
-    const solde = Math.max(0, Math.round((Number(f.montant_ttc) - dejaPaye) * 100) / 100);
-    if (solde > 0) {
-      await enregistrerPaiement(supabase, {
-        dossierId: f.dossier_id, table: "factures", factureId: data.facture_id,
-        montant: solde, date: data.date_paiement, origine: "manuel",
-      });
-    }
+    // CAISSE (rubrique 516 du PCM — 51610000 par défaut, ou le sous-compte de
+    // caisse du dossier), tout autre mode par la banque (514 / BQ).
+    //
+    // Le compte employé ici était 5143, qui est la Trésorerie Générale et non la
+    // caisse : les espèces atterrissaient dans le mauvais poste du bilan et
+    // aucun contrôle de caisse ne pouvait boucler. Compte et journal sont
+    // désormais rendus ENSEMBLE par `imputationTresorerie`, pour qu'ils ne
+    // puissent plus diverger. `select("*")` : les colonnes de paramétrage sont
+    // livrées par migration manuelle et peuvent manquer — un select nommé rendrait
+    // alors `data = null` et ferait perdre le dossier entier.
+    const { data: dossierRow } = await (supabase as any)
+      .from("dossiers").select("*").eq("id", f.dossier_id).maybeSingle();
+    const { compte: compteTresorerie, journal, especes } =
+      imputationTresorerie(data.mode, dossierRow);
+
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const dejaPaye = Number(f.montant_paye ?? 0);
+    const solde = Math.max(0, r2(Number(f.montant_ttc) - dejaPaye));
+    if (solde <= 0) throw new Error("Cette facture est déjà soldée");
+    const montant = data.montant != null ? r2(data.montant) : solde;
+    if (montant <= 0) throw new Error("Le montant réglé doit être supérieur à 0");
+    // Tolérance d'un centime : l'arrondi de la saisie ne doit pas bloquer un solde.
+    if (montant - solde > 0.01)
+      throw new Error(`Montant supérieur au reste dû (${solde.toFixed(2)} MAD)`);
+
+    // Le règlement passe par un paiement `manuel` ; le trigger de la table
+    // `paiements` recalcule montant_paye / montant_restant / statut_paiement —
+    // ce sont ces colonnes que relit le tableau après validation.
+    await enregistrerPaiement(supabase, {
+      dossierId: f.dossier_id, table, factureId: data.facture_id,
+      montant, date: data.date_paiement, origine: "manuel",
+    });
+
     const ref = f.numero ?? data.facture_id;
-    await supabase.from("ecritures_comptables").insert([
-      { dossier_id: f.dossier_id, journal_code: journal, compte_numero: compteTresorerie, date_ecriture: data.date_paiement, libelle: `Encaissement ${especes ? "espèces " : ""}${ref}`, debit: Number(f.montant_ttc), credit: 0, reference_piece: ref, facture_id: data.facture_id, valide: true },
-      { dossier_id: f.dossier_id, journal_code: journal, compte_numero: compteClient, date_ecriture: data.date_paiement, libelle: `Règlement client ${ref}`, debit: 0, credit: Number(f.montant_ttc), reference_piece: ref, facture_id: data.facture_id, valide: true },
-    ]);
+    // Ancre d'annulation (cf. paiements.functions.ts) : côté client c'est
+    // `facture_id` ; côté fournisseur la FK ecritures_comptables.facture_id pointe
+    // sur `factures` et refuserait un id de facture fournisseur — l'ancre est alors
+    // reference_piece = id de la facture, comme pour les encaissements.
+    const lignes = estClient
+      ? [
+          { compte_numero: compteTresorerie, libelle: `Encaissement ${especes ? "espèces " : ""}${ref}`, debit: montant, credit: 0 },
+          { compte_numero: compteTiers,      libelle: `Règlement client ${ref}`,                        debit: 0,       credit: montant },
+        ]
+      : [
+          { compte_numero: compteTiers,      libelle: `Règlement fournisseur ${ref}`,                    debit: montant, credit: 0 },
+          { compte_numero: compteTresorerie, libelle: `Décaissement ${especes ? "espèces " : ""}${ref}`, debit: 0,       credit: montant },
+        ];
+    await (supabase as any).from("ecritures_comptables").insert(
+      lignes.map((l) => ({
+        dossier_id: f.dossier_id, journal_code: journal, date_ecriture: data.date_paiement,
+        reference_piece: estClient ? ref : data.facture_id,
+        facture_id: estClient ? data.facture_id : null,
+        valide: true, ...l,
+      }))
+    );
+
     // Estampille du mode réellement employé : c'est elle que lit la colonne
     // « Mode de paiement » quand aucune pièce bancaire n'explique le règlement
     // (cf. src/lib/mode-paiement.ts). Sans elle, la facture réglée au comptant
     // afficherait le mode PRÉVU lu par l'OCR à la création.
-    await supabase.from("factures").update({ mode_reglement: data.mode }).eq("id", data.facture_id);
-    return { ok: true };
+    await (supabase as any).from(table).update({ mode_reglement: data.mode }).eq("id", data.facture_id);
+
+    // ── Lettrage + TVA sur encaissement, IMMÉDIATEMENT ────────────────────────
+    // Le règlement ne s'arrête pas à l'écriture de trésorerie : il faut apparier
+    // la ligne de facture et la ligne de règlement sous un même code, et rendre
+    // la TVA exigible. Appel DIRECT au cœur — une server function ne rendrait
+    // rien à un appelant serveur (cf. lettrage-compta.functions.ts).
+    //
+    // Import dynamique : `lettrage-compta.functions` déclare ses propres server
+    // functions, et l'import statique croisé entre deux modules de server fns
+    // crée un cycle au bundling.
+    let compta: { lettre: boolean; code: string | null; tvaBasculee: number; raison: string | null } = {
+      lettre: false, code: null, tvaBasculee: 0, raison: null,
+    };
+    try {
+      const { comptabiliserReglement } = await import("./lettrage-compta.functions");
+      const r = await comptabiliserReglement(supabase, {
+        dossierId: f.dossier_id, compte: compteTiers,
+        // Deux alias de la même pièce : les ventes estampillent le NUMÉRO,
+        // les achats l'ID de la facture.
+        references: [ref, data.facture_id],
+        montantRegle: montant, date: data.date_paiement,
+      });
+      compta = { lettre: r.lettre, code: r.code, tvaBasculee: r.tvaBasculee, raison: r.raison };
+    } catch (e: any) {
+      // Le paiement est enregistré : un lettrage en échec ne doit pas le défaire.
+      compta.raison = String(e?.message ?? e);
+      console.warn("[REGLEMENT] lettrage/TVA ignorés :", compta.raison);
+    }
+
+    const restant = Math.max(0, r2(solde - montant));
+    return { ok: true, montant, restant, soldee: restant <= 1, compta };
   });
 
 // ─── ajouterEmailClient ───────────────────────────────────────────────────────
@@ -1620,7 +1702,9 @@ export function applyKeywordOverrides(
       return {
         ...a,
         categorie: "retrait_especes",
-        code_pcm: "5143",
+        // Caisse (rubrique 516), pas 5143 = Trésorerie Générale. Règle appliquée
+        // en POST-TRAITEMENT, donc autoritaire sur ce que répond le LLM.
+        code_pcm: COMPTE_CAISSE_DEFAUT,
         taux_tva: 0,
         montant_ht: tx.montant_debit ?? 0,
         montant_tva: 0,
@@ -2484,7 +2568,7 @@ ALGORITHME DE MATCHING (ordre strict)
   3e. Restauration (payé CB sur place, nom court, pas de FACTURE dans libellé) → frais_representation/6147/0%
   3f. Autres:
     - GASOIL, STATION → gasoil/61241/0%
-    - RETRAIT ESPECES, RETRAIT GAB → retrait_especes/5143/0% (PRIORITÉ ABSOLUE)
+    - RETRAIT ESPECES, RETRAIT GAB → retrait_especes/${COMPTE_CAISSE_DEFAUT}/0% (PRIORITÉ ABSOLUE — compte de CAISSE, rubrique 516 ; jamais 5143 qui est la Trésorerie Générale)
     - VIR AG EMIS, VERSEMENT, VIREMENT INTERNE (mouvement entre comptes propres) → virement_interne/5115/0%
     - DOUANE, IMPORT → frais_douane/6146/0%
     - TRANSPORT, DEPLACEMENT → transport/6142/14%

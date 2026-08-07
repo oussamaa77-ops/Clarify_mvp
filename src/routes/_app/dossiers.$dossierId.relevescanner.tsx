@@ -15,6 +15,7 @@ import { runDocumentJob } from "@/hooks/useDocumentJob";
 import { parseAttijariReleve, extractRibMarocain } from "@/lib/releve-attijari";
 import { enregistrerPaiement } from "@/lib/paiements";
 import { traiterPagesEnPipeline } from "@/lib/pipeline-pages";
+import { COMPTE_CAISSE_DEFAUT } from "@/lib/comptes-tresorerie";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/relevescanner")({
   component: RelEveScanner,
@@ -56,7 +57,10 @@ const NATURES_OPERATION = [
   { value: "entretien",            label: "Entretien / Réparation", code: "6141", tva: true  },
   { value: "frais_bancaires",      label: "Frais bancaires",        code: "6347", tva: false },
   { value: "taxe_professionnelle", label: "Taxe Professionnelle",   code: "6313", tva: false },
-  { value: "retrait_especes",      label: "Retrait espèces / GAB",  code: "5161", tva: false },
+  // Caisse : le MÊME compte que les règlements en espèces et que comptabilite-bq.
+  // « 5161 » tout court était le bon niveau mais pas le bon compte : deux libellés
+  // de caisse dans le grand livre, donc deux soldes à rapprocher à la main.
+  { value: "retrait_especes",      label: "Retrait espèces / GAB",  code: COMPTE_CAISSE_DEFAUT, tva: false },
   { value: "interets_crediteurs",  label: "Intérêts créditeurs",    code: "7611", tva: false },
   { value: "frais_representation", label: "Frais de représentation",code: "6147", tva: false },
   { value: "frais_douane",         label: "Frais douane / import",  code: "6146", tva: false },

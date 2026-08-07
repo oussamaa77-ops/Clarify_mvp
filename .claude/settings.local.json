@@ -305,7 +305,25 @@
       "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 32)",
       "PowerShell(node --import tsx verify_lettrage.mjs 2>&1 | Select-Object -Last 16)",
       "PowerShell(npx vitest run src/lib/balance-comptable.test.ts 2>&1 | Select-Object -Last 40)",
-      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"Total erreurs TS: $\\($e.Count\\)\")"
+      "PowerShell($e = npx tsc --noEmit -p tsconfig.json 2>&1 | Select-String -Pattern \"error TS\"; \"Total erreurs TS: $\\($e.Count\\)\")",
+      "PowerShell(node \"C:\\\\Users\\\\O6C96~1.KAR\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-o-karmaoui-Downloads-deploi-app-last-deploie-app-main\\\\22acc417-7e08-48ed-ba8d-a7144477ff2a\\\\scratchpad\\\\test_resend.mjs\" oussamakarmaoui7@gmail.com)",
+      "PowerShell(node verify_resend.mjs oussamakarmaoui7@gmail.com)",
+      "PowerShell(node verify_resend_statut.mjs d53812a2-9e90-4159-89ed-8a9fc14fc41a)",
+      "PowerShell(node verify_resend.mjs oous22982@gmail.com 2>&1 | Select-Object -Last 12)",
+      "PowerShell(npx vitest run src/server/mailer.resend.test.ts 2>&1 | Select-Object -Last 40)",
+      "PowerShell(node verify_smtp_ports.mjs)",
+      "PowerShell(npx vitest run src/server/mailer.test.ts src/server/mailer.resend.test.ts 2>&1 | Select-Object -Last 40)",
+      "PowerShell(npx tsx verify_envoi_mail.ts oussamakarmaoui7@gmail.com)",
+      "PowerShell(npx vitest run src/server/mailer.test.ts src/server/mailer.resend.test.ts 2>&1 | Select-Object -Last 25)",
+      "PowerShell(npx vitest run src/server 2>&1 | Select-Object -Last 15)",
+      "PowerShell($c = Get-Command railway -ErrorAction SilentlyContinue; if \\($c\\) { \"railway CLI: $\\($c.Source\\)\"; railway whoami } else { \"railway CLI: ABSENT\" })",
+      "PowerShell(git push *)",
+      "PowerShell(git log --oneline -2; \"--- a pousser ---\"; git log origin/main..HEAD --oneline; \"--- working tree ---\"; git status --short)",
+      "PowerShell(npx vitest run src/routes/_app/dossiers.$dossierId.factures.test.tsx src/lib/paiements.test.ts src/lib/mode-paiement.test.ts 2>&1 | Select-Object -Last 30)",
+      "Bash(perl -pi -e 's/justificatif:justif\\\\}\\\\\\)\\\\\\)\\\\{/justificatif:justif,dossier}\\)\\){/g; s/justificatif: justif \\\\}\\\\\\)\\\\\\) \\\\{/justificatif: justif, dossier }\\)\\) {/g' 'src/routes/_app/dossiers.$dossierId.banque.tsx')",
+      "Bash(perl -pi -e 's/colSpan=\\\\{12\\\\}/colSpan={13}/g' src/components/FacturesClientsPanel.tsx)",
+      "Bash(perl -pi -e 's/colSpan=\\\\{11\\\\}/colSpan={12}/g' 'src/routes/_app/dossiers.$dossierId.fournisseurs.tsx')",
+      "Bash(perl -pi -e 's/colSpan=\\\\{9\\\\}/colSpan={10}/g' 'src/routes/_app/dossiers.$dossierId.fournisseurs.tsx')"
     ]
   }
 }

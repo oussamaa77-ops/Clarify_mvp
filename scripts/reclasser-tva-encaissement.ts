@@ -37,7 +37,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
-import { COMPTES_TVA } from "../src/services/lettrage";
+import { COMPTES_TVA, referenceReclassement, referenceSansPrefixe } from "../src/services/lettrage";
 
 // ─── Environnement (.env à la racine) ────────────────────────────────────────
 const ICI = path.dirname(fileURLToPath(import.meta.url));
@@ -143,7 +143,11 @@ async function principal() {
         .eq("dossier_id", d.id).eq("compte_numero", regle.cible);
       const attenteParRef = new Map<string, number>();
       for (const a of (dejaAttente ?? []) as any[]) {
-        const k = String(a.reference_piece ?? "");
+        // Clé NORMALISÉE : le reclassement porte « RECLASS-TVA-<ref> » alors que
+        // la recherche se fait sous « <ref> ». Sans retirer le préfixe, aucune
+        // ligne d'attente ne serait retrouvée et le script reclasserait une
+        // seconde fois ce qui l'est déjà — il perdrait son idempotence.
+        const k = referenceSansPrefixe(a.reference_piece);
         const v = regle.sens === "client" ? n(a.credit) - n(a.debit) : n(a.debit) - n(a.credit);
         attenteParRef.set(k, (attenteParRef.get(k) ?? 0) + v);
       }
@@ -168,7 +172,13 @@ async function principal() {
           journal_code: "OD",
           date_ecriture: e.date_ecriture,
           libelle: `Reclassement TVA régime encaissements ${piece.numero ?? ref}`.slice(0, 200),
-          reference_piece: ref,
+          // Référence PROPRE (RECLASS-TVA-<ref>), pas celle de la facture. Avec
+          // la référence de la pièce, cette OD était indiscernable d'une bascule
+          // au règlement — mêmes comptes, pas de code, même référence — et une
+          // annulation de paiement l'a mutilée (FAC-2024-307). Le préfixe
+          // conserve la référence d'origine : `referencesPiece` la retrouve,
+          // donc la TVA reste visible en attente. Cf. src/services/lettrage.ts.
+          reference_piece: referenceReclassement(ref),
           valide: true,
         };
         // Vente : on DÉBITE 44551 (annule la collecte) et on CRÉDITE 4458.

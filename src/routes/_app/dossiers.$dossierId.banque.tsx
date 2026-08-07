@@ -20,6 +20,7 @@ import { PCM_MAP, RX_VIREMENT_INTERNE, deriveCategorie, genererLignesBQ } from "
 import { extractRibMarocain } from "@/lib/releve-attijari";
 import { identifierBanque, identifierBanqueParNom, maskRib } from "@/lib/bank-identity";
 import { reconcilierPaiements } from "@/lib/paiements";
+import { imputationTresorerie } from "@/lib/comptes-tresorerie";
 import { controlerCoherenceReleve, resumerCoherence } from "@/lib/releve-coherence";
 import { encoderCanvasPourOcr, preparerImageBanquePourOcr, cumulerMesures, journaliserMesure, type MesureGrayscale } from "@/lib/bank-grayscale";
 import { BankLogo } from "@/components/BankLogo";
@@ -578,7 +579,7 @@ const CATEGORIES=[
   {value:"entretien",             label:"Entretien / Réparation (TVA 20%)"},
   {value:"frais_bancaires",       label:"Frais bancaires (TVA 10%)"},
   {value:"taxe_professionnelle",  label:"Taxe professionnelle"},
-  {value:"retrait_especes",       label:"Retrait espèces / GAB (Caisse 5143)"},
+  {value:"retrait_especes",       label:"Retrait espèces / GAB (Caisse 51610000)"},
   {value:"virement_interne",      label:"Virement interne / Versement (5115)"},
   {value:"interets_crediteurs",   label:"Intérêts créditeurs"},
   {value:"frais_representation",  label:"Restaurant / Réception (TVA non déduc.)"},
@@ -705,7 +706,11 @@ function BanquePage() {
       (supabase.from("factures_fournisseurs") as any).select("id,numero,montant_ttc,montant_ht,montant_tva,montant_paye,montant_restant,date_facture,date_echeance,fournisseur_nom,fournisseur_id,mode_reglement").eq("dossier_id",dossierId).neq("statut_paiement","payee"),
       (supabase.from("fournisseurs") as any).select("id,nom,ice").eq("dossier_id",dossierId),
       supabase.from("clients").select("id,nom,ice").eq("dossier_id",dossierId),
-      (supabase.from("dossiers") as any).select("nom_societe,ice,if_fiscal").eq("id",dossierId).single(),
+      // select("*") et non une liste nommée : `compte_caisse` / `compte_banque`
+      // arrivent par migration manuelle, et un select nommé sur une colonne
+      // absente rendrait `data = null` — on perdrait aussi nom_societe/ICE/IF,
+      // dont dépend l'export EDI.
+      (supabase.from("dossiers") as any).select("*").eq("id",dossierId).single(),
       (supabase.from("justificatifs") as any).select("*").eq("dossier_id",dossierId).eq("statut","non_rapproche"),
       // Toutes (y compris payées) → affichage badge "Document lié"
       supabase.from("factures").select("id,numero,montant_ttc,montant_paye,montant_restant,date_facture,date_echeance,client_id,mode_reglement,clients(id,nom,ice)").eq("dossier_id",dossierId).eq("statut","conforme"),
@@ -1389,7 +1394,7 @@ function BanquePage() {
         const parts=tx.date_operation.split("/");
         const date=parts.length===3&&parts[2].length===4?`${parts[2]}-${parts[1]}-${parts[0]}`:tx.date_operation;
         const justif=tx.justificatif_id?justificatifs.find((j:any)=>j.id===tx.justificatif_id):null;
-        for(const l of genererLignesBQ({libelle:tx.libelle,type:tx.type,montant:tx.montant,categorie:tx.categorie,compteComptable:tx.compte_comptable,factureLiee:!!tx.facture_id,justificatif:justif})){
+        for(const l of genererLignesBQ({libelle:tx.libelle,type:tx.type,montant:tx.montant,categorie:tx.categorie,compteComptable:tx.compte_comptable,factureLiee:!!tx.facture_id,justificatif:justif,dossier})){
           ecritures.push({dossier_id:dossierId,journal_code:"BQ",compte_numero:l.compte,date_ecriture:date,libelle:l.libelle,debit:l.debit,credit:l.credit,reference_piece:tx.reference_facture||tx.reference,valide:true});
         }
       }
@@ -1578,7 +1583,7 @@ function BanquePage() {
     const rows=[["Date","Journal","Compte","Libellé","Débit","Crédit","Catégorie","Réf."]];
     for(const tx of txExtraites){
       const justif=tx.justificatif_id?justificatifs.find((j:any)=>j.id===tx.justificatif_id):null;
-      for(const l of genererLignesBQ({libelle:tx.libelle,type:tx.type,montant:tx.montant,categorie:tx.categorie,compteComptable:tx.compte_comptable,factureLiee:!!tx.facture_id,justificatif:justif})){
+      for(const l of genererLignesBQ({libelle:tx.libelle,type:tx.type,montant:tx.montant,categorie:tx.categorie,compteComptable:tx.compte_comptable,factureLiee:!!tx.facture_id,justificatif:justif,dossier})){
         rows.push([tx.date_operation,"BQ",l.compte,l.libelle,l.debit?String(l.debit):"",l.credit?String(l.credit):"",l.categorie,tx.reference_facture||""]);
       }
     }
@@ -1715,7 +1720,7 @@ function BanquePage() {
         const date = p.length === 3 && p[2]?.length === 4 ? `${p[2]}-${p[1]}-${p[0]}` : raw;
         const justif = tx.justificatif_id ? allJus.find((j: any) => j.id === tx.justificatif_id) : null;
 
-        for (const l of genererLignesBQ({ libelle: tx.libelle, type: tx.type, montant: tx.montant, categorie: cat, compteComptable: (tx as any).compte_comptable, factureLiee: !!tx.facture_id, justificatif: justif })) {
+        for (const l of genererLignesBQ({ libelle: tx.libelle, type: tx.type, montant: tx.montant, categorie: cat, compteComptable: (tx as any).compte_comptable, factureLiee: !!tx.facture_id, justificatif: justif, dossier })) {
           ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: l.compte, date_ecriture: date, libelle: l.libelle, debit: l.debit, credit: l.credit, valide: true, transaction_id: tx.id });
         }
       }
@@ -1861,7 +1866,7 @@ function BanquePage() {
       const cat=storedCat&&PCM_MAP[storedCat]?storedCat:deriveCategorie(tx.libelle||"", tx.type as "credit"|"debit").categorie;
       const d=tx.date_operation.includes("-")?tx.date_operation.split("-").reverse().join("/"):tx.date_operation;
       const justif=tx.justificatif_id?allJus.find((j:any)=>j.id===tx.justificatif_id):null;
-      for(const l of genererLignesBQ({libelle:(tx.libelle||"").slice(0,80),type:tx.type,montant:tx.montant,categorie:cat,compteComptable:(tx as any).compte_comptable,factureLiee:!!tx.facture_id,justificatif:justif})){
+      for(const l of genererLignesBQ({libelle:(tx.libelle||"").slice(0,80),type:tx.type,montant:tx.montant,categorie:cat,compteComptable:(tx as any).compte_comptable,factureLiee:!!tx.facture_id,justificatif:justif,dossier})){
         rows.push([d,"BQ",l.compte,l.libelle,l.debit?String(l.debit):"",l.credit?String(l.credit):"",l.categorie]);
       }
     }
@@ -1904,8 +1909,11 @@ function BanquePage() {
         facture_fournisseur_id:formEnc.facture_fournisseur_id||null,valide:true,
       });
       if(error) throw error;
-      const journalCode=formEnc.type==="especes"?"CAI":"BQ";
-      const compteDebit=formEnc.type==="especes"?"5143":"5141";
+      // Même référentiel que le bouton « Payer en espèces » : la caisse est en
+      // rubrique 516 du PCM (51610000), PAS en 5143 qui est la Trésorerie
+      // Générale. Deux écrans qui encaissent des espèces sur deux comptes
+      // différents rendraient tout contrôle de caisse impossible.
+      const {compte:compteDebit,journal:journalCode}=imputationTresorerie(formEnc.type,dossier);
       const compteContre=formEnc.facture_id?"3421":formEnc.facture_fournisseur_id?"4411":"7111";
       // Estampille de rattachement — indispensable pour retrouver ces 2 écritures à
       // l'annulation du paiement sans se fier à (date, montant), ambigu en cas de
@@ -2732,7 +2740,7 @@ function BanquePage() {
         <TabsContent value="encaissements" className="mt-4">
           <div className="mb-4 p-4 bg-muted rounded-lg text-sm">
             <p className="font-medium mb-1">Encaissements hors virement bancaire</p>
-            <p className="text-muted-foreground">Espèces ou chèque — enregistrés dans le journal de caisse (5143) ou banque (5141).</p>
+            <p className="text-muted-foreground">Espèces ou chèque — enregistrés dans le journal de caisse (51610000) ou banque (5141).</p>
           </div>
           <Button onClick={()=>setOpenEncaissement(true)}><Plus className="h-4 w-4 mr-2"/>Saisir un encaissement</Button>
         </TabsContent>

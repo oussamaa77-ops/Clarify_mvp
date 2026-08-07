@@ -13,8 +13,9 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import {
-  COMPTES_TVA, construireBasculeTva, planifierDelettrage, planifierLettrage,
-  regrouperParCompte, sensDuCompte, tvaProportionnelle,
+  COMPTES_TVA, construireBasculeTva, controlerEquilibre, planifierDelettrage,
+  planifierLettrage, referencesPiece, regrouperParCompte, sensDuCompte,
+  tvaProportionnelle,
   type LigneLettrable, type SensTiers,
 } from "@/services/lettrage";
 
@@ -52,10 +53,6 @@ const nb = (v: unknown) => {
 };
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
-/** Tous les comptes de TVA gérés par la bascule, quel que soit le sens. */
-const COMPTES_TVA_TOUS = new Set<string>(
-  Object.values(COMPTES_TVA).flatMap((c) => [c.attente, c.exigible]),
-);
 
 // ─── getPostesTiers : alimente l'écran de lettrage manuel ────────────────────
 export const getPostesTiers = createServerFn({ method: "POST" })
@@ -108,36 +105,130 @@ export const getPostesTiers = createServerFn({ method: "POST" })
   });
 
 /**
- * TVA restant en attente sur une pièce, et TTC de cette pièce côté tiers.
+ * TVA d'une pièce vue depuis le compte d'attente, et TTC de cette pièce côté tiers.
  *
  * On lit la TVA depuis les ÉCRITURES (compte d'attente) et non depuis la facture :
  * le grand livre est ce qui sera exporté et déclaré, c'est donc lui qui fait foi,
  * et une pièce importée sans facture rattachée reste traitable.
  *
- * Le solde du compte d'attente décroît à chaque bascule : relire ce solde rend
- * l'opération naturellement idempotente sur un règlement échelonné.
+ * Trois grandeurs, et la distinction entre les deux premières est essentielle :
+ *
+ *  • `tvaTotale`   — TVA d'ORIGINE de la pièce (le seul côté alimenté par la
+ *    facture : crédit pour une vente, débit pour un achat). C'est la base du
+ *    prorata d'un règlement partiel.
+ *  • `tvaAttente`  — ce qu'il RESTE à basculer (origine − bascules déjà passées).
+ *    Sert de plafond, et rend l'opération idempotente sur un règlement échelonné.
+ *  • `ttcPiece`    — TTC porté par le compte de tiers, dénominateur du prorata.
+ *
+ * Proratiser sur `tvaAttente` au lieu de `tvaTotale` sous-évaluerait chaque
+ * versement après le premier : sur 200 de TVA réglés en deux fois, le second
+ * versement ne basculerait que 50 (la moitié du reste) au lieu de 100, et 50 de
+ * TVA resteraient éternellement en attente sur une facture pourtant soldée.
  */
 async function tvaEnAttenteDeLaPiece(
   sb: any, dossierId: string, reference: string, sens: SensTiers,
-): Promise<{ tvaAttente: number; ttcPiece: number }> {
+): Promise<{ tvaAttente: number; tvaTotale: number; ttcPiece: number }> {
+  // `referencesPiece` ajoute la référence du RECLASSEMENT (RECLASS-TVA-<ref>) :
+  // pour une facture antérieure au régime des encaissements, c'est l'OD de
+  // reclassement — et elle seule — qui a mis la TVA en attente. La lire sous la
+  // seule référence de la pièce rendrait cette TVA invisible, et le règlement ne
+  // basculerait rien.
   const { data } = await sb.from("ecritures_comptables")
     .select("compte_numero,debit,credit")
-    .eq("dossier_id", dossierId).eq("reference_piece", reference);
+    .eq("dossier_id", dossierId).in("reference_piece", referencesPiece(reference));
 
   const lignes = (data ?? []) as any[];
   const attente = COMPTES_TVA[sens].attente;
+  const lignesAttente = lignes
+    .filter((l) => String(l.compte_numero ?? "").trim() === attente);
 
   // Vente : l'attente est créditée à la facture puis débitée à chaque bascule.
-  // Achat : l'inverse. Dans les deux cas le solde restant est le reste à basculer.
-  const tvaAttente = lignes
-    .filter((l) => String(l.compte_numero ?? "").trim() === attente)
-    .reduce((s, l) => s + (sens === "client" ? nb(l.credit) - nb(l.debit) : nb(l.debit) - nb(l.credit)), 0);
+  // Achat : l'inverse.
+  const tvaTotale = lignesAttente
+    .reduce((s, l) => s + (sens === "client" ? nb(l.credit) : nb(l.debit)), 0);
+  const dejaBasculee = lignesAttente
+    .reduce((s, l) => s + (sens === "client" ? nb(l.debit) : nb(l.credit)), 0);
 
   const ttcPiece = lignes
     .filter((l) => sensDuCompte(l.compte_numero) === sens)
     .reduce((s, l) => s + (sens === "client" ? nb(l.debit) : nb(l.credit)), 0);
 
-  return { tvaAttente: Math.max(0, round2(tvaAttente)), ttcPiece: round2(ttcPiece) };
+  return {
+    tvaTotale: Math.max(0, round2(tvaTotale)),
+    tvaAttente: Math.max(0, round2(tvaTotale - dejaBasculee)),
+    ttcPiece: round2(ttcPiece),
+  };
+}
+
+export interface BasculeTva {
+  /** TVA effectivement rendue exigible par cet appel. */
+  tva: number;
+  /** Lignes d'OD insérées (0 ou 2). */
+  od: number;
+  error?: string | null;
+}
+
+/**
+ * Rend exigible la TVA d'une pièce, au prorata du montant qui vient d'être réglé.
+ *
+ * Appelée depuis DEUX endroits, et c'est voulu :
+ *  • `executerLettrage`, quand le règlement solde la pièce et qu'un code est posé ;
+ *  • `comptabiliserReglement`, quand le règlement est PARTIEL et qu'aucun lettrage
+ *    n'est possible (un lettrage doit être équilibré). Sans ce second appel, la
+ *    TVA d'un acompte encaissé resterait en attente alors qu'elle est due — le
+ *    fait générateur, sous le régime des encaissements, est l'encaissement, pas
+ *    le solde de la facture.
+ *
+ * `lettrageCode` est NULL dans le second cas : l'OD n'appartient à aucun
+ * rapprochement. Elle reste réversible — l'annulation du paiement supprime les
+ * OD de TVA portant la référence de la pièce (cf. paiements.functions.ts).
+ */
+export async function basculerTvaSurReglement(
+  sb: any,
+  p: {
+    dossierId: string; reference: string; sens: SensTiers;
+    montantRegle: number; date: string;
+    lettrageCode?: string | null; origine?: "auto" | "manuel";
+  },
+): Promise<BasculeTva> {
+  const { tvaAttente, tvaTotale, ttcPiece } =
+    await tvaEnAttenteDeLaPiece(sb, p.dossierId, p.reference, p.sens);
+  if (tvaAttente <= 0) return { tva: 0, od: 0 };      // pièce sans TVA, ou déjà basculée
+  if (p.montantRegle <= 0.005) return { tva: 0, od: 0 };
+
+  // Base du prorata : le TTC de la pièce. À défaut (pièce sans ligne de tiers
+  // exploitable), le montant réglé lui-même — la bascule est alors intégrale.
+  const base = ttcPiece > 0 ? ttcPiece : p.montantRegle;
+  const aBasculer = Math.min(
+    tvaAttente,
+    tvaProportionnelle(p.montantRegle, base, tvaTotale > 0 ? tvaTotale : tvaAttente),
+  );
+  const od = construireBasculeTva({
+    sens: p.sens, montantTva: aBasculer, date: p.date,
+    reference: p.reference, lettrageCode: p.lettrageCode ?? "",
+  });
+  if (!od.length) return { tva: 0, od: 0 };
+
+  const { error } = await (sb as any).from("ecritures_comptables").insert(
+    od.map((l) => ({
+      dossier_id: p.dossierId,
+      journal_code: l.journal_code,
+      compte_numero: l.compte_numero,
+      date_ecriture: l.date_ecriture,
+      libelle: l.libelle,
+      debit: l.debit,
+      credit: l.credit,
+      reference_piece: l.reference_piece,
+      // Chaîne vide → NULL : une OD hors lettrage ne doit pas porter de code
+      // fantôme, que l'écran de lettrage afficherait comme un rapprochement.
+      lettrage_code: p.lettrageCode || null,
+      lettrage_date: new Date().toISOString(),
+      lettrage_origine: p.origine ?? "auto",
+      valide: true,
+    })),
+  );
+  if (error) return { tva: 0, od: 0, error: error.message };
+  return { tva: aBasculer, od: od.length };
 }
 
 export interface ResultatLettrage {
@@ -155,6 +246,18 @@ export interface EntreeLettrage {
   dossierId: string;
   ligneIds: string[];
   origine?: "auto" | "manuel";
+  /**
+   * Date de RÈGLEMENT réelle, celle que l'utilisateur a saisie. Elle date l'OD de
+   * bascule de TVA — et c'est elle qui compte : sous le régime des encaissements,
+   * la TVA devient exigible au jour où l'argent est reçu, pas au jour où
+   * quelqu'un l'enregistre dans l'application. Un encaissement du 28 juin saisi
+   * le 3 juillet appartient à la déclaration de JUIN ; le dater du jour de saisie
+   * le décalait d'une période et faussait la déclaration.
+   *
+   * Absente → date du jour (lettrage manuel depuis l'écran comptable, où aucune
+   * date de règlement n'est saisie).
+   */
+  dateReglement?: string | null;
 }
 
 /**
@@ -167,7 +270,10 @@ export interface EntreeLettrage {
  * internes passent donc par ici, et la server function n'est qu'une porte
  * d'entrée HTTP pour le navigateur.
  */
-export async function executerLettrage(sb: any, data: Required<EntreeLettrage>): Promise<ResultatLettrage> {
+export async function executerLettrage(
+  sb: any,
+  data: Omit<Required<EntreeLettrage>, "dateReglement"> & { dateReglement?: string | null },
+): Promise<ResultatLettrage> {
     // 1) Relire les lignes EN BASE plutôt que de faire confiance au client :
     // un montant falsifié côté navigateur produirait un lettrage déséquilibré.
     const { data: lignesBase, error: eLire } = await (sb as any).from("ecritures_comptables")
@@ -182,11 +288,14 @@ export async function executerLettrage(sb: any, data: Required<EntreeLettrage>):
     const { data: codes } = await (sb as any).from("ecritures_comptables")
       .select("lettrage_code").eq("dossier_id", data.dossierId).not("lettrage_code", "is", null);
 
+    // Date de l'OD de TVA : celle du RÈGLEMENT quand on la connaît, sinon le jour
+    // même (lettrage manuel, où aucune date n'est saisie). Voir `dateReglement`.
     const aujourdhui = new Date().toISOString().slice(0, 10);
+    const dateTva = String(data.dateReglement ?? "").slice(0, 10) || aujourdhui;
     const plan = planifierLettrage({
       lignes,
       codesExistants: ((codes ?? []) as any[]).map((c) => c.lettrage_code),
-      date: aujourdhui,
+      date: dateTva,
     });
     if (!plan.ok) return { ok: false, reason: plan.raison, code: null };
 
@@ -222,9 +331,6 @@ export async function executerLettrage(sb: any, data: Required<EntreeLettrage>):
         lignes.map((l) => String(l.reference_piece ?? "").trim()).filter(Boolean),
       )];
       for (const ref of refs) {
-        const { tvaAttente, ttcPiece } = await tvaEnAttenteDeLaPiece(sb, data.dossierId, ref, sens);
-        if (tvaAttente <= 0) continue;   // pièce sans TVA, ou TVA déjà basculée
-
         // Part de la pièce que ce lettrage solde, mesurée sur le côté FACTURE
         // (débit pour un client, crédit pour un fournisseur).
         //
@@ -242,36 +348,17 @@ export async function executerLettrage(sb: any, data: Required<EntreeLettrage>):
           .reduce((s, l) => s + (sens === "client" ? nb(l.debit) : nb(l.credit)), 0);
         if (montantSolde <= 0.005) continue;   // aucune ligne de facture de cette pièce ici
 
-        const base = ttcPiece > 0 ? ttcPiece : montantSolde;
-        const aBasculer = Math.min(tvaAttente, tvaProportionnelle(montantSolde, base, tvaAttente));
-        const od = construireBasculeTva({
-          sens, montantTva: aBasculer, date: aujourdhui,
-          reference: ref, lettrageCode: plan.code,
+        const r = await basculerTvaSurReglement(sb, {
+          dossierId: data.dossierId, reference: ref, sens,
+          montantRegle: montantSolde, date: dateTva,
+          lettrageCode: plan.code, origine: data.origine,
         });
-        if (!od.length) continue;
-
-        const { error: eOd } = await (sb as any).from("ecritures_comptables").insert(
-          od.map((l) => ({
-            dossier_id: data.dossierId,
-            journal_code: l.journal_code,
-            compte_numero: l.compte_numero,
-            date_ecriture: l.date_ecriture,
-            libelle: l.libelle,
-            debit: l.debit,
-            credit: l.credit,
-            reference_piece: l.reference_piece,
-            lettrage_code: l.lettrage_code,
-            lettrage_date: maintenant,
-            lettrage_origine: data.origine,
-            valide: true,
-          })),
-        );
-        if (eOd) {
+        if (r.error) {
           await annulerEstampillage();
-          return { ok: false, reason: `Bascule de TVA impossible : ${eOd.message}`, code: null };
+          return { ok: false, reason: `Bascule de TVA impossible : ${r.error}`, code: null };
         }
-        odInserees += od.length;
-        tvaBasculee += aBasculer;
+        odInserees += r.od;
+        tvaBasculee += r.tva;
       }
     }
 
@@ -293,6 +380,8 @@ export const lettrerSelection = createServerFn({ method: "POST" })
       dossierId: z.string().uuid(),
       ligneIds: z.array(z.string().uuid()).min(2),
       origine: z.enum(["auto", "manuel"]).default("manuel"),
+      /** Date de règlement réelle — date l'OD de TVA. Absente → jour même. */
+      dateReglement: z.string().optional().nullable(),
     }).parse(input),
   )
   .handler(({ data }): Promise<ResultatLettrage> => executerLettrage(getSupabase(), data));
@@ -335,13 +424,31 @@ export async function executerDelettrage(sb: any, data: EntreeDelettrage): Promi
     if (!plan.ok) return { ok: false as const, reason: plan.raison, codes };
 
     // 1) Supprimer les OD de bascule — la TVA redevient « en attente ».
-    // Garde-fou : on ne supprime QUE des lignes de journal OD sur un compte de
-    // TVA. Une ligne de facture ne doit jamais disparaître d'un délettrage.
+    // Garde-fou : on ne supprime QUE des lignes de journal OD. Une ligne de
+    // facture ne doit jamais disparaître d'un délettrage.
+    //
+    // Le filtre sur le compte a été RETIRÉ ici : `grouperOdBascule` a déjà
+    // sélectionné des écritures COMPLÈTES, et refiltrer ligne à ligne sur une
+    // liste de comptes exacte est exactement ce qui laissait survivre la
+    // contrepartie 44551 d'une OD dont la ligne 4458 partait — une demi-écriture
+    // orpheline, et le grand livre déséquilibré du montant de la TVA.
     const odSupprimables = ((concernees ?? []) as any[])
       .filter((l: any) => plan.odASupprimer.includes(l.id))
-      .filter((l: any) => l.journal_code === "OD" && COMPTES_TVA_TOUS.has(String(l.compte_numero ?? "").trim()))
+      .filter((l: any) => String(l.journal_code ?? "").trim().toUpperCase() === "OD")
       .map((l: any) => l.id);
     if (odSupprimables.length) {
+      // Contrôle de partie double AVANT d'écrire : si le groupe à supprimer ne
+      // se solde pas, le supprimer créerait précisément l'écart qu'on corrige.
+      const aSupp = ((concernees ?? []) as any[]).filter((l: any) => odSupprimables.includes(l.id));
+      const ecart = round2(
+        aSupp.reduce((s: number, l: any) => s + nb(l.debit) - nb(l.credit), 0),
+      );
+      if (Math.abs(ecart) > 0.005) {
+        return {
+          ok: false as const, codes,
+          reason: `Bascule TVA déséquilibrée (écart ${ecart.toFixed(2)} MAD) : délettrage refusé pour ne pas creuser l'écart. Lancez scripts/reparer-od-tva-orphelines.ts.`,
+        };
+      }
       const { error: eDel } = await (sb as any).from("ecritures_comptables")
         .delete().in("id", odSupprimables).eq("dossier_id", data.dossierId);
       if (eDel) return { ok: false as const, reason: `Annulation de la bascule TVA impossible : ${eDel.message}`, codes };
@@ -415,6 +522,122 @@ export async function executerLettrageAuto(
       }
     }
     return { ok: true, codes: codesPoses, lettres: codesPoses.length, reason: null };
+}
+
+// ─── Comptabilisation d'un règlement : lettrage + TVA, en une passe ──────────
+//
+// Point d'entrée UNIQUE appelé juste après l'enregistrement d'un paiement
+// (bouton « Payer en espèces », encaissement, lettrage d'une ligne de relevé).
+// Il fait, dans cet ordre, les deux choses qu'un règlement doit déclencher :
+//
+//   1. LETTRAGE — apparier la ligne de facture (débit client en VTE / crédit
+//      fournisseur en ACH) avec la ligne de règlement de sens opposé (CAI ou BQ)
+//      et poser le MÊME code sur les deux. Sans cela, la facture réglée reste un
+//      poste ouvert : elle continue d'alimenter la balance âgée et les relances.
+//
+//   2. TVA — rendre la TVA exigible (4458 → 4455 en vente, 3458 → 3455 en achat)
+//      IMMÉDIATEMENT, que le lettrage ait pu se faire ou non. Un règlement
+//      partiel n'est pas lettrable (un lettrage doit être équilibré) mais il est
+//      bel et bien encaissé : sa quote-part de TVA est due le jour même.
+//
+// Ne jette JAMAIS : un règlement enregistré ne doit pas être annulé parce que
+// son lettrage a échoué. L'échec est rendu dans `raison`, à afficher.
+export interface ResultatReglementCompta {
+  lettre: boolean;
+  code: string | null;
+  tvaBasculee: number;
+  odInserees: number;
+  raison: string | null;
+}
+
+export async function comptabiliserReglement(
+  sb: any,
+  p: {
+    dossierId: string;
+    /** Compte de tiers mouvementé — le lettrage ne raisonne que compte par compte. */
+    compte: string;
+    /** Références de la pièce. Client : n° de facture ; fournisseur : id. On passe
+     *  les deux, les écritures historiques n'emploient pas toujours la même. */
+    references: (string | null | undefined)[];
+    /** Montant qui vient d'être réglé — base du prorata de TVA. */
+    montantRegle: number;
+    date: string;
+  },
+): Promise<ResultatReglementCompta> {
+  const vide: ResultatReglementCompta = {
+    lettre: false, code: null, tvaBasculee: 0, odInserees: 0, raison: null,
+  };
+  const sens = sensDuCompte(p.compte);
+  const refs = [...new Set(p.references.map((r) => String(r ?? "").trim()).filter(Boolean))];
+  if (!sens || !refs.length) {
+    return { ...vide, raison: `Compte ${p.compte} hors comptes de tiers : ni lettrage ni bascule de TVA.` };
+  }
+
+  try {
+    // ── 1. Lettrage ────────────────────────────────────────────────────────────
+    // Les lignes candidates : celles de CETTE pièce, sur CE compte de tiers, non
+    // encore lettrées. Le filtre sur le compte est indispensable — deux factures
+    // de tiers différents peuvent porter la même référence.
+    const { data: brutes, error } = await (sb as any).from("ecritures_comptables")
+      .select(COLS_LETTRAGE)
+      .eq("dossier_id", p.dossierId)
+      .eq("compte_numero", p.compte)
+      .in("reference_piece", refs)
+      .is("lettrage_code", null);
+    if (error) return { ...vide, raison: error.message };
+
+    const candidates = (brutes ?? []) as LigneLettrable[];
+    let resultat = { ...vide };
+
+    // On ne lettre que si l'ensemble se solde : c'est le cas du règlement TOTAL
+    // (ou du dernier versement d'un échelonnement, les acomptes précédents étant
+    // eux aussi des lignes ouvertes de cette pièce).
+    if (candidates.length >= 2 && controlerEquilibre(candidates).ok) {
+      const r = await executerLettrage(sb, {
+        dossierId: p.dossierId, ligneIds: candidates.map((l) => l.id), origine: "auto",
+        // La date saisie dans le modal date aussi l'OD de TVA — c'est le jour de
+        // l'encaissement qui rend la TVA exigible, pas celui de la saisie.
+        dateReglement: p.date,
+      });
+      if (r.ok) {
+        resultat = {
+          lettre: true, code: r.code, tvaBasculee: r.tvaBasculee ?? 0,
+          odInserees: r.odInserees ?? 0, raison: r.avertissement ?? null,
+        };
+      } else {
+        resultat = { ...vide, raison: r.reason ?? null };
+      }
+    } else if (candidates.length >= 2) {
+      const eq = controlerEquilibre(candidates);
+      resultat = { ...vide, raison: `Règlement partiel : lettrage différé (${eq.raison ?? "sélection déséquilibrée"}).` };
+    } else {
+      resultat = { ...vide, raison: "Aucune ligne ouverte à apparier sur cette pièce." };
+    }
+
+    // ── 2. TVA ─────────────────────────────────────────────────────────────────
+    // Si le lettrage a eu lieu, `executerLettrage` a DÉJÀ basculé — on ne repasse
+    // pas dessus (le compte d'attente serait débité deux fois). Sinon on bascule
+    // au prorata du montant réglé : c'est le cas de l'acompte.
+    if (!resultat.lettre) {
+      for (const ref of refs) {
+        const b = await basculerTvaSurReglement(sb, {
+          dossierId: p.dossierId, reference: ref, sens,
+          montantRegle: p.montantRegle, date: p.date, lettrageCode: null, origine: "auto",
+        });
+        if (b.error) { resultat.raison = `Bascule de TVA impossible : ${b.error}`; break; }
+        resultat.tvaBasculee += b.tva;
+        resultat.odInserees += b.od;
+        // Les références sont deux ALIAS de la même pièce : dès que l'une porte
+        // des écritures, inutile d'essayer l'autre — on doublerait la bascule.
+        if (b.od > 0) break;
+      }
+    }
+    return resultat;
+  } catch (e: any) {
+    // Migration `lettrage_code` non appliquée → le règlement reste valide, seul
+    // le lettrage manque. On le dit plutôt que de faire échouer le paiement.
+    return { ...vide, raison: String(e?.message ?? e) };
+  }
 }
 
 /** Porte d'entrée HTTP du lettrage automatique. */

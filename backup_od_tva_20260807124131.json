@@ -1,0 +1,20 @@
+{
+  "mode": "restauration",
+  "reference": "FIX-OD-TVA-20260807124131",
+  "date": "2026-08-07T12:41:31.462Z",
+  "lignes": [
+    {
+      "id": "87999cc0-079a-460c-b09b-d218c787e8f4",
+      "dossier_id": "8c37a591-1dfa-44ee-bd31-9f15f40c0a9d",
+      "journal_code": "OD",
+      "compte_numero": "4458",
+      "date_ecriture": "2026-05-06",
+      "libelle": "Reclassement TVA régime encaissements FAC-2024-307 (contrepartie restaurée)",
+      "debit": 0,
+      "credit": 1880,
+      "reference_piece": "FAC-2024-307",
+      "lettrage_code": null,
+      "valide": true
+    }
+  ]
+}

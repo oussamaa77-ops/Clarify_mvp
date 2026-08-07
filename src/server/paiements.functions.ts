@@ -46,8 +46,9 @@ function getSupabase(): SupabaseClient {
 }
 
 // Journaux de TRÉSORERIE. Une écriture de règlement y vit ; la vente est en VTE, l'achat en ACH.
-// C'est le SEUL discriminant sûr : les numéros de compte réels divergent du code
-// (caisse en 5161 en base, 5143 dans handleEncaissement), donc on ne filtre jamais dessus.
+// C'est le SEUL discriminant sûr : le compte de caisse est paramétrable par dossier
+// (cf. src/lib/comptes-tresorerie.ts) et les écritures antérieures à l'alignement
+// du 2026-08-07 portent encore 5143 — on ne filtre donc jamais sur le compte.
 const JOURNAUX_REGLEMENT = ["BQ", "CAI"];
 
 export interface AnnulationPaiement {
@@ -111,6 +112,53 @@ export const annulerPaiementFacture = createServerFn({ method: "POST" })
       console.warn("[ANNULATION] délettrage ignoré :", (e as any)?.message ?? e);
     }
 
+    // ── 0 bis. Bascules de TVA SANS code de lettrage ──────────────────────────
+    // Un règlement PARTIEL rend sa quote-part de TVA exigible sans être lettrable
+    // (un lettrage doit être équilibré) : l'OD de bascule ne porte donc aucun
+    // code, et l'étape précédente ne la voit pas. Sans ce nettoyage, annuler un
+    // acompte laisserait sa TVA définitivement due sur une facture redevenue
+    // impayée. Le triplet (journal OD + compte de TVA + référence de la pièce)
+    // ne peut désigner qu'une de nos bascules.
+    let odTvaSupprimees = 0;
+    try {
+      const ref = String(f.numero ?? f.id);
+      const { data: odSansCode } = await (sb as any).from("ecritures_comptables")
+        .select("id,compte_numero,journal_code,debit,credit,date_ecriture,reference_piece,lettrage_code")
+        .eq("dossier_id", f.dossier_id)
+        .eq("journal_code", "OD")
+        .in("reference_piece", [ref, f.id])
+        .is("lettrage_code", null);
+      // `grouperOdBascule` raisonne par ÉCRITURE : dès qu'une ligne du groupe est
+      // sur un compte de TVA (y compris un SOUS-COMPTE comme 44551, que l'ancien
+      // filtre par égalité stricte ne reconnaissait pas), tout le groupe part.
+      // Supprimer une seule des deux lignes déséquilibrait le grand livre.
+      //
+      // `seulementBascules` est OBLIGATOIRE ici : ces OD n'ont pas de code, et le
+      // RECLASSEMENT de TVA (D 44551 / C 4458) a exactement la même signature
+      // qu'une bascule à la direction près. Sans ce filtre, annuler un paiement
+      // effaçait le reclassement de la facture — une écriture étrangère au
+      // règlement. Seul le SENS distingue les deux.
+      const { grouperOdBascule } = await import("@/services/lettrage");
+      const lignes = (odSansCode ?? []) as any[];
+      const ids = grouperOdBascule(lignes, undefined, { seulementBascules: true });
+      if (ids.length) {
+        // Partie double : on refuse de supprimer un groupe qui ne se solde pas,
+        // sous peine de créer l'écart qu'on cherche justement à éviter.
+        const aSupp = lignes.filter((l) => ids.includes(l.id));
+        const ecart = Math.round(
+          aSupp.reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0) * 100,
+        ) / 100;
+        if (Math.abs(ecart) > 0.005) {
+          throw new Error(`groupe déséquilibré (écart ${ecart.toFixed(2)} MAD) — non supprimé`);
+        }
+        const { error } = await (sb as any).from("ecritures_comptables").delete().in("id", ids);
+        if (error) throw error;
+        odTvaSupprimees = ids.length;
+      }
+    } catch (e) {
+      console.warn("[ANNULATION] bascules TVA sans code ignorées :", (e as any)?.message ?? e);
+    }
+
     let txDeliees = 0, encaissementsSupprimes = 0, ecrituresSupprimees = 0;
     const supprimerEcritures = async (ids: string[], quoi: string) => {
       if (!ids.length) return;
@@ -158,9 +206,10 @@ export const annulerPaiementFacture = createServerFn({ method: "POST" })
     // porte la référence de la facture (« Paiement 24-0892 »), seul moyen de séparer
     // deux encaissements de même date et même montant.
     //
-    // Aucun filtre sur compte_numero : le plan comptable réel diverge du code (caisse
-    // en 5161, pas 5143), et un mauvais filtre ne supprimerait qu'une moitié de
-    // l'écriture — laissant une contrepartie orpheline, donc un journal déséquilibré.
+    // Aucun filtre sur compte_numero : le compte de caisse est paramétrable par
+    // dossier et a changé (5143 → 51610000 le 2026-08-07), donc un filtre ne
+    // supprimerait qu'une moitié de l'écriture — laissant une contrepartie
+    // orpheline, donc un journal déséquilibré.
     //
     // Ce repli est désactivé dès qu'une estampille a été trouvée, pour qu'un second
     // encaissement de la même facture n'aille pas piocher au hasard.
@@ -202,5 +251,11 @@ export const annulerPaiementFacture = createServerFn({ method: "POST" })
       if (eMaj) throw new Error(`Mise à jour de la facture impossible : ${eMaj.message}`);
     }
 
-    return { ok: true, dejaImpayee: false, txDeliees, encaissementsSupprimes, ecrituresSupprimees, lettragesAnnules };
+    return {
+      ok: true, dejaImpayee: false, txDeliees, encaissementsSupprimes,
+      // Les OD de TVA sans code comptent parmi les écritures défaites : les
+      // masquer donnerait un compte-rendu incomplet de ce qui a été supprimé.
+      ecrituresSupprimees: ecrituresSupprimees + odTvaSupprimees,
+      lettragesAnnules,
+    };
   });

@@ -19,15 +19,18 @@ import {
 import {
   Plus, Upload, Loader2, CheckCircle, Building2, Inbox, AlertCircle,
   TrendingDown, Wallet, Sparkles, FileText, X, Trash2, BarChart2, Pencil, Undo2,
-  Download, Wand2, Eye,
+  Download, Wand2, Eye, Banknote,
 } from "lucide-react";
 import { toast } from "sonner";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
-import { COMPTES_TVA } from "@/services/lettrage";
+import { COMPTES_TVA, referencesPiece } from "@/services/lettrage";
 import { useServerFn } from "@tanstack/react-start";
 import { ocrFacture, matcherDocumentAvecTransactions } from "@/server/factures.functions";
 import { memoriserTiers } from "@/server/tiers-memoire.functions";
 import { annulerPaiementFacture } from "@/server/paiements.functions";
+import { PaiementEspecesDialog } from "@/components/PaiementEspecesDialog";
+import { DateReglementCell } from "@/components/DateReglementCell";
+import { indexerDatesReglement, type DateReglement } from "@/lib/date-reglement";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -238,6 +241,10 @@ function FournisseursPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [annulConfirm, setAnnulConfirm] = useState<FactureF | null>(null);
+  // Facture dont on saisit le règlement au comptant (montant exact + date).
+  const [payModal, setPayModal] = useState<FactureF | null>(null);
+  // Date de règlement constatée, déduite des pièces (cf. src/lib/date-reglement.ts).
+  const [datesReglement, setDatesReglement] = useState<Map<string, DateReglement>>(new Map());
   const [annulLoading, setAnnulLoading] = useState(false);
 
   // Supplier stats panel
@@ -266,7 +273,7 @@ function FournisseursPage() {
     // Les deux dernières requêtes portent les PIÈCES de règlement (ligne de relevé
     // lettrée, décaissement saisi) : c'est d'elles que se déduit le mode de paiement
     // réellement constaté — cf. src/lib/mode-paiement.ts.
-    const [{ data: ff }, { data: fs }, { data: dos }, { data: jj }, { data: tx }, { data: enc }] =
+    const [{ data: ff }, { data: fs }, { data: dos }, { data: jj }, { data: tx }, { data: enc }, { data: pai }] =
       await Promise.all([
       (supabase.from("factures_fournisseurs") as any)
         .select("*")
@@ -283,10 +290,16 @@ function FournisseursPage() {
         .eq("flux_type", "achat")
         .order("created_at", { ascending: false }),
       (supabase.from("transactions_bancaires") as any)
-        .select("facture_id,document_type,libelle,reference")
+        // date_operation : la banque DATE l'opération — date de règlement la plus
+        // fiable qui existe pour une facture rapprochée d'un relevé.
+        .select("facture_id,document_type,libelle,reference,date_operation")
         .eq("dossier_id", dossierId).not("facture_id", "is", null),
       (supabase.from("encaissements") as any)
-        .select("facture_fournisseur_id,type")
+        .select("facture_fournisseur_id,type,date_encaissement")
+        .eq("dossier_id", dossierId).not("facture_fournisseur_id", "is", null),
+      // Règlements datés (source de vérité) — portent la date saisie au modal.
+      (supabase.from("paiements") as any)
+        .select("facture_fournisseur_id,date_paiement,montant")
         .eq("dossier_id", dossierId).not("facture_fournisseur_id", "is", null),
     ]);
     setFactures((ff ?? []) as FactureF[]);
@@ -294,6 +307,11 @@ function FournisseursPage() {
     setDossier(dos);
     setJustificatifsAchat(jj ?? []);
     setModes(indexerModesPaiement("fournisseur", { transactions: tx ?? [], encaissements: enc ?? [] }));
+    // `paiements` peut manquer tant que la migration n'est pas appliquée : le
+    // `?? []` suffit, `dateReglementFacture` retombe sur factures.date_paiement.
+    setDatesReglement(indexerDatesReglement("fournisseur", {
+      paiements: pai ?? [], transactions: tx ?? [], encaissements: enc ?? [],
+    }));
     setLoading(false);
   };
 
@@ -812,12 +830,16 @@ function FournisseursPage() {
     if (f && estPayee(f)) { toast.error("Annulez d'abord le paiement de cette facture"); return; }
     setDeleteLoading(true);
     try {
-      // 1. Écritures rattachées par reference_piece (achat ACH + règlements estampillés).
+      // 1. Écritures rattachées par reference_piece (achat ACH + règlements
+      //    estampillés) ET l'OD de reclassement de TVA, qui porte depuis le
+      //    2026-08-07 sa propre référence « RECLASS-TVA-<id> ». Sans
+      //    `referencesPiece`, elle survivrait à la facture en pointant sur une
+      //    pièce disparue.
       await supabase
         .from("ecritures_comptables")
         .delete()
         .eq("dossier_id", dossierId)
-        .eq("reference_piece", deleteId);
+        .in("reference_piece", referencesPiece(deleteId));
 
       // 2. Écritures ACH HISTORIQUES : créées avant que reference_piece ne soit posé,
       //    elles resteraient orphelines après la suppression de la facture. On les
@@ -1112,8 +1134,10 @@ function FournisseursPage() {
                     <TableHead>Échéance</TableHead>
                     <TableHead className="text-right">HT</TableHead>
                     <TableHead className="text-right">TTC</TableHead>
+                    <TableHead className="text-right">Payé</TableHead>
                     <TableHead className="text-right">Restant</TableHead>
                     <TableHead>Statut</TableHead>
+                    <TableHead>Date de règlement</TableHead>
                     <TableHead>Mode de paiement</TableHead>
                     <TableHead className="w-10"></TableHead>
                   </TableRow>
@@ -1121,13 +1145,13 @@ function FournisseursPage() {
                 <TableBody>
                   {loading ? (
                     <TableRow>
-                      <TableCell colSpan={10} className="text-center py-8">
+                      <TableCell colSpan={12} className="text-center py-8">
                         <Loader2 className="h-5 w-5 animate-spin mx-auto" />
                       </TableCell>
                     </TableRow>
                   ) : facturesFiltrees.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={10} className="text-center py-12 text-muted-foreground">
+                      <TableCell colSpan={12} className="text-center py-12 text-muted-foreground">
                         <Inbox className="h-8 w-8 mx-auto mb-2 opacity-30" />
                         {factures.length === 0
                           ? "Aucune facture — scannez un PDF ou faites une saisie manuelle"
@@ -1153,6 +1177,9 @@ function FournisseursPage() {
                           <TableCell className="font-mono text-sm text-right font-medium">
                             {fmt(Number(f.montant_ttc))}
                           </TableCell>
+                          <TableCell className="font-mono text-sm text-right text-green-600">
+                            {fmt(Number(f.montant_paye ?? 0))}
+                          </TableCell>
                           <TableCell className="font-mono text-sm text-right text-red-600">
                             {f.statut_paiement !== "payee"
                               ? fmt(Number(f.montant_restant ?? f.montant_ttc))
@@ -1163,9 +1190,28 @@ function FournisseursPage() {
                               {s.label}
                             </span>
                           </TableCell>
+                          <TableCell><DateReglementCell facture={f} index={datesReglement} /></TableCell>
                           <TableCell><ModePaiementCell mode={modePaiementFacture(f, modes)} /></TableCell>
                           <TableCell>
                             <div className="flex gap-1">
+                              {/* Règlement au comptant du guichet. Le montant exact et
+                                  la date se saisissent dans la boîte de dialogue : un
+                                  décaissement espèces est souvent PARTIEL, et jamais
+                                  daté du jour où on l'enregistre. */}
+                              {f.statut_paiement === "payee" ? (
+                                <Button size="icon" variant="ghost" disabled
+                                  className="h-7 w-7 text-green-600 disabled:opacity-100"
+                                  title="Facture réglée">
+                                  <CheckCircle className="h-3.5 w-3.5" />
+                                </Button>
+                              ) : (
+                                <Button size="icon" variant="ghost"
+                                  className="h-7 w-7 text-emerald-600 hover:bg-emerald-500/10"
+                                  onClick={() => setPayModal(f)}
+                                  title="Payer en espèces (montant et date)">
+                                  <Banknote className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                               {/* Deux lectures distinctes, comme côté clients :
                                   • le DÉTAIL de la facture telle qu'enregistrée — toujours
                                     disponible, y compris sur une saisie manuelle ;
@@ -1990,8 +2036,10 @@ function FournisseursPage() {
                                 <TableHead>Date</TableHead>
                                 <TableHead>Échéance</TableHead>
                                 <TableHead className="text-right">TTC</TableHead>
+                                <TableHead className="text-right">Payé</TableHead>
                                 <TableHead className="text-right">Restant</TableHead>
                                 <TableHead>Statut</TableHead>
+                                <TableHead>Date de règlement</TableHead>
                                 <TableHead>Mode de paiement</TableHead>
                                 <TableHead className="w-10"></TableHead>
                               </TableRow>
@@ -2000,7 +2048,7 @@ function FournisseursPage() {
                               {facturesFourn.length === 0 ? (
                                 <TableRow>
                                   <TableCell
-                                    colSpan={8}
+                                    colSpan={10}
                                     className="text-center py-10 text-muted-foreground"
                                   >
                                     <FileText className="h-6 w-6 mx-auto mb-1 opacity-30" />
@@ -2028,6 +2076,9 @@ function FournisseursPage() {
                                       <TableCell className="text-right font-mono text-xs font-semibold">
                                         {fmt(Number(f.montant_ttc))}
                                       </TableCell>
+                                      <TableCell className="text-right font-mono text-xs text-green-600">
+                                        {fmt(Number(f.montant_paye ?? 0))}
+                                      </TableCell>
                                       <TableCell
                                         className={`text-right font-mono text-xs ${
                                           Number(f.montant_restant ?? 0) > 0
@@ -2042,10 +2093,25 @@ function FournisseursPage() {
                                           {s.label}
                                         </span>
                                       </TableCell>
+                                      <TableCell><DateReglementCell facture={f} index={datesReglement} className="text-xs" /></TableCell>
                                       <TableCell><ModePaiementCell mode={modePaiementFacture(f, modes)} /></TableCell>
                                       <TableCell>
                                         <div className="flex gap-1">
-                                          {/* Même visualisation que la liste générale. */}
+                                          {/* Mêmes actions que la liste générale. */}
+                                          {f.statut_paiement === "payee" ? (
+                                            <Button size="icon" variant="ghost" disabled
+                                              className="h-7 w-7 text-green-600 disabled:opacity-100"
+                                              title="Facture réglée">
+                                              <CheckCircle className="h-3.5 w-3.5" />
+                                            </Button>
+                                          ) : (
+                                            <Button size="icon" variant="ghost"
+                                              className="h-7 w-7 text-emerald-600 hover:bg-emerald-500/10"
+                                              onClick={() => setPayModal(f)}
+                                              title="Payer en espèces (montant et date)">
+                                              <Banknote className="h-3.5 w-3.5" />
+                                            </Button>
+                                          )}
                                           <Button
                                             size="icon"
                                             variant="ghost"
@@ -2126,6 +2192,14 @@ function FournisseursPage() {
           <TiersReporting dossierId={dossierId} kind="fournisseurs" />
         </TabsContent>
       </Tabs>
+
+      {/* ── Règlement au comptant : montant exact + date, puis rechargement —
+             « Payé » et « Restant » sont recalculés côté serveur. La fiche
+             fournisseur ouverte est rechargée elle aussi, sinon son tableau
+             garderait les anciens montants. ── */}
+      <PaiementEspecesDialog facture={payModal} type="fournisseur"
+        onClose={() => setPayModal(null)}
+        onDone={() => { load(); if (selectedFourn) loadFacturesFourn(selectedFourn.id); }} />
 
       {/* ── Annulation de paiement ── */}
       <Dialog open={!!annulConfirm} onOpenChange={(o) => { if (!o) setAnnulConfirm(null); }}>

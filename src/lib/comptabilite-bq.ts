@@ -9,6 +9,10 @@
 // Source de vérité UNIQUE — ne pas dupliquer ces règles dans les composants.
 // ============================================================================
 
+import {
+  COMPTE_CAISSE_DEFAUT, compteCaisse, type ComptesTresorerieDossier,
+} from "@/lib/comptes-tresorerie";
+
 // PCM_MAP selon CGI Art.106 — TVA déductible ou non au Maroc
 export const PCM_MAP: Record<string, { code: string; tva: number }> = {
   encaissement_client:  { code: "3421",  tva: 0 },   // Encaissement → pas de TVA
@@ -24,7 +28,11 @@ export const PCM_MAP: Record<string, { code: string; tva: number }> = {
   entretien:            { code: "6141",  tva: 20 },  // Réparations → TVA 20% déductible
   frais_bancaires:      { code: "6347",  tva: 10 },  // Commissions bancaires → TVA 10% déductible
   taxe_professionnelle: { code: "6313",  tva: 0 },   // Taxes → pas de TVA
-  retrait_especes:      { code: "5143",  tva: 0 },   // Retrait → caisse 5143 (PCM), pas de TVA
+  // Retrait → CAISSE, rubrique 516 du PCM. C'était 5143, qui est la Trésorerie
+  // Générale : les espèces sorties du GAB n'alimentaient donc pas le compte que
+  // mouvementent les règlements en espèces, et le solde de caisse était faux des
+  // deux côtés. Cf. src/lib/comptes-tresorerie.ts.
+  retrait_especes:      { code: COMPTE_CAISSE_DEFAUT, tva: 0 },
   virement_interne:     { code: "5115",  tva: 0 },   // Mouvement de fonds entre comptes → compte de liaison, pas de TVA
   interets_crediteurs:  { code: "7611",  tva: 0 },   // Intérêts → hors champ TVA
   frais_representation: { code: "6147",  tva: 0 },   // Restaurant/réception → NON déductible (CGI Art.106)
@@ -50,7 +58,7 @@ export function deriveCategorie(libelle: string, type: "credit" | "debit"): { ca
   if (/GASOIL|CARBURANT|STATION/.test(u))                 return { categorie: "gasoil",              code: "61241", tva: 0 };
   if (/ASSURANCE/.test(u))                                return { categorie: "assurance",            code: "6161",  tva: 0 };
   if (/COMMISSION|FRAIS|AGIOS|TENUE|TIMBRE/.test(u))     return { categorie: "frais_bancaires",      code: "6347",  tva: 10 };
-  if (/RETRAIT|GAB/.test(u))                              return { categorie: "retrait_especes",      code: "5143",  tva: 0 };
+  if (/RETRAIT|GAB/.test(u))                              return { categorie: "retrait_especes",      code: COMPTE_CAISSE_DEFAUT, tva: 0 };
   if (/DOUANE|IMPORT/.test(u))                            return { categorie: "frais_douane",         code: "6146",  tva: 0 };
   if (/TRANSPORT|DEPLACEMENT/.test(u))                    return { categorie: "transport",            code: "6142",  tva: 14 };
   return { categorie: "paiement_fournisseur", code: "4411", tva: 20 };
@@ -61,7 +69,8 @@ export function deriveCategorie(libelle: string, type: "credit" | "debit"): { ca
 // 2. Facture fournisseur liée → Débit 4411 TTC / Crédit 5141 TTC (la TVA est gérée au journal d'achats)
 // 3. Justificatif lié → Débit compte charge HT + Débit 34552 TVA si eligible_edi=true et taux > 0, sinon TTC intégral
 // 4. Virement interne (VIR AG EMIS / VERS) → 5115 Virements de fonds, pas de TVA
-// 5. Retrait espèces → 5143 Caisse (5161 n'existe pas au PCM)
+// 5. Retrait espèces → CAISSE, rubrique 516 (51610000 par défaut, ou le
+//    sous-compte de caisse du dossier). PAS 5143, qui est la Trésorerie Générale.
 // 6. CNSS → 4441 (dette sociale) ; TVA/IS/DGI → 4456 — on solde la dette, pas de charge directe
 // 7. Facture client liée (crédit) → Débit 5141 / Crédit 3421
 export type LigneBQ = { compte: string; libelle: string; debit: number; credit: number; categorie: string };
@@ -78,6 +87,13 @@ export function genererLignesBQ(p: {
   compteComptable?: string | null;
   factureLiee?: boolean;
   justificatif?: { compte_pcm?: string | null; taux_tva?: number | null; eligible_edi?: boolean | null } | null;
+  /**
+   * Dossier, pour ses sous-comptes de trésorerie (`compte_caisse`). Omis → 51610000.
+   * À passer partout où le dossier est déjà chargé : deux écrans qui écriraient
+   * les retraits sur deux comptes de caisse différents rendraient le solde
+   * intraçable, ce qui est précisément le défaut qu'on corrige.
+   */
+  dossier?: ComptesTresorerieDossier | null;
 }): LigneBQ[] {
   // Sens de l'opération : un montant négatif (signe du relevé) est TOUJOURS une
   // sortie d'argent → 5141 au crédit, contrepartie au débit — même si le champ
@@ -117,7 +133,8 @@ export function genererLignesBQ(p: {
     cp("4456", m);
   } else if (cat === "retrait_especes" || /RETRAIT|\bGAB\b/.test(u)) {
     catEff = "retrait_especes";
-    cp("5143", m);
+    // Contrepartie d'un retrait : la CAISSE est débitée de ce que la banque perd.
+    cp(compteCaisse(p.dossier), m);
   } else if (cat === "virement_interne" || RX_VIREMENT_INTERNE.test(u)) {
     catEff = "virement_interne";
     cp("5115", m);

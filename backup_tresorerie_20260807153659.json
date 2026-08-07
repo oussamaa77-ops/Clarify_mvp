@@ -1,0 +1,34 @@
+{
+  "date": "2026-08-07T15:36:59.258Z",
+  "cible": "lettrage:AB",
+  "lignes": [
+    {
+      "id": "bc308153-6c11-4044-932e-c7369b4b991d",
+      "dossier_id": "8c37a591-1dfa-44ee-bd31-9f15f40c0a9d",
+      "journal_code": "BQ",
+      "compte_numero": "34210005",
+      "date_ecriture": "2026-02-01",
+      "libelle": "VIR SEPA RECU / FRM SUPER-PAIN MAROC / REF  FAC-2024-306",
+      "debit": 0,
+      "credit": 10800,
+      "reference_piece": "VIR SEPA RECU / FRM SUPER-PAIN MAROC / REF  FAC-20",
+      "lettrage_code": "AB",
+      "transaction_id": null,
+      "facture_id": null
+    },
+    {
+      "id": "538fcc71-cfcf-42b1-925f-d0e151e65470",
+      "dossier_id": "8c37a591-1dfa-44ee-bd31-9f15f40c0a9d",
+      "journal_code": "BQ",
+      "compte_numero": "5141",
+      "date_ecriture": "2026-02-01",
+      "libelle": "VIR SEPA RECU / FRM SUPER-PAIN MAROC / REF  FAC-2024-306",
+      "debit": 10800,
+      "credit": 0,
+      "reference_piece": "VIR SEPA RECU / FRM SUPER-PAIN MAROC / REF  FAC-20",
+      "lettrage_code": null,
+      "transaction_id": null,
+      "facture_id": null
+    }
+  ]
+}

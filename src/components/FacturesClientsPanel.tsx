@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
-import { generateFactureXml, marquerPayee, ocrFacture, ajouterEmailClient, matcherDocumentAvecTransactions } from "@/server/factures.functions";
+import { generateFactureXml, ocrFacture, ajouterEmailClient, matcherDocumentAvecTransactions } from "@/server/factures.functions";
+import { PaiementEspecesDialog } from "@/components/PaiementEspecesDialog";
+import { DateReglementCell } from "@/components/DateReglementCell";
+import { PREFIXE_RECLASS_TVA, referencesPiece } from "@/services/lettrage";
 import { annulerPaiementFacture } from "@/server/paiements.functions";
 import { memoriserTiers } from "@/server/tiers-memoire.functions";
 import { Button } from "@/components/ui/button";
@@ -26,6 +29,10 @@ import {
   indexerModesPaiement, modePaiementFacture,
   MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
 } from "@/lib/mode-paiement";
+import {
+  dateReglementFacture, formaterDateReglement, indexerDatesReglement,
+  infobulleDateReglement, type DateReglement,
+} from "@/lib/date-reglement";
 import { toast } from "sonner";
 
 interface Ligne { designation: string; quantite: number; prix_unitaire: number; taux_tva: number }
@@ -149,7 +156,6 @@ function EcheanceCell({ f }: { f: Facture }) {
  */
 export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
   const genXml   = useServerFn(generateFactureXml);
-  const payFn    = useServerFn(marquerPayee);
   const ocrFn    = useServerFn(ocrFacture);
   const addEmailFn = useServerFn(ajouterEmailClient);
   const matchFn  = useServerFn(matcherDocumentAvecTransactions);
@@ -163,6 +169,8 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     texte:"", statut:"toutes", tiersId:"", debut:"", fin:"", champDate:"date_facture",
   });
   const [modes, setModes]       = useState<Map<string, ModePaiement>>(new Map());
+  // Date de règlement constatée, déduite des pièces (cf. src/lib/date-reglement.ts).
+  const [datesReglement, setDatesReglement] = useState<Map<string, DateReglement>>(new Map());
   const [loading, setLoading]   = useState(true);
   const [openCreate, setOpenCreate] = useState(false);
   // Détail de la facture telle qu'enregistrée (en-tête, montants, lignes) : c'est
@@ -173,6 +181,8 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
   const [processing, setProcessing] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [annulConfirm, setAnnulConfirm] = useState<Facture | null>(null);
+  // Facture dont on saisit le règlement au comptant (montant exact + date).
+  const [payModal, setPayModal] = useState<Facture | null>(null);
 
   const [emailModal, setEmailModal] = useState<{clientId:string;factureId:string}|null>(null);
   const [emailInput, setEmailInput] = useState("");
@@ -210,15 +220,20 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     // Les deux dernières requêtes portent les PIÈCES de règlement (ligne de relevé
     // lettrée, encaissement saisi) : c'est d'elles que se déduit le mode de
     // paiement réellement constaté — cf. src/lib/mode-paiement.ts.
-    const [{data:f},{data:c},{data:tx},{data:enc},{data:dos}] = await Promise.all([
+    const [{data:f},{data:c},{data:tx},{data:enc},{data:pai},{data:dos}] = await Promise.all([
       supabase.from("factures").select("*").eq("dossier_id",dossierId).order("date_facture",{ascending:false}),
       supabase.from("clients").select("id,nom,ice,email,compte_produit_defaut")
         .eq("dossier_id",dossierId).is("deleted_at",null).order("nom"),
       (supabase.from("transactions_bancaires") as any)
-        .select("facture_id,document_type,libelle,reference")
+        // date_operation : la banque DATE l'opération, c'est la date de règlement
+        // la plus fiable qui existe pour une facture rapprochée d'un relevé.
+        .select("facture_id,document_type,libelle,reference,date_operation")
         .eq("dossier_id",dossierId).not("facture_id","is",null),
       (supabase.from("encaissements") as any)
-        .select("facture_id,type").eq("dossier_id",dossierId).not("facture_id","is",null),
+        .select("facture_id,type,date_encaissement").eq("dossier_id",dossierId).not("facture_id","is",null),
+      // Règlements datés (source de vérité) — portent la date saisie au modal.
+      (supabase.from("paiements") as any)
+        .select("facture_id,date_paiement,montant").eq("dossier_id",dossierId).not("facture_id","is",null),
       // Secteur d'activité du dossier — alimente le fallback sectoriel du moteur.
       supabase.from("dossiers").select("secteur_activite").eq("id",dossierId).single(),
     ]);
@@ -226,6 +241,11 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     setClients(c??[]);
     setSecteurActivite(dos?.secteur_activite ?? null);
     setModes(indexerModesPaiement("client",{ transactions: tx ?? [], encaissements: enc ?? [] }));
+    // `paiements` peut manquer tant que la migration n'est pas appliquée : le
+    // `?? []` suffit, `dateReglementFacture` retombe alors sur factures.date_paiement.
+    setDatesReglement(indexerDatesReglement("client",{
+      paiements: pai ?? [], transactions: tx ?? [], encaissements: enc ?? [],
+    }));
     setLoading(false);
   };
   useEffect(()=>{load();},[dossierId]);
@@ -511,6 +531,13 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
       // Supprimer dans l'ordre des dépendances (clés étrangères)
       await supabase.from("ged_documents" as any).delete().eq("facture_id", factureId);
       await supabase.from("ecritures_comptables").delete().eq("facture_id", factureId);
+      // L'OD de reclassement de TVA ne porte PAS de facture_id : elle n'était
+      // donc pas emportée et survivait à la facture. Elle se retrouve par sa
+      // référence propre « RECLASS-TVA-<numéro|id> » (cf. src/services/lettrage.ts).
+      await supabase.from("ecritures_comptables").delete()
+        .eq("dossier_id", dossierId)
+        .in("reference_piece", referencesPiece(f?.numero, factureId)
+          .filter(r => r.startsWith(PREFIXE_RECLASS_TVA)));
       // Filet de sécurité : une transaction de relevé est un fait bancaire. Si une
       // subsistait liée à cette facture, on la DÉLIE — on ne la supprime jamais.
       await supabase.from("transactions_bancaires" as any)
@@ -580,17 +607,6 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     }catch(e:any){toast.error(e.message);}
   };
 
-  // Règlement comptant au guichet : le mode voyage jusqu'au serveur, qui passe
-  // l'écriture en caisse (CAI/5143) et estampille la facture.
-  const handlePay = async (fid: string) => {
-    setProcessing(fid);
-    try{
-      await payFn({data:{facture_id:fid,date_paiement:new Date().toISOString().slice(0,10),mode:"especes"}});
-      toast.success("Facture payée en espèces + écriture de caisse créée");
-      load();
-    }catch(e:any){toast.error(e.message);}
-    finally{setProcessing(null);}
-  };
 
   // Tableau filtré. Les KPIs ci-dessous restent calculés sur TOUTES les factures :
   // ils décrivent le dossier, pas la sélection à l'écran.
@@ -886,14 +902,15 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
               <TableHead>Échéance</TableHead>
               <TableHead>HT</TableHead><TableHead>TTC</TableHead><TableHead>Payé</TableHead><TableHead>Restant</TableHead>
               <TableHead>DGI</TableHead><TableHead>Statut</TableHead>
+              <TableHead>Date de règlement</TableHead>
               <TableHead>Mode de paiement</TableHead><TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading
-              ?<TableRow><TableCell colSpan={12} className="text-center py-8"><Loader2 className="h-5 w-5 animate-spin mx-auto"/></TableCell></TableRow>
+              ?<TableRow><TableCell colSpan={13} className="text-center py-8"><Loader2 className="h-5 w-5 animate-spin mx-auto"/></TableCell></TableRow>
               :facturesFiltrees.length===0
-              ?<TableRow><TableCell colSpan={12} className="text-center py-10 text-muted-foreground">
+              ?<TableRow><TableCell colSpan={13} className="text-center py-10 text-muted-foreground">
                 {factures.length===0?"Aucune facture":"Aucune facture ne correspond aux filtres"}
               </TableCell></TableRow>
               :facturesFiltrees.map(f=>(
@@ -915,6 +932,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                   <TableCell className="font-mono text-sm text-orange-600">{fmt(Number(f.montant_restant??f.montant_ttc))}</TableCell>
                   <TableCell><DGIBadge statut={f.statut} statut_dgi={f.statut_dgi}/></TableCell>
                   <TableCell><StatutPaiementBadge f={f}/></TableCell>
+                  <TableCell><DateReglementCell facture={f} index={datesReglement}/></TableCell>
                   <TableCell><ModePaiementCell mode={modePaiementFacture(f, modes)}/></TableCell>
                   <TableCell>
                     <div className="flex gap-1 flex-wrap">
@@ -937,8 +955,8 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                           </Button>
                         )
                         :f.statut==="conforme"&&(
-                          <Button size="sm" variant="outline" disabled={processing===f.id} onClick={()=>handlePay(f.id)}
-                            title="Encaisser le solde au comptant (journal de caisse)">
+                          <Button size="sm" variant="outline" disabled={processing===f.id} onClick={()=>setPayModal(f)}
+                            title="Saisir un encaissement au comptant (montant et date)">
                             <Banknote className="h-3 w-3 mr-1"/>Payer en espèces
                           </Button>
                         )}
@@ -982,6 +1000,11 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
           </TableBody>
         </Table>
       </CardContent></Card>
+
+      {/* Règlement au comptant : montant exact + date, puis rechargement du
+          tableau — « Payé » et « Restant » sont recalculés côté serveur. */}
+      <PaiementEspecesDialog facture={payModal} type="client"
+        onClose={()=>setPayModal(null)} onDone={load}/>
 
       {/* Modal email manquant */}
       <Dialog open={!!emailModal} onOpenChange={()=>{setEmailModal(null);setEmailInput("");}}>

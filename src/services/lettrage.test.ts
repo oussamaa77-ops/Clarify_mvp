@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   COMPTES_TVA, TOLERANCE_LETTRAGE,
   apparierAutomatiquement, codeLettrageDepuisRang, construireBasculeTva,
-  controlerEquilibre, planifierDelettrage, planifierLettrage, prochainCodeLettrage,
-  rangDepuisCodeLettrage, regrouperParCompte, sensDuCompte, suiteCodesLettrage,
+  controlerEquilibre, estBasculeReglement, estCompteTva, grouperOdBascule, planifierDelettrage,
+  planifierLettrage, prochainCodeLettrage, rangDepuisCodeLettrage,
+  referenceReclassement, referenceSansPrefixe, referencesPiece,
+  regrouperParCompte, sensDuCompte, suiteCodesLettrage,
   tvaProportionnelle, type LigneLettrable,
 } from "./lettrage";
 
@@ -18,6 +20,7 @@ const ligne = (p: Partial<LigneLettrable> = {}): LigneLettrable => ({
   reference_piece: p.reference_piece ?? null,
   date_ecriture: p.date_ecriture ?? "2026-03-10",
   lettrage_code: p.lettrage_code ?? null,
+  journal_code: p.journal_code ?? null,
 });
 
 describe("génération des codes de lettrage", () => {
@@ -288,6 +291,152 @@ describe("planifierLettrage", () => {
   });
 });
 
+describe("référence propre du reclassement de TVA", () => {
+  it("préfixe la référence de la pièce", () => {
+    expect(referenceReclassement("FAC-2024-307")).toBe("RECLASS-TVA-FAC-2024-307");
+  });
+
+  it("la référence obtenue n'est JAMAIS celle de la pièce", () => {
+    // C'est tout l'objet du changement : plus aucune requête sur la référence
+    // de la facture ne peut ramener le reclassement par accident.
+    for (const r of ["FAC-1", "uuid-abc", "09/60900087"]) {
+      expect(referenceReclassement(r)).not.toBe(r);
+    }
+  });
+
+  it("retrouve la pièce d'origine — le lien reste dérivable", () => {
+    expect(referenceSansPrefixe("RECLASS-TVA-FAC-2024-307")).toBe("FAC-2024-307");
+    // Idempotent sur une référence ordinaire : sûr à appliquer partout.
+    expect(referenceSansPrefixe("FAC-2024-307")).toBe("FAC-2024-307");
+    expect(referenceSansPrefixe(null)).toBe("");
+  });
+
+  // Le filtre qui doit voir la pièce EN ENTIER : sans la référence préfixée,
+  // la TVA mise en attente par le reclassement resterait invisible et le
+  // règlement ne basculerait rien.
+  it("referencesPiece couvre la pièce ET son reclassement", () => {
+    expect(referencesPiece("FAC-1")).toEqual(["FAC-1", "RECLASS-TVA-FAC-1"]);
+  });
+
+  it("referencesPiece accepte plusieurs alias et ignore les vides", () => {
+    expect(referencesPiece("FAC-1", "uuid-1", null, "", undefined)).toEqual([
+      "FAC-1", "uuid-1", "RECLASS-TVA-FAC-1", "RECLASS-TVA-uuid-1",
+    ]);
+  });
+
+  it("dédoublonne les alias identiques", () => {
+    expect(referencesPiece("FAC-1", "FAC-1")).toEqual(["FAC-1", "RECLASS-TVA-FAC-1"]);
+  });
+});
+
+describe("estCompteTva — reconnaissance par préfixe", () => {
+  it("reconnaît les racines", () => {
+    for (const c of ["4458", "4455", "3458", "3455"]) expect(estCompteTva(c)).toBe(true);
+  });
+
+  // La cause exacte de l'écart de 1 880,00 MAD : le plan réel emploie des
+  // SOUS-COMPTES que l'égalité stricte ne voyait pas.
+  it("reconnaît les SOUS-COMPTES employés en base", () => {
+    for (const c of ["44551", "44552", "34552", "44581", "34581"]) {
+      expect(estCompteTva(c)).toBe(true);
+    }
+  });
+
+  it("ne confond pas 4456 (TVA due) ni les comptes voisins", () => {
+    for (const c of ["4456", "4457", "3421", "44110005", "6141", "5141", "", null, undefined]) {
+      expect(estCompteTva(c as any)).toBe(false);
+    }
+  });
+
+  it("suit un plan de comptes personnalisé", () => {
+    const comptes = { client: { attente: "44581", exigible: "44551" }, fournisseur: COMPTES_TVA.fournisseur };
+    expect(estCompteTva("445810", comptes)).toBe(true);
+    expect(estCompteTva("4458", comptes)).toBe(false);   // pas un préfixe de 44581
+  });
+});
+
+describe("grouperOdBascule — l'unité de suppression est l'écriture", () => {
+  it("groupe par code de lettrage", () => {
+    const l = [
+      ligne({ id: "a", journal_code: "OD", compte_numero: "4458", debit: 200, lettrage_code: "AA" }),
+      ligne({ id: "b", journal_code: "OD", compte_numero: "44551", credit: 200, lettrage_code: "AA" }),
+      ligne({ id: "c", journal_code: "OD", compte_numero: "4458", debit: 50, lettrage_code: "AB" }),
+      ligne({ id: "d", journal_code: "OD", compte_numero: "44551", credit: 50, lettrage_code: "AB" }),
+    ];
+    expect(grouperOdBascule(l).sort()).toEqual(["a", "b", "c", "d"]);
+  });
+
+  // Les bascules d'acompte ne portent pas de code : elles se groupent par pièce.
+  it("groupe les OD SANS code par référence + date", () => {
+    const l = [
+      ligne({ id: "a", journal_code: "OD", compte_numero: "4458", debit: 100, reference_piece: "FA-1", date_ecriture: "2026-02-01" }),
+      ligne({ id: "b", journal_code: "OD", compte_numero: "44551", credit: 100, reference_piece: "FA-1", date_ecriture: "2026-02-01" }),
+      // Autre pièce, autre date : groupe distinct, sans TVA → non concerné.
+      ligne({ id: "c", journal_code: "OD", compte_numero: "6141", debit: 30, reference_piece: "FA-2", date_ecriture: "2026-03-01" }),
+    ];
+    expect(grouperOdBascule(l).sort()).toEqual(["a", "b"]);
+  });
+
+  it("ignore les lignes qui ne sont pas au journal OD", () => {
+    const l = [
+      ligne({ id: "vte", journal_code: "VTE", compte_numero: "4458", credit: 200, reference_piece: "FA-1" }),
+    ];
+    expect(grouperOdBascule(l)).toEqual([]);
+  });
+});
+
+// ─── RÉGRESSION FAC-2024-307, second volet ───────────────────────────────────
+// Le reclassement de TVA et la bascule au règlement portent sur LES DEUX MÊMES
+// comptes, sans code, sous la même référence de facture : seul le SENS les
+// distingue. Confondre les deux faisait supprimer le reclassement à l'annulation
+// d'un paiement — une écriture étrangère au règlement.
+describe("estBasculeReglement — sens contre sens", () => {
+  const od = (compte: string, debit: number, credit: number) =>
+    ligne({ journal_code: "OD", compte_numero: compte, debit, credit, reference_piece: "FAC-2024-307" });
+
+  it("reconnaît la bascule d'une VENTE : D attente / C exigible", () => {
+    expect(estBasculeReglement([od("4458", 1880, 0), od("44551", 0, 1880)])).toBe(true);
+  });
+
+  it("REJETTE le reclassement inverse : D exigible / C attente", () => {
+    expect(estBasculeReglement([od("44551", 1880, 0), od("4458", 0, 1880)])).toBe(false);
+  });
+
+  it("reconnaît la bascule d'un ACHAT : D déductible / C attente", () => {
+    expect(estBasculeReglement([od("34552", 200, 0), od("3458", 0, 200)])).toBe(true);
+  });
+
+  it("REJETTE le reclassement d'achat inverse", () => {
+    expect(estBasculeReglement([od("3458", 200, 0), od("34552", 0, 200)])).toBe(false);
+  });
+
+  it("rejette une demi-écriture, faute de pouvoir conclure sur le sens", () => {
+    expect(estBasculeReglement([od("44551", 1880, 0)])).toBe(false);
+  });
+});
+
+describe("grouperOdBascule — option seulementBascules", () => {
+  const grp = (a: string, ad: number, ac: number, b: string, bd: number, bc: number) => [
+    ligne({ id: "x", journal_code: "OD", compte_numero: a, debit: ad, credit: ac, reference_piece: "FA-1", date_ecriture: "2026-05-06" }),
+    ligne({ id: "y", journal_code: "OD", compte_numero: b, debit: bd, credit: bc, reference_piece: "FA-1", date_ecriture: "2026-05-06" }),
+  ];
+
+  it("emporte une vraie bascule", () => {
+    expect(grouperOdBascule(grp("4458", 1880, 0, "44551", 0, 1880), undefined, { seulementBascules: true }).sort())
+      .toEqual(["x", "y"]);
+  });
+
+  // LE cas de FAC-2024-307 : ne rien toucher.
+  it("épargne le reclassement de TVA", () => {
+    expect(grouperOdBascule(grp("44551", 1880, 0, "4458", 0, 1880), undefined, { seulementBascules: true }))
+      .toEqual([]);
+  });
+
+  it("sans l'option, les deux sont emportés (usage du délettrage par code)", () => {
+    expect(grouperOdBascule(grp("44551", 1880, 0, "4458", 0, 1880)).sort()).toEqual(["x", "y"]);
+  });
+});
+
 describe("planifierDelettrage", () => {
   it("annule le lettrage et supprime l'OD de TVA", () => {
     const toutes = [
@@ -303,6 +452,75 @@ describe("planifierDelettrage", () => {
     expect(p.ligneIds.sort()).toEqual(["f1", "r1"]);
     expect(p.odASupprimer.sort()).toEqual(["od1", "od2"]);
     expect(p.ligneIds).not.toContain("autre");
+  });
+
+  // ── RÉGRESSION FAC-2024-307 (écart de 1 880,00 MAD au grand livre) ─────────
+  // La bascule est passée sur le SOUS-COMPTE 44551, pas sur la racine 4455. Le
+  // filtre par égalité stricte ne reconnaissait que « 4455 » : la ligne 4458
+  // était supprimée, sa contrepartie 44551 restait, et le journal se retrouvait
+  // déséquilibré du montant de la TVA.
+  it("supprime les DEUX lignes d'une OD passée sur un sous-compte (44551)", () => {
+    const toutes = [
+      ligne({ id: "f1", debit: 11280, lettrage_code: "AA" }),
+      ligne({ id: "r1", credit: 11280, lettrage_code: "AA" }),
+      ligne({ id: "od1", journal_code: "OD", compte_numero: "4458", debit: 1880, lettrage_code: "AA" }),
+      ligne({ id: "od2", journal_code: "OD", compte_numero: "44551", credit: 1880, lettrage_code: "AA" }),
+    ];
+    const p = planifierDelettrage([toutes[0]], toutes);
+    expect(p.odASupprimer.sort()).toEqual(["od1", "od2"]);
+    // Et la contrepartie ne doit surtout pas être traitée comme une ligne
+    // ordinaire à simplement dé-estampiller : elle disparaîtrait du nettoyage.
+    expect(p.ligneIds).not.toContain("od2");
+  });
+
+  it("supprime aussi les deux lignes d'une OD d'achat sur 34552", () => {
+    const toutes = [
+      ligne({ id: "f1", compte_numero: "44110005", credit: 1200, lettrage_code: "AB" }),
+      ligne({ id: "r1", compte_numero: "44110005", debit: 1200, lettrage_code: "AB" }),
+      ligne({ id: "od1", journal_code: "OD", compte_numero: "34552", debit: 200, lettrage_code: "AB" }),
+      ligne({ id: "od2", journal_code: "OD", compte_numero: "3458", credit: 200, lettrage_code: "AB" }),
+    ];
+    const p = planifierDelettrage([toutes[0]], toutes);
+    expect(p.odASupprimer.sort()).toEqual(["od1", "od2"]);
+  });
+
+  // Le groupe part en entier même si UNE seule de ses lignes est reconnue : une
+  // contrepartie sur un compte inattendu ne doit jamais rester seule.
+  it("emporte la contrepartie même sur un compte non reconnu", () => {
+    const toutes = [
+      ligne({ id: "f1", debit: 600, lettrage_code: "AC" }),
+      ligne({ id: "r1", credit: 600, lettrage_code: "AC" }),
+      ligne({ id: "od1", journal_code: "OD", compte_numero: "4458", debit: 100, lettrage_code: "AC" }),
+      ligne({ id: "od2", journal_code: "OD", compte_numero: "4457", credit: 100, lettrage_code: "AC" }),
+    ];
+    const p = planifierDelettrage([toutes[0]], toutes);
+    expect(p.odASupprimer.sort()).toEqual(["od1", "od2"]);
+  });
+
+  it("l'ensemble supprimé est TOUJOURS équilibré (partie double)", () => {
+    const toutes = [
+      ligne({ id: "f1", debit: 1200, lettrage_code: "AA" }),
+      ligne({ id: "r1", credit: 1200, lettrage_code: "AA" }),
+      ligne({ id: "od1", journal_code: "OD", compte_numero: "4458", debit: 200, lettrage_code: "AA" }),
+      ligne({ id: "od2", journal_code: "OD", compte_numero: "44551", credit: 200, lettrage_code: "AA" }),
+    ];
+    const p = planifierDelettrage([toutes[0]], toutes);
+    const supprimees = toutes.filter((l) => p.odASupprimer.includes(l.id));
+    const d = supprimees.reduce((s, l) => s + Number(l.debit ?? 0), 0);
+    const c = supprimees.reduce((s, l) => s + Number(l.credit ?? 0), 0);
+    expect(d).toBeCloseTo(c, 2);
+  });
+
+  // Une OD que le comptable a lettrée à la main sur un compte de TIERS n'est pas
+  // une bascule de TVA : elle se dé-estampille, elle ne se supprime pas.
+  it("ne supprime pas une OD lettrée manuellement hors compte de TVA", () => {
+    const toutes = [
+      ligne({ id: "od1", journal_code: "OD", compte_numero: "34210001", debit: 500, lettrage_code: "AD" }),
+      ligne({ id: "r1", compte_numero: "34210001", credit: 500, lettrage_code: "AD" }),
+    ];
+    const p = planifierDelettrage([toutes[0]], toutes);
+    expect(p.odASupprimer).toEqual([]);
+    expect(p.ligneIds.sort()).toEqual(["od1", "r1"]);
   });
 
   // Retirer une seule ligne d'un lettrage à trois déséquilibrerait les deux qui

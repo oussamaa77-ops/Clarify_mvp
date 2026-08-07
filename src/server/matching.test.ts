@@ -7,6 +7,7 @@ import {
   normalizeTelecom,
   preMatchTransactions,
 } from "./factures.functions";
+import { COMPTE_CAISSE_DEFAUT } from "@/lib/comptes-tresorerie";
 
 // ─── deduplicateAnalyses ──────────────────────────────────────────────────────
 
@@ -158,12 +159,16 @@ describe("applyKeywordOverrides", () => {
     expect(result[0].montant_tva).toBeCloseTo(86.67, 1);
   });
 
-  it("RETRAIT ESPECES → retrait_especes, code=5143, facture_id=null", () => {
+  // Le retrait alimente la CAISSE (rubrique 516), pas 5143 = Trésorerie Générale.
+  // Le compte doit être le même que celui des règlements en espèces, sans quoi le
+  // solde de caisse se répartit sur deux comptes et ne se contrôle plus.
+  it("RETRAIT ESPECES → retrait_especes, code=51610000, facture_id=null", () => {
     const analyses = [{ facture_id: "fac-x", confiance: 70 }];
     const txs = [makeTx("RETRAIT ESPECES GAB", 1000)];
     const result = applyKeywordOverrides(analyses, txs);
     expect(result[0].categorie).toBe("retrait_especes");
-    expect(result[0].code_pcm).toBe("5143");
+    expect(result[0].code_pcm).toBe(COMPTE_CAISSE_DEFAUT);
+    expect(result[0].code_pcm).toBe("51610000");
     expect(result[0].facture_id).toBeNull(); // retrait → jamais de facture
     expect(result[0].confiance).toBe(99);
   });

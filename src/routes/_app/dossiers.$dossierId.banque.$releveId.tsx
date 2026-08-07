@@ -85,6 +85,8 @@ function ReleveDetailPage() {
   // Inbox Zero (style Odoo) : par défaut on masque les lignes déjà lettrées,
   // pour ne laisser que les transactions « À traiter ».
   const [showLettrees, setShowLettrees] = useState(false);
+  // Dossier — porte les sous-comptes de trésorerie utilisés à la clôture.
+  const [dossier, setDossier] = useState<any>(null);
 
   const load = async () => {
     setLoading(true);
@@ -97,12 +99,18 @@ function ReleveDetailPage() {
         .eq("releve_id", releveId).order("date_operation", { ascending: true });
       setTxs(t ?? []);
 
-      const [{ data: fc }, { data: ff }, { data: j }] = await Promise.all([
+      const [{ data: fc }, { data: ff }, { data: j }, { data: dos }] = await Promise.all([
         (supabase as any).from("factures").select("id,numero,date_facture,montant_ht,montant_tva,montant_ttc,statut_paiement,fichier_original_url,clients(nom)").eq("dossier_id", dossierId),
         (supabase as any).from("factures_fournisseurs").select("id,numero,date_facture,montant_ht,montant_tva,montant_ttc,statut_paiement,fournisseur_nom").eq("dossier_id", dossierId),
         (supabase as any).from("justificatifs").select("id,numero_piece,numero_commande,date_document,date_commande,type_document,nom_tiers,montant_ht,montant_ttc,taux_tva,eligible_edi,categorie_pcm,compte_pcm,statut,lignes,bon_commande_id,devis_id").eq("dossier_id", dossierId),
+        // Sous-comptes de trésorerie du dossier : sans eux, la clôture depuis CET
+        // écran écrirait les retraits sur la caisse PAR DÉFAUT pendant que la liste
+        // des relevés écrirait sur celle du dossier — deux soldes de caisse pour le
+        // même dossier. `select("*")` : colonnes livrées par migration manuelle.
+        (supabase as any).from("dossiers").select("*").eq("id", dossierId).maybeSingle(),
       ]);
       setFacturesClient(fc ?? []); setFacturesFourn(ff ?? []); setJustificatifs(j ?? []);
+      setDossier(dos ?? null);
 
       // Aperçu du document original (bucket privé releves-bancaires).
       // On TÉLÉCHARGE le binaire puis on le réexpose en blob avec le bon type MIME :
@@ -202,7 +210,7 @@ function ReleveDetailPage() {
         const date = p.length === 3 && p[2]?.length === 4 ? `${p[2]}-${p[1]}-${p[0]}` : raw;
         const justif = tx.justificatif_id ? justificatifs.find((j: any) => j.id === tx.justificatif_id) : null;
 
-        for (const l of genererLignesBQ({ libelle: tx.libelle, type: tx.type, montant: tx.montant, categorie: cat, compteComptable: tx.compte_comptable, factureLiee: !!tx.facture_id, justificatif: justif })) {
+        for (const l of genererLignesBQ({ libelle: tx.libelle, type: tx.type, montant: tx.montant, categorie: cat, compteComptable: tx.compte_comptable, factureLiee: !!tx.facture_id, justificatif: justif, dossier })) {
           ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: l.compte, date_ecriture: date, libelle: l.libelle, debit: l.debit, credit: l.credit, valide: true, transaction_id: tx.id });
         }
       }
