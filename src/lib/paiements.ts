@@ -57,12 +57,30 @@ async function majMontantDirect(sb: any, table: TableFacture, factureId: string,
 }
 
 /**
+ * Ce qu'un règlement laisse derrière lui.
+ *
+ * `piece` est la référence de la SAISIE FORMELLE — c'est elle qui autorise
+ * l'écriture de trésorerie qui suit (cf. src/lib/integrite-tresorerie.ts). Elle
+ * est toujours renseignée : même quand la table `paiements` n'existe pas encore,
+ * le règlement a bien été imputé sur la facture, et l'écriture est justifiée.
+ */
+export interface PaiementEnregistre {
+  piece: string;
+  /** `paiements` = table de vérité ; `colonnes` = repli avant migration. */
+  via: "paiements" | "colonnes";
+}
+
+/**
  * Enregistre un règlement. Idempotent : rejoue le même encaissement / la même ligne de
  * relevé ne crée pas de doublon (on purge d'abord le paiement de cette pièce). Le trigger
  * SQL recalcule montant_paye/montant_restant/statut de la facture.
  */
-export async function enregistrerPaiement(sb: any, p: PaiementRef): Promise<void> {
+export async function enregistrerPaiement(sb: any, p: PaiementRef): Promise<PaiementEnregistre> {
   const fk = fkPaiement(p.table);
+  // Référence de la pièce, indépendante de la réussite de l'insert : elle décrit
+  // le règlement qu'on vient de saisir, pas la ligne SQL qui l'a stocké.
+  const piece = String(p.transactionId ?? p.encaissementId ?? p.reference
+    ?? `${p.origine}:${p.factureId}:${p.date}`);
   try {
     // Idempotence : par pièce (transaction / encaissement) ou, à défaut, par (facture, référence).
     if (p.transactionId) await sb.from("paiements").delete().eq("transaction_id", p.transactionId);
@@ -80,8 +98,10 @@ export async function enregistrerPaiement(sb: any, p: PaiementRef): Promise<void
       reference: p.reference ?? null,
     });
     if (error) throw error;                       // table absente / RLS → repli ci-dessous
+    return { piece, via: "paiements" };
   } catch {
     await majMontantDirect(sb, p.table, p.factureId, r2(p.montant), p.date);
+    return { piece, via: "colonnes" };
   }
 }
 

@@ -31,6 +31,7 @@ import { rappelerMemoire } from "./tiers-memoire.functions";
 import { logUsage, logUsageBatch, estimerCoutIA } from "./analytics.functions";
 import { guardScan, libererScan } from "./billing";
 import { enregistrerPaiement } from "@/lib/paiements";
+import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -1398,7 +1399,7 @@ export const marquerPayee = createServerFn({ method: "POST" })
     // Le règlement passe par un paiement `manuel` ; le trigger de la table
     // `paiements` recalcule montant_paye / montant_restant / statut_paiement —
     // ce sont ces colonnes que relit le tableau après validation.
-    await enregistrerPaiement(supabase, {
+    const { piece } = await enregistrerPaiement(supabase, {
       dossierId: f.dossier_id, table, factureId: data.facture_id,
       montant, date: data.date_paiement, origine: "manuel",
     });
@@ -1417,14 +1418,19 @@ export const marquerPayee = createServerFn({ method: "POST" })
           { compte_numero: compteTiers,      libelle: `Règlement fournisseur ${ref}`,                    debit: montant, credit: 0 },
           { compte_numero: compteTresorerie, libelle: `Décaissement ${especes ? "espèces " : ""}${ref}`, debit: 0,       credit: montant },
         ];
-    await (supabase as any).from("ecritures_comptables").insert(
-      lignes.map((l) => ({
-        dossier_id: f.dossier_id, journal_code: journal, date_ecriture: data.date_paiement,
-        reference_piece: estClient ? ref : data.facture_id,
-        facture_id: estClient ? data.facture_id : null,
-        valide: true, ...l,
-      }))
-    );
+    const ecritures = lignes.map((l) => ({
+      dossier_id: f.dossier_id, journal_code: journal, date_ecriture: data.date_paiement,
+      reference_piece: estClient ? ref : data.facture_id,
+      facture_id: estClient ? data.facture_id : null,
+      valide: true, ...l,
+    }));
+    // RÈGLE D'INTÉGRITÉ Banque ⇄ Compta : ce chemin est la SAISIE MANUELLE
+    // FORMELLE de trésorerie, et il n'est licite que parce que le paiement
+    // ci-dessus a été enregistré le premier. `piece` en est la preuve : sans
+    // elle, ces deux lignes seraient exactement l'écriture fantôme que la règle
+    // interdit (une banque qui bouge sans qu'aucun argent n'ait bougé).
+    assertEcrituresTresorerie(ecritures, { origine: "saisie_manuelle", piece });
+    await (supabase as any).from("ecritures_comptables").insert(ecritures);
 
     // Estampille du mode réellement employé : c'est elle que lit la colonne
     // « Mode de paiement » quand aucune pièce bancaire n'explique le règlement

@@ -1,0 +1,34 @@
+{
+  "date": "2026-08-09T17:40:56.052Z",
+  "cible": "lettrage:AA",
+  "lignes": [
+    {
+      "id": "f4c0e5b9-c24c-419b-9048-111b41f4f3ed",
+      "dossier_id": "b64505dd-94ec-4d3a-9ab2-aa5637aec98b",
+      "journal_code": "BQ",
+      "compte_numero": "5141",
+      "date_ecriture": "2026-07-09",
+      "libelle": "Encaissement FAC - 2026 - 001",
+      "debit": 9000,
+      "credit": 0,
+      "reference_piece": "FAC - 2026 - 001",
+      "lettrage_code": null,
+      "transaction_id": null,
+      "facture_id": "6baa0c96-1958-42fe-befb-891cc2db329c"
+    },
+    {
+      "id": "16f4b4c5-3aff-4144-8b8a-3d6a46987300",
+      "dossier_id": "b64505dd-94ec-4d3a-9ab2-aa5637aec98b",
+      "journal_code": "BQ",
+      "compte_numero": "34210002",
+      "date_ecriture": "2026-07-09",
+      "libelle": "Règlement client FAC - 2026 - 001",
+      "debit": 0,
+      "credit": 9000,
+      "reference_piece": "FAC - 2026 - 001",
+      "lettrage_code": "AA",
+      "transaction_id": null,
+      "facture_id": "6baa0c96-1958-42fe-befb-891cc2db329c"
+    }
+  ]
+}

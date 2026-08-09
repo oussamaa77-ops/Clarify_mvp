@@ -16,10 +16,17 @@ import { parseAttijariReleve, extractRibMarocain } from "@/lib/releve-attijari";
 import { enregistrerPaiement } from "@/lib/paiements";
 import { traiterPagesEnPipeline } from "@/lib/pipeline-pages";
 import { COMPTE_CAISSE_DEFAUT } from "@/lib/comptes-tresorerie";
+import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/relevescanner")({
   component: RelEveScanner,
 });
+
+/** « JJ/MM/AAAA » du relevé → « AAAA-MM-JJ ». Toute autre forme est rendue telle quelle. */
+const normaliserDate = (brut: string): string => {
+  const p = String(brut ?? "").split("/");
+  return p.length === 3 && p[2]?.length === 4 ? `${p[2]}-${p[1]}-${p[0]}` : String(brut ?? "");
+};
 
 interface Transaction {
   id: string; ligne: number;
@@ -516,6 +523,91 @@ function RelEveScanner() {
     }));
   };
 
+  /**
+   * Matérialise le relevé scanné et ses lignes, et rend `id de ligne écran →
+   * transaction_id` pour estampiller les écritures.
+   *
+   * Le relevé est rattaché au compte bancaire du dossier dont le RIB correspond
+   * à celui qu'a lu le scan ; à défaut au premier compte. Les colonnes méta
+   * (banque / rib / periode_*) ne sont pas migrées partout : on retombe alors sur
+   * un insert minimal plutôt que de perdre le relevé (même repli que la page
+   * Banque). Si RIEN ne peut être persisté, on lève : sans transaction derrière,
+   * les écritures seraient précisément celles que la règle d'intégrité interdit.
+   */
+  const persisterReleveScanne = async (aValider: Transaction[]): Promise<Map<string, string>> => {
+    if (!aValider.length) return new Map();
+
+    const { data: comptes } = await (supabase.from("comptes_bancaires") as any)
+      .select("id,rib,solde_actuel").eq("dossier_id", dossierId).order("created_at");
+    const chiffres = (v: unknown) => String(v ?? "").replace(/\D/g, "");
+    const ribScan = chiffres(infoReleve?.rib);
+    const compte = ((comptes ?? []) as any[]).find((c) => ribScan && chiffres(c.rib) === ribScan)
+      ?? (comptes ?? [])[0];
+    if (!compte?.id) {
+      throw new Error(
+        "Aucun compte bancaire n'est enregistré pour ce dossier : impossible de rattacher le relevé scanné. "
+        + "Créez le compte dans la section Banque, puis relancez la validation.",
+      );
+    }
+
+    const dates = aValider.map((t) => normaliserDate(t.date_operation)).filter(Boolean).sort();
+    const base = {
+      compte_id: compte.id, dossier_id: dossierId,
+      nombre_transactions: aValider.length,
+      solde_initial: infoReleve?.solde_initial ?? compte.solde_actuel ?? 0,
+      solde_final: infoReleve?.solde_final ?? compte.solde_actuel ?? 0,
+      statut: "actif" as const,
+      fichier_nom: pdfFile?.name || "relevé scanné",
+    };
+    let releveId: string | null = null;
+    try {
+      const ins = await (supabase.from("releves_bancaires") as any).insert({
+        ...base,
+        banque: infoReleve?.banque || null,
+        rib: infoReleve?.rib || null,
+        periode_debut: dates[0] || null,
+        periode_fin: dates[dates.length - 1] || null,
+      }).select("id").single();
+      if (ins.error) throw ins.error;
+      releveId = ins.data?.id ?? null;
+    } catch (e: any) {
+      console.warn("[SCANNER] relevé enrichi refusé, repli minimal :", e?.message ?? e);
+      const fb = await (supabase.from("releves_bancaires") as any).insert(base).select("id").single();
+      if (fb.error) throw fb.error;
+      releveId = fb.data?.id ?? null;
+    }
+    if (!releveId) throw new Error("Le relevé scanné n'a pas pu être enregistré : validation interrompue.");
+
+    // Les lignes du relevé, dans l'ordre d'affichage — c'est lui qui fait
+    // correspondre les ids rendus à `aValider`.
+    const lignes = aValider.map((t) => ({
+      dossier_id: dossierId, compte_id: compte.id, releve_id: releveId,
+      date_operation: normaliserDate(t.date_operation) || t.date_operation,
+      libelle: (t.debiteur_crediteur ? `${t.nature_operation} - ${t.debiteur_crediteur}` : t.nature_operation).slice(0, 200),
+      montant: t.montant_credit ?? t.montant_debit ?? 0,
+      type: t.montant_credit ? "credit" : "debit",
+      reference: t.reference || t.document_reference || null,
+      statut: "cloture",
+    }));
+    let inserees: any[] = [];
+    try {
+      const ins = await (supabase.from("transactions_bancaires") as any).insert(lignes).select("id");
+      if (ins.error) throw ins.error;
+      inserees = ins.data ?? [];
+    } catch (e: any) {
+      // Colonnes `statut` / `reference` non migrées → repli sur le socle commun.
+      console.warn("[SCANNER] transactions enrichies refusées, repli minimal :", e?.message ?? e);
+      const fb = await (supabase.from("transactions_bancaires") as any)
+        .insert(lignes.map(({ statut: _s, reference: _r, ...rest }) => rest)).select("id");
+      if (fb.error) throw fb.error;
+      inserees = fb.data ?? [];
+    }
+    if (inserees.length !== aValider.length) {
+      throw new Error("Les lignes du relevé n'ont pas toutes été enregistrées : validation interrompue.");
+    }
+    return new Map(aValider.map((t, i) => [t.id, String(inserees[i].id)]));
+  };
+
   const handleValider = async () => {
     const nonValidees = transactions.filter(tx => !tx.valide);
     if (nonValidees.length > 0) {
@@ -527,24 +619,33 @@ function RelEveScanner() {
       const ecritures: any[] = [];
       const facturesClientPayees: string[] = [];
       const facturesFournPayees: string[] = [];
+      const aValider = transactions.filter(t => t.valide);
 
-      for (const tx of transactions.filter(t => t.valide)) {
-        const parts = tx.date_operation.split("/");
-        const date = parts.length === 3 && parts[2].length === 4
-          ? `${parts[2]}-${parts[1]}-${parts[0]}`
-          : tx.date_operation;
+      // ── PERSISTER LE RELEVÉ AVANT D'ÉCRIRE ──────────────────────────────────
+      // RÈGLE D'INTÉGRITÉ Banque ⇄ Compta : une écriture du journal BQ doit
+      // dériver d'un relevé VALIDÉ. Cet écran scanne un vrai relevé mais ne le
+      // persistait pas : ses écritures naissaient sans transaction ni relevé
+      // derrière, et devenaient indiscernables d'une écriture fantôme dès le
+      // lendemain. On matérialise donc le relevé et ses lignes, puis on estampille
+      // chaque écriture du `transaction_id` de la ligne dont elle découle.
+      const transactionIdParLigne = await persisterReleveScanne(aValider);
+
+      for (const tx of aValider) {
+        const date = normaliserDate(tx.date_operation);
         const montant = tx.montant_credit ?? tx.montant_debit ?? 0;
         const libelle = (tx.debiteur_crediteur ? `${tx.nature_operation} - ${tx.debiteur_crediteur}` : tx.nature_operation).slice(0, 100);
         const ht  = tx.montant_ht  ?? montant;
         const tva = tx.montant_tva ?? 0;
 
-        ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: "5141", date_ecriture: date, libelle, debit: tx.montant_credit ? montant : 0, credit: tx.montant_debit ? montant : 0, reference_piece: tx.document_reference || tx.reference, valide: true });
+        const transaction_id = transactionIdParLigne.get(tx.id) ?? null;
+
+        ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: "5141", date_ecriture: date, libelle, debit: tx.montant_credit ? montant : 0, credit: tx.montant_debit ? montant : 0, reference_piece: tx.document_reference || tx.reference, valide: true, transaction_id });
 
         if (tva > 0 && tx.montant_debit) {
-          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: tx.code_comptable, date_ecriture: date, libelle, debit: ht, credit: 0, reference_piece: tx.document_reference, valide: true });
-          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: "34552", date_ecriture: date, libelle: `TVA ${libelle.slice(0,50)}`, debit: tva, credit: 0, reference_piece: tx.document_reference, valide: true });
+          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: tx.code_comptable, date_ecriture: date, libelle, debit: ht, credit: 0, reference_piece: tx.document_reference, valide: true, transaction_id });
+          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: "34552", date_ecriture: date, libelle: `TVA ${libelle.slice(0,50)}`, debit: tva, credit: 0, reference_piece: tx.document_reference, valide: true, transaction_id });
         } else {
-          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: tx.code_comptable, date_ecriture: date, libelle, debit: tx.montant_debit ? 0 : ht, credit: tx.montant_credit ? 0 : ht, reference_piece: tx.document_reference, valide: true });
+          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: tx.code_comptable, date_ecriture: date, libelle, debit: tx.montant_debit ? 0 : ht, credit: tx.montant_credit ? 0 : ht, reference_piece: tx.document_reference, valide: true, transaction_id });
         }
 
         if (tx.facture_id) {
@@ -557,6 +658,9 @@ function RelEveScanner() {
         }
       }
 
+      // Le lot est refusé EN ENTIER si une seule estampille manque : mieux vaut
+      // un scan à rejouer qu'un grand livre à auditer.
+      assertEcrituresTresorerie(ecritures, { origine: "releve" });
       await supabase.from("ecritures_comptables").insert(ecritures);
 
       // Solder les factures rapprochées via un PAIEMENT (source de vérité) couvrant le

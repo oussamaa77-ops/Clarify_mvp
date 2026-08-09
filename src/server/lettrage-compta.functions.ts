@@ -18,6 +18,7 @@ import {
   tvaProportionnelle,
   type LigneLettrable, type SensTiers,
 } from "@/services/lettrage";
+import { synchroniserApresLettrage } from "./factures-gl.functions";
 
 // Le proxy TLS d'entreprise fait échouer le `fetch` global côté serveur : sans
 // ce repli undici, supabase-js rend des erreurs réseau opaques et le lettrage
@@ -384,7 +385,15 @@ export const lettrerSelection = createServerFn({ method: "POST" })
       dateReglement: z.string().optional().nullable(),
     }).parse(input),
   )
-  .handler(({ data }): Promise<ResultatLettrage> => executerLettrage(getSupabase(), data));
+  .handler(async ({ data }): Promise<ResultatLettrage> => {
+    const sb = getSupabase();
+    const r = await executerLettrage(sb, data);
+    // Le lettrage vient de changer ce qui est soldé : la projection portée par
+    // `factures` doit suivre dans la même requête, sinon l'écran affiche encore
+    // l'ancien restant dû (cf. src/server/factures-gl.functions.ts).
+    if (r.ok) await synchroniserApresLettrage(sb, data.dossierId);
+    return r;
+  });
 
 export interface EntreeDelettrage {
   dossierId: string;
@@ -482,7 +491,14 @@ export const delettrerSelection = createServerFn({ method: "POST" })
       message: "Fournir des lignes ou des codes à délettrer.",
     }).parse(input),
   )
-  .handler(({ data }): Promise<ResultatDelettrage> => executerDelettrage(getSupabase(), data));
+  .handler(async ({ data }): Promise<ResultatDelettrage> => {
+    const sb = getSupabase();
+    const r = await executerDelettrage(sb, data);
+    // Symétrique du lettrage : une facture délettrée redevient un poste ouvert,
+    // et son restant dû doit remonter aussitôt.
+    if (r.ok) await synchroniserApresLettrage(sb, data.dossierId);
+    return r;
+  });
 
 // ─── Lettrage automatique : passe d'appariement sûr sur un compte ────────────
 // Utilisée après un paiement/rapprochement : n'apparie que les cas certains
@@ -649,4 +665,9 @@ export const lettrerAutomatiquement = createServerFn({ method: "POST" })
       compte: z.string().optional(),
     }).parse(input),
   )
-  .handler(({ data }): Promise<ResultatLettrageAuto> => executerLettrageAuto(getSupabase(), data));
+  .handler(async ({ data }): Promise<ResultatLettrageAuto> => {
+    const sb = getSupabase();
+    const r = await executerLettrageAuto(sb, data);
+    if (r.ok && r.lettres > 0) await synchroniserApresLettrage(sb, data.dossierId);
+    return r;
+  });

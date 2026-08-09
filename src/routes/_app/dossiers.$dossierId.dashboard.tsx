@@ -18,6 +18,9 @@ import { envoyerRappelTVA } from "@/server/fiscalite.functions";
 import { identifierBanque, identifierBanqueParNom, maskRib } from "@/lib/bank-identity";
 import { BankLogo } from "@/components/BankLogo";
 import { logAudit } from "@/lib/audit";
+import {
+  COMPTE_CLIENTS, encoursTiersGrandLivre, soldeBancaireAffiche, type LigneGrandLivre,
+} from "@/lib/encours-grandlivre";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/dashboard")({ component: DashboardPage });
 
@@ -71,6 +74,10 @@ function DashboardPage() {
   const [ecrExploitation, setEcrExploitation] = useState<any[]>([]);
   // Intitulés du référentiel PCM (numéro → intitulé), pour nommer chaque poste.
   const [intitulesPcm, setIntitulesPcm] = useState<Record<string, string>>({});
+  // Écritures des comptes de tiers et de trésorerie — la source des deux
+  // indicateurs qui doivent s'accorder avec la comptabilité : l'encours clients
+  // et le solde bancaire.
+  const [ecrTiers, setEcrTiers] = useState<LigneGrandLivre[]>([]);
   const [comptesBancaires, setComptesBancaires] = useState<CompteBancaire[]>([]);
   const [releves, setReleves] = useState<ReleveResume[]>([]);
   const [flux, setFlux] = useState<FluxNonLettres>({ parReleve: {}, ok: true });
@@ -83,7 +90,7 @@ function DashboardPage() {
 
   useEffect(() => {
     (async () => {
-      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }, { data: pcm }] = await Promise.all([
+      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }, { data: pcm }, { data: glTiers }] = await Promise.all([
         supabase.from("dossiers").select("nom_societe,ice,statut").eq("id", dossierId).single(),
         // Ajouter montant_paye et montant_restant pour calculs corrects + tiers pour les alertes
         supabase.from("factures").select("numero,statut,statut_paiement,montant_ht,montant_ttc,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,clients(nom)").eq("dossier_id", dossierId),
@@ -109,6 +116,15 @@ function DashboardPage() {
         // compte. Limité aux classes 6 et 7 — le reste ne sert pas ici.
         supabase.from("pcm_reference").select("numero,intitule")
           .or("numero.like.6%,numero.like.7%"),
+        // Comptes de TIERS (34/44) et de TRÉSORERIE (51) : ce sont eux qui portent
+        // l'encours clients et le solde bancaire, désormais lus dans le grand livre
+        // et non plus dans les colonnes dérivées (cf. src/lib/encours-grandlivre.ts).
+        // `lettrage_code` est indispensable : c'est lui qui distingue un poste
+        // ouvert d'une facture soldée.
+        supabase.from("ecritures_comptables")
+          .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
+          .eq("dossier_id", dossierId)
+          .or("compte_numero.like.34%,compte_numero.like.44%,compte_numero.like.51%"),
       ]);
       setDossier(d);
       setFactures(f ?? []);
@@ -119,6 +135,7 @@ function DashboardPage() {
       setFlux(fluxNonLettres);
       setEcrExploitation(charges ?? []);
       setIntitulesPcm(Object.fromEntries(((pcm ?? []) as any[]).map(c => [c.numero, c.intitule])));
+      setEcrTiers((glTiers ?? []) as LigneGrandLivre[]);
       setLoading(false);
     })();
   }, [dossierId]);
@@ -141,10 +158,22 @@ function DashboardPage() {
     .filter(f => f.type !== "acompte" && f.statut_paiement !== "non_payee")
     .reduce((s, f) => s + Number(f.montant_paye ?? 0), 0);
 
-  // Encours = montant_restant de toutes les factures non soldées (acompte + standard)
-  const encours = conformes
+  // ── Encours clients : les postes OUVERTS du compte 3421 au grand livre ──────
+  // Auparavant : Σ des `montant_restant` des factures non soldées. Ce chiffre ne
+  // pouvait pas être justifié devant la comptabilité — il restait faux tant que
+  // les colonnes n'avaient pas été resynchronisées, et il ignorait tout règlement
+  // saisi directement en écriture. On lit maintenant ce que dit le grand livre :
+  // les lignes NON LETTRÉES du 3421 (auxiliaires compris), sans jamais compenser
+  // l'avance d'un client par la dette d'un autre.
+  //
+  // Repli : tant qu'aucune écriture de tiers n'existe (dossier non comptabilisé),
+  // l'ancien calcul reste le seul disponible.
+  const encoursGL = encoursTiersGrandLivre(ecrTiers, COMPTE_CLIENTS);
+  const encoursFactures = conformes
     .filter(f => f.statut_paiement !== "payee")
     .reduce((s, f) => s + Number(f.montant_restant ?? f.montant_ttc), 0);
+  const comptabilise = ecrTiers.some(l => String(l.compte_numero ?? "").startsWith(COMPTE_CLIENTS));
+  const encours = comptabilise ? encoursGL.total : encoursFactures;
 
   // Achats facturés (toutes factures fournisseurs reçues, réglées ou non) —
   // pendant du « CA HT facturé » côté ventes.
@@ -285,7 +314,16 @@ function DashboardPage() {
   const kpis = [
     { icon: TrendingUp, label: "CA HT facturé (conformes DGI)", value: fmt(caHT), sub: `TTC: ${fmt(caTTC)}`, color: "text-green-600" },
     { icon: Wallet, label: "CA encaissé (payé + partiel)", value: fmt(caEncaisse), color: "text-emerald-600" },
-    { icon: FileText, label: "Encours clients (restant à encaisser)", value: fmt(encours), color: "text-blue-600" },
+    {
+      icon: FileText, label: "Encours clients (restant à encaisser)", value: fmt(encours),
+      // On dit d'où vient le chiffre : « 3421 non lettré » est vérifiable au
+      // grand livre, ce que « somme des restants dus » n'était pas.
+      sub: comptabilise
+        ? `Compte 3421 non lettré · ${encoursGL.postes.length} poste${encoursGL.postes.length > 1 ? "s" : ""} ouvert${encoursGL.postes.length > 1 ? "s" : ""}`
+          + (encoursGL.avances > 0.005 ? ` · ${fmt(encoursGL.avances)} d'avances` : "")
+        : "Restant dû des factures (dossier non comptabilisé)",
+      color: "text-blue-600",
+    },
     // La TVA n'est plus ici : elle est détaillée dans le bloc « Suivi TVA &
     // Fiscalité DGI » ci-dessous, au régime de l'encaissement.
     { icon: ShoppingCart, label: "Achats HT facturés", value: fmt(achatsHT), sub: `TTC: ${fmt(achatsTTC)}`, color: "text-purple-600" },
@@ -559,7 +597,7 @@ function DashboardPage() {
               </CardContent>
             </Card>
 
-            <ComptesFluxBancairesCard dossierId={dossierId} comptes={comptesBancaires} releves={releves} flux={flux} />
+            <ComptesFluxBancairesCard dossierId={dossierId} comptes={comptesBancaires} releves={releves} flux={flux} grandLivre={ecrTiers} />
           </div>
         </>
       )}
@@ -649,11 +687,20 @@ interface ReleveResume {
   date_debut?: string | null; date_fin?: string | null;
 }
 function ComptesFluxBancairesCard({
-  dossierId, comptes, releves, flux,
+  dossierId, comptes, releves, flux, grandLivre,
 }: {
   dossierId: string; comptes: CompteBancaire[]; releves: ReleveResume[]; flux: FluxNonLettres;
+  /** Écritures de tiers et de trésorerie du dossier — la source du solde affiché. */
+  grandLivre: LigneGrandLivre[];
 }) {
-  const soldeTotal = comptes.reduce((s, c) => s + Number(c?.solde_actuel ?? 0), 0);
+  // ── Solde consolidé : LA COMPTABILITÉ D'ABORD ──────────────────────────────
+  // `comptes_bancaires.solde_actuel` n'est renseigné que par l'import d'un
+  // relevé : sur un dossier tenu à la main, il reste à 0 et la carte annonçait
+  // « 0,00 MAD » alors que le compte 5141 portait des mouvements. Le grand livre
+  // (514x + 516x) prime donc dès qu'il en connaît, et l'ancienne valeur ne sert
+  // plus que de repli.
+  const soldeComptes = comptes.reduce((s, c) => s + Number(c?.solde_actuel ?? 0), 0);
+  const { montant: soldeTotal, source: sourceSolde } = soldeBancaireAffiche(grandLivre, soldeComptes);
   const nbReleves = releves.length;
 
   // Identité bancaire — même règle que les cartes de comptes de la page Banque : RIB
@@ -716,7 +763,9 @@ function ComptesFluxBancairesCard({
         <div>
           <p className="text-2xl font-bold">{fmt(soldeTotal)}</p>
           <p className="text-[11px] text-muted-foreground">
-            {comptes.length > 1 ? `Solde total · ${comptes.length} comptes` : "Solde bancaire courant"}
+            {sourceSolde === "grand_livre"
+              ? "Solde comptable · trésorerie 514/516"
+              : comptes.length > 1 ? `Solde total · ${comptes.length} comptes` : "Solde bancaire courant"}
             {` · ${nbReleves} relevé${nbReleves > 1 ? "s" : ""} importé${nbReleves > 1 ? "s" : ""}`}
           </p>
         </div>

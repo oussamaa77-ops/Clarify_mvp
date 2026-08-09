@@ -10,28 +10,31 @@
  * des factures qui n'ont jamais été encaissées.
  *
  * ─── Ce qui fait qu'un règlement est RÉEL ────────────────────────────────────
- * Une écriture de trésorerie est adossée à une pièce si elle porte AU MOINS une
- * de ces preuves. Le script les cherche toutes avant de conclure :
+ * La règle est portée par `src/lib/integrite-tresorerie.ts` — la MÊME que celle
+ * qui garde le moteur à l'écriture, pour qu'aucune donnée refusée à l'entrée ne
+ * soit tolérée à l'audit. Deux origines seulement sont licites :
  *
- *   1. `transaction_id`  → elle vient d'une ligne de relevé bancaire ;
- *   2. `facture_id`      → règlement d'une facture client (bouton « Payer ») ;
- *   3. `reference_piece` → correspond à l'id ou au n° d'une facture existante
- *                          (règlement fournisseur, qui ne peut pas porter la FK) ;
- *   4. un `encaissements` du même dossier, même date, même montant → saisie
- *      manuelle depuis la page Banque ;
- *   5. une `transactions_bancaires` **rattachée à un relevé** (`releve_id` non
- *      nul), de même dossier, date et montant → preuve FAIBLE : la ligne existe
- *      bien au relevé, seul le lien a été perdu. Elle est à RELIER, pas à
- *      supprimer.
+ *   1. un RELEVÉ BANCAIRE VALIDÉ — `transaction_id` pointant sur une
+ *      `transactions_bancaires` à `releve_id` NON NUL ;
+ *   2. une SAISIE MANUELLE FORMELLE — un `paiements` ou un `encaissements` du
+ *      même dossier, même date, même montant.
  *
  * Le `releve_id` non nul n'est pas un détail : les jeux de démonstration ont
  * aussi semé des `transactions_bancaires` orphelines, rattachées à aucun relevé.
  * Les accepter comme preuve laissait une écriture fictive se faire couvrir par
  * une transaction tout aussi fictive — c'est le cas rencontré sur l'écriture
- * « VIR SEPA RECU / SUPER-PAIN » : une transaction existait bien, à la même date
- * et au même montant, mais sans relevé derrière.
+ * « VIR SEPA RECU / SUPER-PAIN ».
  *
- * Sans aucune de ces preuves, l'écriture ne correspond à aucun mouvement connu.
+ * ─── Ce qui N'EST PLUS une preuve : `facture_id` / `reference_piece` ─────────
+ * Une écriture de banque peut nommer la facture qu'elle prétend solder sans
+ * qu'aucun argent n'ait bougé — c'est la forme même des jeux de démonstration
+ * (« Encaissement FAC-…, D 5141 / C 3421 », lettré, sans le moindre relevé
+ * derrière). L'ancienne version acceptait ces deux champs comme pièces et
+ * classait ces écritures « adossées » : elles passaient au travers du filet, et
+ * l'audit de DIGITAL SOLUTIONS annonçait 0 fictive sur un grand livre qui en
+ * portait une. Une facture dit ce qui est DÛ, un relevé dit ce qui est PAYÉ.
+ *
+ * Sans aucune de ces deux origines, l'écriture ne correspond à aucun mouvement.
  *
  * ─── Signal supplémentaire : l'ANTÉRIORITÉ ───────────────────────────────────
  * Un règlement ne peut pas précéder la facture qu'il solde. Toute écriture de
@@ -40,9 +43,13 @@
  *
  * ─── Sûreté ──────────────────────────────────────────────────────────────────
  * • Le script N'EFFACE RIEN sans `--supprimer=<ids|lettrage:CODE>`.
- * • La suppression emporte l'ÉCRITURE ENTIÈRE (toutes les lignes de même
- *   journal + date + libellé), jamais une ligne seule : retirer le seul crédit
- *   d'une écriture de banque déséquilibrerait le journal de son montant.
+ * • La suppression emporte l'ÉCRITURE ENTIÈRE (`cleEcritureTresorerie` : journal
+ *   + date + référence de pièce, à défaut le libellé), jamais une ligne seule :
+ *   retirer le seul crédit d'une écriture de banque déséquilibrerait le journal
+ *   de son montant. La référence prime sur le libellé parce que les deux lignes
+ *   d'un règlement en portent deux différents (« Encaissement FAC-… » face à
+ *   « Règlement client FAC-… ») : grouper sur le libellé les séparait, et le lot
+ *   à supprimer était alors refusé comme non soldé.
  * • Si l'écriture est LETTRÉE, le délettrage passe par le moteur applicatif
  *   (`executerDelettrage`) : les OD de bascule de TVA sont supprimées et les
  *   lignes de facture dé-estampillées, dans le bon ordre.
@@ -63,6 +70,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { executerDelettrage } from "../src/server/lettrage-compta.functions";
+import {
+  JOURNAUX_TRESORERIE, cleEcritureTresorerie, clePiece, origineEcritureTresorerie,
+} from "../src/lib/integrite-tresorerie";
 
 // ─── Environnement (.env à la racine) ────────────────────────────────────────
 const ICI = path.dirname(fileURLToPath(import.meta.url));
@@ -99,7 +109,7 @@ const DOSSIER = lire("dossier");
 const SUPPRIMER = lire("supprimer");
 const ROLLBACK = lire("rollback");
 
-const JOURNAUX_TRESORERIE = ["BQ", "CAI"];
+const JOURNAUX = [...JOURNAUX_TRESORERIE];
 const n = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
 const round2 = (x: number) => Math.round(x * 100) / 100;
 const fmt = (x: number) => x.toLocaleString("fr-MA", { minimumFractionDigits: 2 });
@@ -111,10 +121,6 @@ interface Ligne {
   reference_piece: string | null; lettrage_code: string | null;
   transaction_id: string | null; facture_id: string | null;
 }
-
-/** Clé d'ÉCRITURE : journal + date + libellé. C'est l'unité indivisible. */
-const cleEcriture = (l: Ligne) =>
-  `${l.journal_code}|${l.date_ecriture ?? ""}|${(l.libelle ?? "").trim()}`;
 
 async function equilibre(label: string) {
   const { data: dos } = await sb.from("dossiers").select("id,nom_societe");
@@ -157,28 +163,28 @@ async function main() {
   let totalSuspectes = 0, totalFaibles = 0, totalOk = 0;
 
   for (const d of (dossiers ?? []) as any[]) {
-    const [{ data: ecr }, { data: fc }, { data: ff }, { data: enc }, { data: tx }] = await Promise.all([
+    const [{ data: ecr }, { data: fc }, { data: ff }, { data: enc }, { data: pai }, { data: tx }] = await Promise.all([
       sb.from("ecritures_comptables")
         .select("id,dossier_id,journal_code,compte_numero,date_ecriture,libelle,debit,credit,reference_piece,lettrage_code,transaction_id,facture_id")
-        .eq("dossier_id", d.id).in("journal_code", JOURNAUX_TRESORERIE),
+        .eq("dossier_id", d.id).in("journal_code", JOURNAUX),
       sb.from("factures").select("id,numero,date_facture").eq("dossier_id", d.id),
       sb.from("factures_fournisseurs").select("id,numero,date_facture").eq("dossier_id", d.id),
       sb.from("encaissements").select("date_encaissement,montant").eq("dossier_id", d.id),
+      // Saisies manuelles FORMELLES — l'autre origine licite. Table livrée par
+      // migration manuelle : absente, la requête échoue et `pai` reste nul, ce
+      // qui ne fait que rendre l'audit plus strict, jamais plus laxiste.
+      sb.from("paiements").select("date_paiement,montant").eq("dossier_id", d.id),
       // `releve_id` non nul EXIGÉ : une transaction rattachée à aucun relevé est
       // elle-même une donnée orpheline, elle ne prouve rien.
-      sb.from("transactions_bancaires").select("date_operation,montant,releve_id")
+      sb.from("transactions_bancaires").select("id,date_operation,montant,releve_id")
         .eq("dossier_id", d.id).not("releve_id", "is", null),
     ]);
     const lignes = (ecr ?? []) as Ligne[];
     if (!lignes.length) continue;
 
-    // Index des preuves.
-    const refsFactures = new Set<string>();
     // Date de facture par code de lettrage → contrôle d'antériorité.
     const dateParFacture = new Map<string, string>();
     for (const f of [...((fc ?? []) as any[]), ...((ff ?? []) as any[])]) {
-      refsFactures.add(String(f.id));
-      if (f.numero) refsFactures.add(String(f.numero).trim());
       if (f.date_facture) {
         dateParFacture.set(String(f.id), String(f.date_facture).slice(0, 10));
         if (f.numero) dateParFacture.set(String(f.numero).trim(), String(f.date_facture).slice(0, 10));
@@ -194,27 +200,36 @@ async function main() {
       const ref = String(l.reference_piece ?? "").trim();
       if (l.lettrage_code && ref) factureDuCode.set(String(l.lettrage_code), ref);
     }
-    const cleMontantDate = (date: string, montant: number) => `${String(date).slice(0, 10)}|${round2(Math.abs(montant)).toFixed(2)}`;
-    const encSet = new Set(((enc ?? []) as any[]).map((e) => cleMontantDate(e.date_encaissement, n(e.montant))));
-    const txSet = new Set(((tx ?? []) as any[]).map((t) => cleMontantDate(t.date_operation, n(t.montant))));
+    // ── Index des DEUX origines licites (cf. src/lib/integrite-tresorerie.ts) ──
+    // 1. relevé validé : les ids de transactions à `releve_id` non nul ;
+    // 2. saisie manuelle formelle : `paiements` et `encaissements`, par date + montant.
+    const transactionsValidees = ((tx ?? []) as any[]).map((t) => String(t.id));
+    const piecesManuelles = [
+      ...((enc ?? []) as any[]).map((e) => clePiece(e.date_encaissement, n(e.montant))),
+      ...((pai ?? []) as any[]).map((p) => clePiece(p.date_paiement, n(p.montant))),
+    ];
+    // Transactions au relevé non estampillées sur l'écriture : preuve FAIBLE, la
+    // ligne existe bien mais le lien est perdu. À RELIER, pas à supprimer.
+    const txSet = new Set(((tx ?? []) as any[]).map((t) => clePiece(t.date_operation, n(t.montant))));
 
     // Regroupement par ÉCRITURE — c'est elle qu'on juge, pas la ligne.
     const groupes = new Map<string, Ligne[]>();
     for (const l of lignes) {
-      const c = cleEcriture(l);
+      const c = cleEcritureTresorerie(l);
       const g = groupes.get(c);
       if (g) g.push(l); else groupes.set(c, [l]);
     }
 
-    const suspectes: { cle: string; lignes: Ligne[]; montant: number; faible: boolean; antidate: string | null }[] = [];
+    const suspectes: { cle: string; lignes: Ligne[]; montant: number; faible: boolean; antidate: string | null; motif: string }[] = [];
     for (const [cle, groupe] of groupes) {
-      const preuve = groupe.some((l) =>
-        l.transaction_id
-        || l.facture_id
-        || (l.reference_piece && refsFactures.has(String(l.reference_piece).trim())));
+      // Une écriture est adossée dès qu'UNE de ses lignes l'est : l'estampille
+      // n'est posée que sur la contrepartie dans plusieurs chemins d'écriture.
+      const verdicts = groupe.map((l) => origineEcritureTresorerie(l, { transactionsValidees, piecesManuelles }));
+      const preuve = verdicts.some((v) => v.ok);
+      const motif = verdicts.find((v) => !v.ok)?.raison ?? "";
       const montant = round2(groupe.reduce((s, l) => s + Math.max(n(l.debit), n(l.credit)), 0) / groupe.length);
       const date = String(groupe[0].date_ecriture ?? "").slice(0, 10);
-      const k = cleMontantDate(date, montant);
+      const k = clePiece(date, montant);
 
       // Antériorité : un règlement ne peut pas précéder la facture qu'il solde.
       let antidate: string | null = null;
@@ -229,18 +244,23 @@ async function main() {
 
       // Une écriture ADOSSÉE reste suspecte si elle est antidatée : la preuve
       // dit « ce mouvement existe », pas « il est cohérent ».
-      if ((preuve || encSet.has(k)) && !antidate) { totalOk++; continue; }
+      if (preuve && !antidate) { totalOk++; continue; }
       const faible = txSet.has(k) && !antidate;
-      suspectes.push({ cle, lignes: groupe, montant, faible, antidate });
+      suspectes.push({ cle, lignes: groupe, montant, faible, antidate, motif });
       if (faible) totalFaibles++; else totalSuspectes++;
     }
 
     if (!suspectes.length) continue;
     console.log(`\n📁 ${d.nom_societe}`);
     for (const s of suspectes.sort((a, b) => Number(a.faible) - Number(b.faible))) {
-      const [j, date, lib] = s.cle.split("|");
+      const [j, date] = s.cle.split("|");
+      // Le libellé est lu sur la LIGNE, jamais sur la clé : celle-ci groupe
+      // désormais par référence de pièce, et les deux lignes d'un règlement ont
+      // des libellés différents.
+      const lib = String(s.lignes[0].libelle ?? "").trim();
       const ecart = round2(s.lignes.reduce((acc, l) => acc + n(l.debit) - n(l.credit), 0));
       console.log(`   ${s.faible ? "🟡 lien perdu " : "🔴 FICTIVE   "} ${j} ${date}  ${fmt(s.montant)} MAD  « ${lib.slice(0, 52)} »`);
+      if (s.motif && !s.faible) console.log(`        ↳ ${s.motif}`);
       if (s.antidate) console.log(`        ⛔ INCOHÉRENT : ${s.antidate}`);
       for (const l of s.lignes) {
         console.log(`        ${l.id}  ${String(l.compte_numero).padEnd(10)} D ${fmt(n(l.debit)).padStart(11)} C ${fmt(n(l.credit)).padStart(11)}` +
@@ -272,10 +292,27 @@ async function supprimer(cible: string, dossiers: any[]) {
 
   if (cible.startsWith("lettrage:")) {
     codeLettrage = cible.slice("lettrage:".length).trim();
-    const { data } = await sb.from("ecritures_comptables")
+    // PORTÉE PAR DOSSIER, IMPÉRATIVE. Les codes de lettrage sont attribués par
+    // dossier : « AA » désigne le premier lettrage de CHAQUE société. Sans ce
+    // filtre, `--supprimer=lettrage:AA` ramassait le règlement d'un autre
+    // dossier — un vrai paiement, adossé à sa pièce — et proposait de le
+    // supprimer. Le `--dossier=` de l'audit doit donc être repris ici.
+    let q = sb.from("ecritures_comptables")
       .select("id,dossier_id,journal_code,compte_numero,date_ecriture,libelle,debit,credit,reference_piece,lettrage_code,transaction_id,facture_id")
-      .eq("lettrage_code", codeLettrage).in("journal_code", JOURNAUX_TRESORERIE);
+      .eq("lettrage_code", codeLettrage).in("journal_code", JOURNAUX);
+    if (dossiers.length) q = q.in("dossier_id", dossiers.map((d) => d.id));
+    const { data } = await q;
     lignes = (data ?? []) as Ligne[];
+
+    // Même filtré, un code peut rester ambigu si `--dossier` matche plusieurs
+    // sociétés : on refuse plutôt que de choisir à la place de l'utilisateur.
+    const dossiersVises = [...new Set(lignes.map((l) => l.dossier_id))];
+    if (dossiersVises.length > 1) {
+      const noms = dossiersVises.map((id) => dossiers.find((d) => d.id === id)?.nom_societe ?? id);
+      console.error(`❌ Le code « ${codeLettrage} » existe sur ${dossiersVises.length} dossiers (${noms.join(", ")}).`);
+      console.error("   Précisez --dossier=\"…\", ou ciblez les lignes par id.");
+      process.exit(1);
+    }
   } else {
     const ids = cible.split(",").map((s) => s.trim()).filter(Boolean);
     const { data } = await sb.from("ecritures_comptables")
@@ -291,9 +328,9 @@ async function supprimer(cible: string, dossiers: any[]) {
   const dossierId = lignes[0].dossier_id;
   const { data: toutes } = await sb.from("ecritures_comptables")
     .select("id,dossier_id,journal_code,compte_numero,date_ecriture,libelle,debit,credit,reference_piece,lettrage_code,transaction_id,facture_id")
-    .eq("dossier_id", dossierId).in("journal_code", JOURNAUX_TRESORERIE);
-  const cles = new Set(lignes.map(cleEcriture));
-  const completes = ((toutes ?? []) as Ligne[]).filter((l) => cles.has(cleEcriture(l)));
+    .eq("dossier_id", dossierId).in("journal_code", JOURNAUX);
+  const cles = new Set(lignes.map(cleEcritureTresorerie));
+  const completes = ((toutes ?? []) as Ligne[]).filter((l) => cles.has(cleEcritureTresorerie(l)));
 
   const ajoutees = completes.length - lignes.length;
   if (ajoutees > 0) {

@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
 import { lettrerDossier } from "@/server/lettrage.functions";
 import { deriveCategorie, genererLignesBQ, PCM_MAP } from "@/lib/comptabilite-bq";
+import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/banque/$releveId")({
   component: ReleveDetailPage,
@@ -215,6 +216,9 @@ function ReleveDetailPage() {
         }
       }
 
+      // Origine « relevé » : ces écritures naissent des transactions de CE relevé,
+      // chacune estampillée de son transaction_id (cf. src/lib/integrite-tresorerie.ts).
+      assertEcrituresTresorerie(ecritures, { origine: "releve" });
       const { error: ecrErr } = await supabase.from("ecritures_comptables").insert(ecritures);
       if (ecrErr) throw ecrErr;
       const { error: txErr } = await (supabase.from("transactions_bancaires") as any)

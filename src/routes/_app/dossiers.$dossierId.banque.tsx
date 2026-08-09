@@ -21,6 +21,7 @@ import { extractRibMarocain } from "@/lib/releve-attijari";
 import { identifierBanque, identifierBanqueParNom, maskRib } from "@/lib/bank-identity";
 import { reconcilierPaiements } from "@/lib/paiements";
 import { imputationTresorerie } from "@/lib/comptes-tresorerie";
+import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
 import { controlerCoherenceReleve, resumerCoherence } from "@/lib/releve-coherence";
 import { encoderCanvasPourOcr, preparerImageBanquePourOcr, cumulerMesures, journaliserMesure, type MesureGrayscale } from "@/lib/bank-grayscale";
 import { BankLogo } from "@/components/BankLogo";
@@ -1390,15 +1391,25 @@ function BanquePage() {
     setSaving(true);
     try{
       const ecritures:any[]=[];
-      for(const tx of txExtraites){
+      for(const [i,tx] of txExtraites.entries()){
         const parts=tx.date_operation.split("/");
         const date=parts.length===3&&parts[2].length===4?`${parts[2]}-${parts[1]}-${parts[0]}`:tx.date_operation;
         const justif=tx.justificatif_id?justificatifs.find((j:any)=>j.id===tx.justificatif_id):null;
+        // Estampille de la ligne de relevé dont l'écriture découle. `txInsertedIds`
+        // est rempli à l'étape 1 dans l'ORDRE de `txExtraites` (txToInsert en est
+        // la projection), les index se correspondent donc. Sans elle, la clôture
+        // produisait des écritures de banque qu'aucun relevé ne justifiait — la
+        // fabrique même des écritures fantômes.
+        const transactionId=txInsertedIds[i]??null;
         for(const l of genererLignesBQ({libelle:tx.libelle,type:tx.type,montant:tx.montant,categorie:tx.categorie,compteComptable:tx.compte_comptable,factureLiee:!!tx.facture_id,justificatif:justif,dossier})){
-          ecritures.push({dossier_id:dossierId,journal_code:"BQ",compte_numero:l.compte,date_ecriture:date,libelle:l.libelle,debit:l.debit,credit:l.credit,reference_piece:tx.reference_facture||tx.reference,valide:true});
+          ecritures.push({dossier_id:dossierId,journal_code:"BQ",compte_numero:l.compte,date_ecriture:date,libelle:l.libelle,debit:l.debit,credit:l.credit,reference_piece:tx.reference_facture||tx.reference,valide:true,transaction_id:transactionId});
         }
       }
 
+      // RÈGLE D'INTÉGRITÉ Banque ⇄ Compta : origine « relevé ». Le lot est refusé
+      // EN ENTIER s'il manque une seule estampille — n'en insérer qu'une partie
+      // déséquilibrerait le journal.
+      assertEcrituresTresorerie(ecritures,{origine:"releve"});
       await supabase.from("ecritures_comptables").insert(ecritures);
 
       if(txInsertedIds.length){
@@ -1725,6 +1736,8 @@ function BanquePage() {
         }
       }
 
+      // Origine « relevé » : chaque ligne porte le transaction_id de sa transaction.
+      assertEcrituresTresorerie(ecritures, { origine: "releve" });
       await supabase.from("ecritures_comptables").insert(ecritures);
       await (supabase.from("transactions_bancaires") as any)
         .update({ statut: "cloture" })
@@ -1901,13 +1914,15 @@ function BanquePage() {
     if(!formEnc.montant||!formEnc.date_encaissement) return toast.error("Montant et date requis");
     setProcessing(true);
     try{
-      const{error}=await (supabase as any).from("encaissements").insert({
+      // L'encaissement est la PIÈCE : il est enregistré AVANT les écritures, et
+      // c'est son id qui les justifie au regard de la règle d'intégrité.
+      const{data:encInsere,error}=await (supabase as any).from("encaissements").insert({
         dossier_id:dossierId,type:formEnc.type,montant:formEnc.montant,
         date_encaissement:formEnc.date_encaissement,reference:formEnc.reference||null,
         numero_cheque:formEnc.numero_cheque||null,banque_cheque:formEnc.banque_cheque||null,
         libelle:formEnc.libelle||null,facture_id:formEnc.facture_id||null,
         facture_fournisseur_id:formEnc.facture_fournisseur_id||null,valide:true,
-      });
+      }).select("id").single();
       if(error) throw error;
       // Même référentiel que le bouton « Payer en espèces » : la caisse est en
       // rubrique 516 du PCM (51610000), PAS en 5143 qui est la Trésorerie
@@ -1924,10 +1939,14 @@ function BanquePage() {
       // recherche exacte. La référence saisie reste conservée sur l'encaissement.
       const factureId=formEnc.facture_id||null;
       const refPiece=formEnc.facture_id||formEnc.facture_fournisseur_id||formEnc.reference||null;
-      await supabase.from("ecritures_comptables").insert([
+      const ecrituresEnc=[
         {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteDebit,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||`Encaissement ${formEnc.type}`,debit:formEnc.montant,credit:0,facture_id:factureId,reference_piece:refPiece,valide:true},
         {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteContre,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||"Règlement",debit:0,credit:formEnc.montant,facture_id:factureId,reference_piece:refPiece,valide:true},
-      ]);
+      ];
+      // Origine « saisie manuelle formelle » — justifiée par l'encaissement
+      // qu'on vient d'insérer, dont l'id sert de pièce.
+      assertEcrituresTresorerie(ecrituresEnc,{origine:"saisie_manuelle",piece:encInsere?.id??refPiece});
+      await supabase.from("ecritures_comptables").insert(ecrituresEnc);
       // Imputation du règlement sur la facture. Deux corrections par rapport à l'ancien
       // code, qui posait `statut_paiement:'payee'` en dur :
       //  • les colonnes « Payé » / « Restant » de l'UI viennent de montant_paye /
