@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { actionsCycleTva, badgeCycleTva, etapeCycleTva } from "./cycle-tva";
+import {
+  actionsCycleTva, badgeCycleTva, estCreditTva, etapeCycleTva, soldeHistoriqueTva,
+} from "./cycle-tva";
 
 const dette = { neant: false, dette: true };
 const credit = { neant: false, dette: false };
@@ -20,7 +22,22 @@ describe("etapeCycleTva", () => {
   });
 
   it("saute le paiement sur un crédit de TVA : il n'y a rien à prélever", () => {
-    expect(etapeCycleTva({ liquidation: credit, declaree: true, resteAPayer: 0 })).toBe("a_pointer");
+    expect(etapeCycleTva({ liquidation: credit, declaree: true, resteAPayer: 0 })).toBe("a_justifier");
+  });
+
+  it("clôt un crédit de TVA sur le récépissé, sans attendre de pointage", () => {
+    const c = { liquidation: credit, declaree: true, resteAPayer: 0 };
+    expect(etapeCycleTva(c)).toBe("a_justifier");
+    expect(etapeCycleTva({ ...c, quittance: true })).toBe("liquidee");
+  });
+
+  // Le 4456 est CUMULATIF : un arriéré de janvier laisse un solde créditeur en
+  // février. Le lire comme l'échéance de février réclamerait un prélèvement que
+  // la période n'a pas engendré.
+  it("ne réclame pas de paiement sur un crédit dont le 4456 traîne une dette passée", () => {
+    expect(etapeCycleTva({ liquidation: credit, declaree: true, resteAPayer: 4200 })).toBe("a_justifier");
+    expect(etapeCycleTva({ liquidation: credit, declaree: true, resteAPayer: 4200, quittance: true }))
+      .toBe("liquidee");
   });
 
   it("ne tient pas un reliquat d'arrondi pour une dette", () => {
@@ -50,6 +67,31 @@ describe("badgeCycleTva", () => {
     expect(b.variant).toBe("default");
     expect(b.classe).toContain("emerald");
   });
+
+  it("ne dit pas « Payée » d'un crédit validé : rien n'a été prélevé", () => {
+    const b = badgeCycleTva({ liquidation: credit, declaree: true, resteAPayer: 0, quittance: true });
+    expect(b.label).toBe("Liquidée — crédit reporté");
+    expect(b.variant).toBe("default");
+    expect(b.classe).toContain("emerald");
+  });
+});
+
+describe("estCreditTva / soldeHistoriqueTva", () => {
+  it("lit le crédit sur la liquidation de la période, pas sur le solde du 4456", () => {
+    expect(estCreditTva({ liquidation: credit, declaree: true, resteAPayer: 4200 })).toBe(true);
+    expect(estCreditTva({ liquidation: dette, declaree: true, resteAPayer: -4200 })).toBe(false);
+    expect(estCreditTva({ liquidation: { neant: true } })).toBe(false);
+    expect(estCreditTva(null)).toBe(false);
+  });
+
+  it("isole l'arriéré des périodes antérieures sur une période en crédit", () => {
+    expect(soldeHistoriqueTva({ liquidation: credit, declaree: true, resteAPayer: 4200 })).toBe(4200);
+    expect(soldeHistoriqueTva({ liquidation: credit, declaree: true, resteAPayer: 0 })).toBe(0);
+    // 4456 débiteur : c'est le crédit lui-même, pas une dette héritée.
+    expect(soldeHistoriqueTva({ liquidation: credit, declaree: true, resteAPayer: -3000 })).toBe(0);
+    // Sur une période en dette, le reste dû se lit tel quel — rien à isoler.
+    expect(soldeHistoriqueTva({ liquidation: dette, declaree: true, resteAPayer: 7500 })).toBe(0);
+  });
 });
 
 describe("actionsCycleTva", () => {
@@ -73,6 +115,23 @@ describe("actionsCycleTva", () => {
     const a = actionsCycleTva({ liquidation: credit, declaree: true, resteAPayer: -3000, tracable: true });
     expect(a.pointer).toBe(false);
     expect(a.raisonPointageIndisponible).toMatch(/crédit de TVA reportable/);
+    expect(a.raisonPointageIndisponible).toMatch(/récépissé/);
+  });
+
+  it("n'ouvre pas le prélèvement sur un crédit, même si le 4456 traîne un arriéré", () => {
+    const a = actionsCycleTva({ liquidation: credit, declaree: true, resteAPayer: 4200, tracable: true });
+    expect(a.payer).toBe(false);
+    // La raison parle du crédit, pas d'un prélèvement à enregistrer.
+    expect(a.raisonPointageIndisponible).toMatch(/crédit de TVA reportable/);
+    expect(a.raisonPointageIndisponible).not.toMatch(/enregistrez le prélèvement/i);
+  });
+
+  it("dit qu'un crédit justifié est validé, sans jamais proposer de le pointer", () => {
+    const a = actionsCycleTva({
+      liquidation: credit, declaree: true, resteAPayer: 0, tracable: true, quittance: true,
+    });
+    expect(a.pointer).toBe(false);
+    expect(a.raisonPointageIndisponible).toMatch(/validée/);
   });
 
   it("refuse le pointage quand la migration de traçabilité manque", () => {

@@ -19,6 +19,14 @@
 // `src/lib/cycle-tva.ts` qui porte cet ordre, l'écran qui le peint, et le
 // serveur qui le fait respecter (cf. src/server/liquidation-tva.functions.ts).
 //
+// ─── Le cas du CRÉDIT DE TVA ─────────────────────────────────────────────────
+// Une période en crédit ne paie RIEN : l'étape de paiement y est sans objet, et
+// il n'existe aucune ligne bancaire à pointer. Elle se clôt sur pièces — l'OD de
+// liquidation, puis le récépissé SIMPL-TVA — et c'est ce que l'étape 4 constate.
+// Attention au piège : `resteAPayer` est le solde CUMULÉ du 4456. Sur une
+// période en crédit, ce qu'il en reste vient des périodes antérieures ; l'écran
+// le dit en texte secondaire au lieu de le présenter comme l'échéance du mois.
+//
 // ─── Pourquoi une modale, et pas un `confirm()` ──────────────────────────────
 // L'OD de liquidation touche trois comptes et n'est défaisable qu'à la main.
 // Avant de l'écrire, on montre EXACTEMENT ce qui va l'être — collectée,
@@ -46,7 +54,7 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
-  AlertCircle, CheckCircle, Download, FileCheck2, Loader2, Receipt, Upload, Wallet,
+  AlertCircle, CheckCircle, Download, FileCheck2, Loader2, MinusCircle, Receipt, Upload, Wallet,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -56,7 +64,9 @@ import {
   COMPTE_TVA_COLLECTEE, COMPTE_TVA_DEDUCTIBLE, COMPTE_TVA_DUE,
   bornesPeriode, referenceDeclaration,
 } from "@/lib/liquidation-tva";
-import { actionsCycleTva, badgeCycleTva, etapeCycleTva } from "@/lib/cycle-tva";
+import {
+  actionsCycleTva, badgeCycleTva, estCreditTva, etapeCycleTva, soldeHistoriqueTva,
+} from "@/lib/cycle-tva";
 
 const BUCKET_QUITTANCES = "quittances-tva";
 
@@ -371,9 +381,17 @@ export function VueDeclarationTva({
   const [openRecap, setOpenRecap] = useState(false);
   const liq = etat?.liquidation ?? null;
   const bornes = bornesPeriode(periode);
-  const etape = etapeCycleTva(etat);
-  const badge = badgeCycleTva(etat);
-  const actions = actionsCycleTva(etat);
+  // Le récépissé est ce qui clôt une période en crédit : la règle a besoin de
+  // savoir s'il est là. Le bucket fait foi (`quittance`), la trace en base n'est
+  // qu'un rattachement — voir l'en-tête du fichier.
+  const etatCycle = etat ? { ...etat, quittance: !!quittance || !!etat.quittancePath } : etat;
+  const etape = etapeCycleTva(etatCycle);
+  const badge = badgeCycleTva(etatCycle);
+  const actions = actionsCycleTva(etatCycle);
+  const credit = estCreditTva(etatCycle);
+  const soldeHistorique = soldeHistoriqueTva(etatCycle);
+  /** Fin de cycle : règlement pointé (dette) ou période justifiée (crédit). */
+  const validee = etape === "liquidee";
 
   const confirmer = () => { setOpenRecap(false); onDeclarer(); };
 
@@ -475,18 +493,29 @@ export function VueDeclarationTva({
                 )}
               />
 
+              {/* Sur un crédit de TVA, l'étape est SANS OBJET, pas « en attente » :
+                  aucun prélèvement n'est dû. Un arriéré antérieur peut laisser le
+                  4456 créditeur — il se dit en texte secondaire, jamais comme
+                  l'échéance de la période affichée. */}
               <Etape
                 numero={2}
                 titre="Paiement à la DGI"
-                fait={etat.declaree && etat.resteAPayer <= 0.005}
+                fait={!credit && etat.declaree && etat.resteAPayer <= 0.005}
+                neutre={credit && etat.declaree}
                 inactif={!etat.declaree}
                 detail={!etat.declaree
                   ? "Disponible une fois la liquidation générée."
-                  : etat.resteAPayer > 0.005
-                    ? `Reste ${fmt(etat.resteAPayer)} MAD au compte ${COMPTE_TVA_DUE}.`
-                    : liq && !liq.dette
-                      ? "Aucun paiement : la période dégage un crédit de TVA reportable."
+                  : credit
+                    ? "Aucun paiement requis pour cette période (Crédit de TVA reportable)."
+                    : etat.resteAPayer > 0.005
+                      ? `Reste ${fmt(etat.resteAPayer)} MAD au compte ${COMPTE_TVA_DUE}.`
                       : `Le compte ${COMPTE_TVA_DUE} est soldé : la TVA déclarée a bien été prélevée.`}
+                secondaire={soldeHistorique > 0.005 && (
+                  <>
+                    Reste un solde historique de <strong>{fmt(soldeHistorique)} MAD</strong> sur les
+                    périodes antérieures — il se règle depuis la période qui l'a constaté.
+                  </>
+                )}
                 action={actions.payer && (
                   <Button size="sm" variant="outline" onClick={onOuvrirPaiement}>
                     <Wallet className="h-4 w-4 mr-2" />Enregistrer le prélèvement
@@ -501,7 +530,9 @@ export function VueDeclarationTva({
                 inactif={!actions.quittance}
                 detail={quittance
                   ? `Pièce jointe : ${quittance.nom}`
-                  : "Le récépissé de télépaiement justifie le règlement de la taxe en cas de contrôle."}
+                  : credit
+                    ? "Le récépissé de dépôt SIMPL-TVA justifie la déclaration du crédit : sans prélèvement, c'est lui qui clôt la période."
+                    : "Le récépissé de télépaiement justifie le règlement de la taxe en cas de contrôle."}
               >
                 {actions.quittance && (
                   <ZoneQuittance
@@ -511,16 +542,22 @@ export function VueDeclarationTva({
                 )}
               </Etape>
 
+              {/* Un crédit n'a aucun règlement à rapprocher : la période se
+                  valide sur ses pièces — OD de liquidation + récépissé déposé. */}
               <Etape
                 numero={4}
-                titre="Pointage du règlement"
-                fait={!!etat.pointe}
-                inactif={!actions.pointer && !etat.pointe}
-                detail={etat.pointe
-                  ? `Règlement rapproché de la ligne bancaire de débit du ${COMPTE_TVA_DUE}`
-                    + (etat.pointeLe ? ` le ${String(etat.pointeLe).slice(0, 10)}.` : ".")
-                  : actions.raisonPointageIndisponible
-                    ?? `Cochez le rapprochement avec la ligne bancaire de débit du ${COMPTE_TVA_DUE} : le lettrage est interdit sur les comptes de TVA.`}
+                titre={credit ? "Validation de la période" : "Pointage du règlement"}
+                fait={validee}
+                inactif={!actions.pointer && !validee}
+                detail={credit
+                  ? validee
+                    ? `Période validée : l'OD ${referenceDeclaration(periode)} est comptabilisée et le récépissé SIMPL-TVA déposé. Aucun prélèvement n'est attendu.`
+                    : actions.raisonPointageIndisponible!
+                  : etat.pointe
+                    ? `Règlement rapproché de la ligne bancaire de débit du ${COMPTE_TVA_DUE}`
+                      + (etat.pointeLe ? ` le ${String(etat.pointeLe).slice(0, 10)}.` : ".")
+                    : actions.raisonPointageIndisponible
+                      ?? `Cochez le rapprochement avec la ligne bancaire de débit du ${COMPTE_TVA_DUE} : le lettrage est interdit sur les comptes de TVA.`}
                 action={(actions.pointer || etat.pointe) && (
                   <div className="flex items-center gap-2">
                     {pointage && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
@@ -743,9 +780,22 @@ function Chiffre({ label, valeur, couleur, gras }: {
   );
 }
 
-function Etape({ numero, titre, fait, inactif, detail, action, children }: {
-  numero: number; titre: string; fait: boolean; inactif?: boolean;
-  detail: string; action?: React.ReactNode; children?: React.ReactNode;
+/**
+ * Une étape du cycle.
+ *
+ * Trois états, et non deux : « fait », « en attente »… et SANS OBJET. Une étape
+ * qu'aucune action ne concernera jamais — le paiement d'une période en crédit de
+ * TVA — ne doit ressembler ni à une case cochée ni à un reste à faire ; les deux
+ * feraient chercher un geste qui n'existe pas.
+ *
+ * `secondaire` porte ce qui est vrai sans être l'objet de l'étape : typiquement
+ * un arriéré des périodes antérieures, à dire sans le confondre avec l'échéance
+ * de la période affichée.
+ */
+function Etape({ numero, titre, fait, neutre, inactif, detail, secondaire, action, children }: {
+  numero: number; titre: string; fait: boolean; neutre?: boolean; inactif?: boolean;
+  detail: string; secondaire?: React.ReactNode;
+  action?: React.ReactNode; children?: React.ReactNode;
 }) {
   return (
     <div className={`rounded-lg border p-3 ${inactif ? "opacity-60" : ""}`}>
@@ -753,14 +803,22 @@ function Etape({ numero, titre, fait, inactif, detail, action, children }: {
         <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold
           ${fait ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                  : "bg-muted text-muted-foreground"}`}>
-          {fait ? <CheckCircle className="h-4 w-4" /> : numero}
+          {fait ? <CheckCircle className="h-4 w-4" />
+            : neutre ? <MinusCircle className="h-4 w-4" />
+            : numero}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <p className="text-sm font-medium">{titre}</p>
-            {fait && <Badge variant="secondary" className="text-[10px]">fait</Badge>}
+            {fait ? <Badge variant="secondary" className="text-[10px]">fait</Badge>
+              : neutre ? (
+                <Badge variant="outline" className="text-[10px] text-muted-foreground">sans objet</Badge>
+              ) : null}
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">{detail}</p>
+          {secondaire && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-1">{secondaire}</p>
+          )}
         </div>
         {action && <div className="shrink-0">{action}</div>}
       </div>

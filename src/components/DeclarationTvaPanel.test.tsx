@@ -65,6 +65,20 @@ function monter(etat: Partial<EtatPeriode> = {}, quittance: Quittance | null = n
 /** État « déclarée et prélevée » : le point de départ du pointage. */
 const payee: Partial<EtatPeriode> = { declaree: true, resteAPayer: 0, bouclee: true };
 
+/** Liquidation en CRÉDIT de TVA : rien à payer, 3 000 MAD reportés. */
+const liquidationCredit = {
+  collectee: 1000, deductible: 4000, net: -3000, montant: 3000,
+  dette: false, neant: false, periode: "2026-03",
+};
+/** Période en crédit, déclarée : aucune échéance sur la période. */
+const enCredit: Partial<EtatPeriode> = {
+  declaree: true, resteAPayer: 0, bouclee: true, detailBouclage: null,
+  liquidation: liquidationCredit, creditReporte: 3000,
+};
+const recepisse: Quittance = {
+  nom: "DECL-TVA-2026-03.pdf", chemin: "d1/DECL-TVA-2026-03.pdf", traceEnBase: true,
+};
+
 // ─── Point 7 — Liquidation ───────────────────────────────────────────────────
 
 describe("Liquidation de la TVA (modale de confirmation)", () => {
@@ -101,12 +115,7 @@ describe("Liquidation de la TVA (modale de confirmation)", () => {
   });
 
   it("annonce un crédit de TVA au lieu d'une dette quand la déductible l'emporte", () => {
-    monter({
-      liquidation: {
-        collectee: 1000, deductible: 4000, net: -3000, montant: 3000,
-        dette: false, neant: false, periode: "2026-03",
-      },
-    });
+    monter({ liquidation: liquidationCredit });
     fireEvent.click(screen.getByRole("button", { name: /Déclarer la TVA/i }));
     const modale = screen.getByRole("dialog");
     expect(within(modale).getByText(/Crédit de TVA reportable \(4456\)/)).toBeDefined();
@@ -212,13 +221,7 @@ describe("Pointage du règlement DGI", () => {
   });
 
   it("ne propose pas de pointer un crédit de TVA : rien n'a été prélevé", () => {
-    monter({
-      declaree: true, resteAPayer: -3000,
-      liquidation: {
-        collectee: 1000, deductible: 4000, net: -3000, montant: 3000,
-        dette: false, neant: false, periode: "2026-03",
-      },
-    });
+    monter({ ...enCredit, resteAPayer: -3000 });
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.getByText(/Aucun prélèvement à pointer/i)).toBeDefined();
   });
@@ -227,6 +230,53 @@ describe("Pointage du règlement DGI", () => {
     monter({ ...payee, tracable: false });
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.getByText(/20260809130000/)).toBeDefined();
+  });
+});
+
+// ─── Période en CRÉDIT de TVA : étapes 2 (paiement) et 4 (validation) ────────
+// Une période en crédit ne paie rien. Deux fautes d'affichage la guettent :
+// présenter le prélèvement comme l'échéance du mois — alors que le 4456 est
+// CUMULÉ et ne porte qu'un arriéré antérieur — et laisser le cycle inachevé
+// faute d'un pointage qui n'aura jamais lieu.
+describe("Période en crédit de TVA", () => {
+  it("dit qu'aucun paiement n'est requis, sans proposer de prélèvement", () => {
+    monter(enCredit);
+    expect(screen.getByText(/Aucun paiement requis pour cette période \(Crédit de TVA reportable\)/))
+      .toBeDefined();
+    expect(screen.queryByRole("button", { name: /Enregistrer le prélèvement/i })).toBeNull();
+    // L'étape est sans objet — ni cochée « fait », ni en attente d'un geste.
+    expect(screen.getByText("sans objet")).toBeDefined();
+  });
+
+  it("relègue l'arriéré antérieur en texte secondaire au lieu d'en faire l'échéance", () => {
+    monter({ ...enCredit, resteAPayer: 4200, bouclee: false });
+    expect(screen.queryByRole("button", { name: /Enregistrer le prélèvement/i })).toBeNull();
+    expect(screen.queryByText(/Reste 4/)).toBeNull();
+
+    const ligne = screen.getByText(/Reste un solde historique/);
+    expect(ligne.textContent).toContain(mad(4200));
+    expect(ligne.textContent).toMatch(/périodes antérieures/);
+  });
+
+  it("valide la période dès l'OD générée et le récépissé déposé", () => {
+    monter(enCredit, recepisse);
+    expect(screen.getByText("Liquidée — crédit reporté")).toBeDefined();
+    expect(screen.getByText("Validation de la période")).toBeDefined();
+    expect(screen.getByText(/Période validée/)).toBeDefined();
+    // Toujours aucun interrupteur : il n'y a rien à rapprocher.
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("ne la déclare pas validée tant que le récépissé manque", () => {
+    monter(enCredit);
+    expect(screen.queryByText(/Période validée/)).toBeNull();
+    expect(screen.getByText("Crédit de TVA")).toBeDefined();
+    expect(screen.getByText(/déposez le récépissé SIMPL-TVA/i)).toBeDefined();
+  });
+
+  it("valide aussi sur la seule trace en base du récépissé", () => {
+    monter({ ...enCredit, quittancePath: "d1/DECL-TVA-2026-03.pdf" });
+    expect(screen.getByText(/Période validée/)).toBeDefined();
   });
 });
 

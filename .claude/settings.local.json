@@ -329,7 +329,8 @@
       "Bash(grep -n \"facture, error\\\\|const { data: facture\\\\|lignes_facture\\\\|factures_lignes\\\\|lignes\\\\b\" src/server/factures.functions.ts)",
       "Bash(perl -0pi -e 's/journal_code: \"VTE\", compte_numero: \"7111\",/journal_code: \"VTE\", compte_numero: compteVenteFacture,/g; s/journal_code: \"OD\",  compte_numero: \"7111\",/journal_code: \"OD\",  compte_numero: compteVenteFacture,/g' src/server/factures.functions.ts)",
       "Bash(perl -0pi -e ' *)",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "Bash(echo \"---exit $?\")"
     ]
   }
 }

@@ -17,6 +17,12 @@ const base: EtatPeriode = {
   pointe: false, pointeLe: null, tracable: true,
 };
 
+/** Liquidation en crédit : TVA nette à payer nulle, 3 000 MAD reportables. */
+const credit = {
+  collectee: 1000, deductible: 4000, net: -3000, montant: 3000,
+  dette: false, neant: false, periode: "2026-03",
+};
+
 const etats: [string, EtatPeriode, Quittance | null][] = [
   ["1 — À DÉCLARER (la TVA dort encore sur 44551 / 34552)", base, null],
   ["2 — À PAYER (OD générée, dette au 4456)", {
@@ -30,10 +36,19 @@ const etats: [string, EtatPeriode, Quittance | null][] = [
     ...base, declaree: true, resteAPayer: 0, bouclee: true, detailBouclage: null,
     pointe: true, pointeLe: "2026-04-28T09:12:00.000Z",
   }, { nom: "DECL-TVA-2026-03.pdf", chemin: "x/DECL-TVA-2026-03.pdf", traceEnBase: true }],
-  ["5 — CRÉDIT DE TVA (rien à payer)", {
-    ...base, declaree: true, resteAPayer: 0, bouclee: true, detailBouclage: null,
-    liquidation: { collectee: 1000, deductible: 4000, net: -3000, montant: 3000, dette: false, neant: false, periode: "2026-03" },
+  ["5 — CRÉDIT DE TVA (rien à payer, récépissé attendu)", {
+    ...base, declaree: true, resteAPayer: 0, bouclee: true, detailBouclage: null, creditReporte: 3000,
+    liquidation: credit,
   }, null],
+  ["5b — CRÉDIT DE TVA + ARRIÉRÉ ANTÉRIEUR sur le 4456 (texte secondaire)", {
+    ...base, declaree: true, resteAPayer: 4200, bouclee: false, creditReporte: 0,
+    detailBouclage: "Période non soldée au 2026-03-31 : 4456 = 4200.00 (TVA due non prélevée).",
+    liquidation: credit,
+  }, null],
+  ["5c — CRÉDIT DE TVA VALIDÉ (OD + récépissé déposé, aucun pointage)", {
+    ...base, declaree: true, resteAPayer: 0, bouclee: true, detailBouclage: null, creditReporte: 3000,
+    liquidation: credit,
+  }, { nom: "DECL-TVA-2026-03.pdf", chemin: "x/DECL-TVA-2026-03.pdf", traceEnBase: true }],
   ["6 — PÉRIODE NÉANT", {
     ...base, bouclee: true, detailBouclage: null,
     liquidation: { collectee: 0, deductible: 0, net: 0, montant: 0, dette: true, neant: true, periode: "2026-03" },
