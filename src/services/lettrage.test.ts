@@ -159,25 +159,38 @@ describe("sens du compte", () => {
 });
 
 describe("bascule de TVA au règlement", () => {
-  it("VENTE : débite l'attente 4458, crédite l'exigible 4455", () => {
+  // L'exigible est le SOUS-COMPTE réellement mouvementé par les journaux de vente
+  // et d'achat — 44551 / 34552 — et non la racine 4455 / 3455. Créditer la racine
+  // éclatait la TVA exigible sur deux comptes, dont un que la déclaration ignore.
+  it("VENTE : débite l'attente 4458, crédite l'exigible 44551", () => {
     const od = construireBasculeTva({
       sens: "client", montantTva: 200, date: "2026-04-01",
       reference: "FA-12", lettrageCode: "AA",
     });
     expect(od).toHaveLength(2);
     expect(od[0]).toMatchObject({ compte_numero: "4458", debit: 200, credit: 0, journal_code: "OD" });
-    expect(od[1]).toMatchObject({ compte_numero: "4455", debit: 0, credit: 200 });
+    expect(od[1]).toMatchObject({ compte_numero: "44551", debit: 0, credit: 200 });
     expect(od.every((l) => l.lettrage_code === "AA")).toBe(true);
-    expect(od[0].libelle).toMatch(/exigible sur encaissement/i);
+    // Libellé lisible : la nature, puis le numéro de pièce, séparés.
+    expect(od[0].libelle).toBe("TVA exigible - FA-12");
   });
 
-  it("ACHAT : débite l'exigible 3455, crédite l'attente 3458", () => {
+  it("ACHAT : débite l'exigible 34552, crédite l'attente 3458", () => {
     const od = construireBasculeTva({
       sens: "fournisseur", montantTva: 96.33, date: "2026-04-01", lettrageCode: "AB",
     });
-    expect(od[0]).toMatchObject({ compte_numero: "3455", debit: 96.33, credit: 0 });
+    expect(od[0]).toMatchObject({ compte_numero: "34552", debit: 96.33, credit: 0 });
     expect(od[1]).toMatchObject({ compte_numero: "3458", debit: 0, credit: 96.33 });
-    expect(od[0].libelle).toMatch(/déductible sur décaissement/i);
+    expect(od[0].libelle).toBe("TVA déductible");
+  });
+
+  it("trace la facture et le règlement en base", () => {
+    const od = construireBasculeTva({
+      sens: "client", montantTva: 200, date: "2026-04-01", reference: "FAC-2026-001",
+      lettrageCode: "AA", factureId: "f-1", paiementId: "p-1",
+    });
+    expect(od.every((l) => l.facture_id === "f-1" && l.paiement_id === "p-1")).toBe(true);
+    expect(od[0].libelle).toBe("TVA exigible - FAC-2026-001");
   });
 
   it("l'OD de bascule est équilibrée", () => {
@@ -237,7 +250,7 @@ describe("planifierLettrage", () => {
     expect(p.code).toBe("AB");
     expect(p.sens).toBe("client");
     expect(p.ligneIds).toHaveLength(2);
-    expect(p.od.map((l) => l.compte_numero)).toEqual(["4458", "4455"]);
+    expect(p.od.map((l) => l.compte_numero)).toEqual(["4458", "44551"]);
     expect(p.montantLettre).toBe(1200);
   });
 
@@ -261,15 +274,39 @@ describe("planifierLettrage", () => {
     expect(p.raison).toMatch(/déjà lettrée/);
   });
 
-  it("lettre sans basculer la TVA hors compte de tiers", () => {
+  // Le lettrage est RÉSERVÉ AUX COMPTES DE TIERS. Il était auparavant accepté
+  // « sans bascule » sur n'importe quel compte, ce qui laissait rapprocher des
+  // lignes de banque ou de TVA — un appariement qui ne veut rien dire et qui
+  // masquait des lignes de TVA aux yeux de la déclaration.
+  it("REFUSE de lettrer un compte de trésorerie", () => {
     const p = planifierLettrage({
       lignes: [ligne({ compte_numero: "5141", debit: 800 }), ligne({ compte_numero: "5141", credit: 800 })],
       codesExistants: [], piece,
     });
-    expect(p.ok).toBe(true);
-    expect(p.sens).toBeNull();
+    expect(p.ok).toBe(false);
     expect(p.od).toEqual([]);
-    expect(p.raison).toMatch(/sans bascule/);
+    expect(p.raison).toMatch(/réservé aux comptes de tiers/i);
+  });
+
+  it("REFUSE de lettrer un compte de TVA, 4456 compris", () => {
+    for (const compte of ["4458", "44551", "3458", "34552", "4456"]) {
+      const p = planifierLettrage({
+        lignes: [ligne({ compte_numero: compte, debit: 800 }), ligne({ compte_numero: compte, credit: 800 })],
+        codesExistants: [], piece,
+      });
+      expect(p.ok).toBe(false);
+      expect(p.raison).toMatch(/interdit sur le compte de TVA/i);
+    }
+  });
+
+  it("accepte les comptes de tiers, collectif comme auxiliaire", () => {
+    for (const compte of ["3421", "34210002", "4411", "44110005"]) {
+      const p = planifierLettrage({
+        lignes: [ligne({ compte_numero: compte, debit: 800 }), ligne({ compte_numero: compte, credit: 800 })],
+        codesExistants: [],
+      });
+      expect(p.ok).toBe(true);
+    }
   });
 
   it("lettre sans OD quand aucune pièce n'est fournie", () => {

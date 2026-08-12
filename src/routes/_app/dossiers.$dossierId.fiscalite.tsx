@@ -26,8 +26,19 @@ import {
   ligneVersCellules, totauxReleveDeductions,
 } from "@/lib/releve-deductions";
 import { indexerModesPaiement } from "@/lib/mode-paiement";
+import { DeclarationTvaPanel } from "@/components/DeclarationTvaPanel";
 
-export const Route = createFileRoute("/_app/dossiers/$dossierId/fiscalite")({ component: FiscalitePage });
+// `?tab=declaration&periode=AAAA-MM` : le dashboard envoie ici depuis « Déclarer
+// la TVA », sur la période dont il vient d'afficher l'échéance. Sans ces deux
+// paramètres, l'utilisateur retomberait sur l'onglet TVA et devrait retrouver
+// lui-même la période — soit exactement le pas de côté que le bouton évite.
+export const Route = createFileRoute("/_app/dossiers/$dossierId/fiscalite")({
+  component: FiscalitePage,
+  validateSearch: (s: Record<string, unknown>): { tab?: string; periode?: string } => ({
+    tab: typeof s.tab === "string" ? s.tab : undefined,
+    periode: typeof s.periode === "string" ? s.periode : undefined,
+  }),
+});
 
 const fmt = (n: number) => Number(n).toLocaleString("fr-MA", { minimumFractionDigits: 2 });
 const fmtMAD = (n: number) => fmt(n) + " MAD";
@@ -35,12 +46,13 @@ const pourcent = (t: number) => `${(t * 100).toLocaleString("fr-MA", { maximumFr
 
 function FiscalitePage() {
   const { dossierId } = Route.useParams();
+  const recherche = Route.useSearch();
   const [ecritures, setEcritures] = useState<any[]>([]);
   const [ventes, setVentes] = useState<any[]>([]);
   const [achats, setAchats] = useState<any[]>([]);
   const [paiements, setPaiements] = useState<any[]>([]);
   const [dossier, setDossier] = useState<any>(null);
-  const [tab, setTab] = useState("tva");
+  const [tab, setTab] = useState(recherche.tab ?? "tva");
   const [periodeTVA, setPeriodeTVA] = useState("all");
   const [exercice, setExercice] = useState(new Date().getFullYear().toString());
 
@@ -372,6 +384,12 @@ function FiscalitePage() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="tva">TVA</TabsTrigger>
+          {/* La TVA se lit dans deux onglets parce que ce sont deux gestes
+              différents : « TVA » MESURE la position fiscale à partir des
+              factures ; « Déclaration » la COMPTABILISE (OD de liquidation,
+              prélèvement DGI, quittance). Les fondre en un seul écran mélangeait
+              un tableau de bord et un journal d'écritures. */}
+          <TabsTrigger value="declaration">Déclaration &amp; paiement</TabsTrigger>
           <TabsTrigger value="is">IS</TabsTrigger>
           <TabsTrigger value="calendrier">Calendrier fiscal</TabsTrigger>
           <TabsTrigger value="tp">Taxe Professionnelle</TabsTrigger>
@@ -504,6 +522,11 @@ function FiscalitePage() {
               </Table>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ── Déclaration & paiement SIMPL-TVA ── */}
+        <TabsContent value="declaration" className="mt-4">
+          <DeclarationTvaPanel dossierId={dossierId} exercice={exercice} periodeInitiale={recherche.periode} />
         </TabsContent>
 
         {/* ── IS ── */}

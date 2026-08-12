@@ -20,6 +20,8 @@ import {
   COMPTE_CLIENTS, encoursTiersGrandLivre, projeterSituationFacture, situationDivergente,
   situationFactureGrandLivre, soldeBancaireAffiche,
 } from "./src/lib/encours-grandlivre.ts";
+import { compteLettrable } from "./src/services/lettrage.ts";
+import { controlerPiece } from "./src/lib/liquidation-tva.ts";
 
 const env = Object.fromEntries(
   fs.readFileSync(new URL(".env", import.meta.url), "utf8")
@@ -137,6 +139,48 @@ for (const d of dossiers ?? []) {
   }
   if (divergentes) ko(`${divergentes}/${examinees} facture(s) divergent(es) du grand livre`);
   else ok(`${examinees} facture(s) comptabilisée(s), toutes en accord avec la comptabilité`);
+
+  // ── 6. TVA : un seul compte par nature, aucun régime mixte ─────────────────
+  // La bascule au règlement créditait 4455 alors que la facture créditait 44551 :
+  // la TVA exigible s'éclatait sur deux comptes, dont un que la déclaration
+  // ignore. Les racines 4455 / 3455 ne doivent plus rien porter en propre.
+  const surCompteExact = (c) => lignes.filter((l) => String(l.compte_numero ?? "").trim() === c);
+  const orphelines = [];
+  for (const racine of ["4455", "3455"]) {
+    const s = r2(surCompteExact(racine).reduce((acc, l) => acc + n(l.debit) - n(l.credit), 0));
+    if (Math.abs(s) > 0.005) orphelines.push(`${racine} = ${fmt(s)} (à reclasser sur ${racine === "4455" ? "44551" : "34552"})`);
+  }
+  if (orphelines.length) ko(`TVA éclatée sur les racines : ${orphelines.join(", ")}`);
+  else ok("TVA sur un seul compte par nature (44551 / 34552), aucun régime mixte");
+
+  // ── 7. Lettrage : aucun compte de TVA lettré ──────────────────────────────
+  const tvaLettrees = lignes.filter((l) =>
+    String(l.lettrage_code ?? "").trim()
+    && String(l.journal_code ?? "").toUpperCase() !== "OD"
+    && !compteLettrable(l.compte_numero).ok);
+  if (tvaLettrees.length) {
+    ko(`${tvaLettrees.length} ligne(s) lettrée(s) hors comptes de tiers`);
+    for (const l of tvaLettrees.slice(0, 5)) console.log(`        ${l.journal_code} ${l.compte_numero} [${l.lettrage_code}]`);
+  } else {
+    ok("lettrage réservé aux comptes de tiers (3421x / 4411x)");
+  }
+
+  // ── 8. Équilibre de CHAQUE pièce, pas seulement du grand livre ────────────
+  // Un dossier peut être globalement équilibré alors que deux pièces se
+  // compensent : c'est l'écart qu'on ne retrouve jamais.
+  const parPiece = new Map();
+  for (const l of lignes) {
+    const cle = `${l.journal_code}|${String(l.date_ecriture ?? "").slice(0, 10)}|${String(l.reference_piece ?? "").trim()}`;
+    parPiece.set(cle, [...(parPiece.get(cle) ?? []), l]);
+  }
+  const boiteuses = [...parPiece.entries()].filter(([, ls]) => !controlerPiece(ls).ok);
+  if (boiteuses.length) {
+    // Informatif : une pièce peut être répartie sur plusieurs références (OD de
+    // reclassement, écritures d'import). On signale sans faire échouer.
+    console.log(`   ⚠️  ${boiteuses.length} pièce(s) non soldées prises isolément (regroupement par réf. — à vérifier si le total du dossier est déséquilibré)`);
+  } else {
+    ok(`${parPiece.size} pièce(s) équilibrées une à une`);
+  }
 }
 
 console.log("\n" + "─".repeat(72));

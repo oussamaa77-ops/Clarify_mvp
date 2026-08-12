@@ -324,7 +324,12 @@
       "Bash(perl -pi -e 's/colSpan=\\\\{12\\\\}/colSpan={13}/g' src/components/FacturesClientsPanel.tsx)",
       "Bash(perl -pi -e 's/colSpan=\\\\{11\\\\}/colSpan={12}/g' 'src/routes/_app/dossiers.$dossierId.fournisseurs.tsx')",
       "Bash(perl -pi -e 's/colSpan=\\\\{9\\\\}/colSpan={10}/g' 'src/routes/_app/dossiers.$dossierId.fournisseurs.tsx')",
-      "Bash(grep -E 'integrite-tresorerie|encours-grandlivre|factures-gl|relevescanner|dossiers.\\\\$dossierId.banque|dashboard|lettrage-compta|lib/paiements|factures.functions')"
+      "Bash(grep -E 'integrite-tresorerie|encours-grandlivre|factures-gl|relevescanner|dossiers.\\\\$dossierId.banque|dashboard|lettrage-compta|lib/paiements|factures.functions')",
+      "Bash(awk '/^export async function executerLettrage/,/^\\\\/\\\\*\\\\* Porte d.entrée HTTP du lettrage/' src/server/lettrage-compta.functions.ts)",
+      "Bash(grep -n \"facture, error\\\\|const { data: facture\\\\|lignes_facture\\\\|factures_lignes\\\\|lignes\\\\b\" src/server/factures.functions.ts)",
+      "Bash(perl -0pi -e 's/journal_code: \"VTE\", compte_numero: \"7111\",/journal_code: \"VTE\", compte_numero: compteVenteFacture,/g; s/journal_code: \"OD\",  compte_numero: \"7111\",/journal_code: \"OD\",  compte_numero: compteVenteFacture,/g' src/server/factures.functions.ts)",
+      "Bash(perl -0pi -e ' *)",
+      "Bash(git log *)"
     ]
   }
 }

@@ -32,6 +32,7 @@ import { logUsage, logUsageBatch, estimerCoutIA } from "./analytics.functions";
 import { guardScan, libererScan } from "./billing";
 import { enregistrerPaiement } from "@/lib/paiements";
 import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
+import { compteVente } from "@/lib/compte-vente";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -603,8 +604,10 @@ export const generateFactureXml = createServerFn({ method: "POST" })
     const supabase = getSupabase();
     const { data: facture, error: fErr } = await supabase
       .from("factures")
+      // `secteur_activite` sert au choix du compte de produit (7111 marchandises
+      // / 7124 services) quand les désignations ne tranchent pas.
       .select(
-        "*, clients(nom,ice,if_fiscal,adresse,email), dossiers(nom_societe,ice,if_fiscal,adresse)"
+        "*, clients(nom,ice,if_fiscal,adresse,email), dossiers(nom_societe,ice,if_fiscal,adresse,secteur_activite)"
       )
       .eq("id", data.facture_id)
       .single();
@@ -740,6 +743,17 @@ ${lignesXml}
         : { data: null as any };
       const compteClient = compteTiersAuxiliaire("client", cliRow?.code_auxiliaire ?? null);
       const typeFacture = (facture as any).type ?? "facture";
+
+      // Compte de PRODUIT : 7111 marchandises, 7121 biens produits, 7124 services.
+      // Le journal des ventes écrivait 7111 en dur, si bien qu'une société de
+      // services logeait ses honoraires en ventes de marchandises et présentait
+      // un compte de résultat de négociant. Les désignations des lignes priment,
+      // le secteur du dossier tranche à défaut (cf. src/lib/compte-vente.ts).
+      const { compte: compteVenteFacture } = compteVente({
+        nature: (facture as any).nature_vente ?? null,
+        designations: lignes.map((l) => l.designation),
+        secteur: (facture as any).dossiers?.secteur_activite ?? null,
+      });
       if (typeFacture === "acompte") {
         await supabase.from("ecritures_comptables").insert([
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Acompte ${ref}`,     debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
@@ -749,15 +763,15 @@ ${lignesXml}
       } else if (typeFacture === "solde") {
         await supabase.from("ecritures_comptables").insert([
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Solde ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteVenteFacture,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA en attente ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: "4191",  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: Number(facture.montant_ht), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: compteVenteFacture,  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
         ]);
       } else {
         await supabase.from("ecritures_comptables").insert([
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "7111",  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
+          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteVenteFacture,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
           { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA en attente ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
         ]);
       }

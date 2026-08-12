@@ -103,7 +103,7 @@ describe("comptabiliserReglement — lettrage au règlement total", () => {
     expect(vte!.lettrage_origine).toBe("auto");
   });
 
-  it("rend la TVA exigible : 4458 soldé, 4455 crédité de 200", async () => {
+  it("rend la TVA exigible : 4458 soldé, 44551 crédité de 200", async () => {
     const sb = fakeSb([...factureVente(), reglementClient(1200)]);
     const r = await comptabiliserReglement(sb, {
       dossierId: "D1", compte: "34210001", references: ["FA-1"],
@@ -112,7 +112,7 @@ describe("comptabiliserReglement — lettrage au règlement total", () => {
 
     expect(r.tvaBasculee).toBeCloseTo(200, 2);
     expect(solde(sb, "4458")).toBeCloseTo(0, 2);     // attente vidée
-    expect(solde(sb, "4455")).toBeCloseTo(-200, 2);  // exigible au crédit
+    expect(solde(sb, "44551")).toBeCloseTo(-200, 2);  // exigible au crédit
     // L'OD de bascule porte le code du lettrage : délettrer la défera.
     const od = sb.rows.filter((l: Ecriture) => l.journal_code === "OD");
     expect(od).toHaveLength(2);
@@ -190,7 +190,7 @@ describe("comptabiliserReglement — règlement PARTIEL", () => {
     // 4458 est CRÉDITÉ de 200 à la facture puis débité de 100 : solde signé −100,
     // soit 100 encore en attente au crédit.
     expect(solde(sb, "4458")).toBeCloseTo(-100, 2);
-    expect(solde(sb, "4455")).toBeCloseTo(-100, 2);
+    expect(solde(sb, "44551")).toBeCloseTo(-100, 2);
   });
 
   it("l'OD d'un acompte ne porte AUCUN code — elle n'appartient à aucun lettrage", async () => {
@@ -219,7 +219,7 @@ describe("comptabiliserReglement — règlement PARTIEL", () => {
     expect(a.tvaBasculee).toBeCloseTo(100, 2);
     expect(b.tvaBasculee).toBeCloseTo(100, 2);
     expect(solde(sb, "4458")).toBeCloseTo(0, 2);
-    expect(solde(sb, "4455")).toBeCloseTo(-200, 2);
+    expect(solde(sb, "44551")).toBeCloseTo(-200, 2);
     // Le second versement solde la pièce : le lettrage devient possible et
     // emporte la facture ET les deux acomptes.
     expect(b.lettre).toBe(true);
@@ -267,8 +267,11 @@ describe("comptabiliserReglement — TVA mise en attente par un RECLASSEMENT", (
     expect(r.lettre).toBe(true);
     expect(r.tvaBasculee).toBeCloseTo(1880, 2);
     expect(solde(sb, "4458")).toBeCloseTo(0, 2);      // attente soldée
-    expect(solde(sb, "44551")).toBeCloseTo(0, 2);     // 1880 D (reclass) − 1880 C (vente)
-    expect(solde(sb, "4455")).toBeCloseTo(-1880, 2);  // exigible
+    expect(solde(sb, "4455")).toBeCloseTo(0, 2);      // la racine ne reçoit plus rien
+    // 1880 C (vente) + 1880 D (reclassement) + 1880 C (bascule) = 1880 au CRÉDIT :
+    // la TVA exigible revient sur le compte MÊME que celui de la facture, au lieu
+    // de s'échouer sur la racine 4455 que la déclaration ne regarde pas.
+    expect(solde(sb, "44551")).toBeCloseTo(-1880, 2);
   });
 
   it("un acompte bascule sa quote-part de la TVA reclassée", async () => {
@@ -315,7 +318,8 @@ describe("comptabiliserReglement — achats (sens fournisseur)", () => {
     expect(r.lettre).toBe(true);
     expect(r.tvaBasculee).toBeCloseTo(200, 2);
     expect(solde(sb, "3458")).toBeCloseTo(0, 2);
-    expect(solde(sb, "3455")).toBeCloseTo(200, 2);   // déductible, au débit
+    expect(solde(sb, "3455")).toBeCloseTo(0, 2);      // la racine ne reçoit plus rien
+    expect(solde(sb, "34552")).toBeCloseTo(200, 2);   // déductible, au débit
   });
 });
 

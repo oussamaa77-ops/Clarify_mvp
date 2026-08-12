@@ -19,6 +19,55 @@ import {
   type LigneLettrable, type SensTiers,
 } from "@/services/lettrage";
 import { synchroniserApresLettrage } from "./factures-gl.functions";
+import { controlerPiece } from "@/lib/liquidation-tva";
+
+/**
+ * Insère une pièce d'OD construite par le moteur, en dégradant proprement.
+ *
+ * `paiement_id` est livré par la migration 20260809130000, appliquée à la main
+ * dans Supabase (cf. mémoire migrations-manuelles-supabase). Tant qu'elle ne
+ * l'est pas, la colonne n'existe pas et l'insert entier échouerait — la TVA ne
+ * basculerait plus du tout. On réessaie donc SANS la colonne : la traçabilité
+ * fine est perdue, la comptabilité reste juste. C'est le bon ordre de priorité.
+ */
+async function insererPiece(
+  sb: any,
+  dossierId: string,
+  lignes: { journal_code: string; compte_numero: string; date_ecriture: string; libelle: string;
+    debit: number; credit: number; reference_piece: string | null;
+    facture_id?: string | null; paiement_id?: string | null }[],
+  opts: { lettrageCode?: string | null; origine?: string } = {},
+): Promise<{ error: string | null }> {
+  const base = lignes.map((l) => ({
+    dossier_id: dossierId,
+    journal_code: l.journal_code,
+    compte_numero: l.compte_numero,
+    date_ecriture: l.date_ecriture,
+    libelle: l.libelle,
+    debit: l.debit,
+    credit: l.credit,
+    reference_piece: l.reference_piece,
+    facture_id: l.facture_id ?? null,
+    // Chaîne vide → NULL : une OD hors lettrage ne doit pas porter de code
+    // fantôme, que l'écran de lettrage afficherait comme un rapprochement.
+    lettrage_code: opts.lettrageCode || null,
+    lettrage_date: opts.lettrageCode ? new Date().toISOString() : null,
+    lettrage_origine: opts.lettrageCode ? (opts.origine ?? "auto") : null,
+    valide: true,
+  }));
+
+  const avecPaiement = base.map((r, i) => ({ ...r, paiement_id: lignes[i].paiement_id ?? null }));
+  const { error } = await sb.from("ecritures_comptables").insert(avecPaiement);
+  if (!error) return { error: null };
+
+  // Colonne absente (42703 / message nommant la colonne) → repli sans elle.
+  const msg = String(error.message ?? "");
+  if (error.code === "42703" || msg.includes("paiement_id")) {
+    const { error: e2 } = await sb.from("ecritures_comptables").insert(base);
+    return { error: e2 ? String(e2.message ?? e2) : null };
+  }
+  return { error: msg || "Insertion refusée" };
+}
 
 // Le proxy TLS d'entreprise fait échouer le `fetch` global côté serveur : sans
 // ce repli undici, supabase-js rend des erreurs réseau opaques et le lettrage
@@ -45,8 +94,10 @@ function getSupabase() {
 }
 
 /** Colonnes nécessaires au lettrage — une seule définition, réutilisée partout. */
+// `facture_id` est chargé pour tracer l'OD de bascule sur la facture dont la TVA
+// devient exigible (cf. `LigneOD.facture_id`).
 const COLS_LETTRAGE =
-  "id,compte_numero,libelle,debit,credit,date_ecriture,reference_piece,journal_code,lettrage_code,lettrage_date,lettrage_origine";
+  "id,compte_numero,libelle,debit,credit,date_ecriture,reference_piece,journal_code,lettrage_code,lettrage_date,lettrage_origine,facture_id";
 
 const nb = (v: unknown) => {
   const x = Number(v);
@@ -190,6 +241,8 @@ export async function basculerTvaSurReglement(
     dossierId: string; reference: string; sens: SensTiers;
     montantRegle: number; date: string;
     lettrageCode?: string | null; origine?: "auto" | "manuel";
+    /** Traçabilité en base de l'OD produite (cf. `LigneOD`). */
+    factureId?: string | null; paiementId?: string | null;
   },
 ): Promise<BasculeTva> {
   const { tvaAttente, tvaTotale, ttcPiece } =
@@ -207,28 +260,21 @@ export async function basculerTvaSurReglement(
   const od = construireBasculeTva({
     sens: p.sens, montantTva: aBasculer, date: p.date,
     reference: p.reference, lettrageCode: p.lettrageCode ?? "",
+    factureId: p.factureId ?? null, paiementId: p.paiementId ?? null,
   });
   if (!od.length) return { tva: 0, od: 0 };
 
-  const { error } = await (sb as any).from("ecritures_comptables").insert(
-    od.map((l) => ({
-      dossier_id: p.dossierId,
-      journal_code: l.journal_code,
-      compte_numero: l.compte_numero,
-      date_ecriture: l.date_ecriture,
-      libelle: l.libelle,
-      debit: l.debit,
-      credit: l.credit,
-      reference_piece: l.reference_piece,
-      // Chaîne vide → NULL : une OD hors lettrage ne doit pas porter de code
-      // fantôme, que l'écran de lettrage afficherait comme un rapprochement.
-      lettrage_code: p.lettrageCode || null,
-      lettrage_date: new Date().toISOString(),
-      lettrage_origine: p.origine ?? "auto",
-      valide: true,
-    })),
-  );
-  if (error) return { tva: 0, od: 0, error: error.message };
+  // INVARIANT : toute pièce générée est équilibrée. Le contrôle est ici, juste
+  // avant l'insertion — une OD boiteuse insérée ne se voit plus qu'à la balance,
+  // des semaines plus tard, sans qu'on sache d'où vient l'écart.
+  const ctrl = controlerPiece(od);
+  if (!ctrl.ok) return { tva: 0, od: 0, error: ctrl.raison ?? "Pièce déséquilibrée" };
+
+  const { error } = await insererPiece(sb, p.dossierId, od, {
+    lettrageCode: p.lettrageCode || null,
+    origine: p.origine ?? "auto",
+  });
+  if (error) return { tva: 0, od: 0, error };
   return { tva: aBasculer, od: od.length };
 }
 
@@ -259,6 +305,8 @@ export interface EntreeLettrage {
    * date de règlement n'est saisie).
    */
   dateReglement?: string | null;
+  /** Règlement déclencheur, tracé sur l'OD de bascule (`ecritures_comptables.paiement_id`). */
+  paiementId?: string | null;
 }
 
 /**
@@ -273,7 +321,10 @@ export interface EntreeLettrage {
  */
 export async function executerLettrage(
   sb: any,
-  data: Omit<Required<EntreeLettrage>, "dateReglement"> & { dateReglement?: string | null },
+  // `dateReglement` et `paiementId` restent OPTIONNELS : le lettrage manuel depuis
+  // l'écran comptable ne connaît ni l'un ni l'autre.
+  data: Omit<Required<EntreeLettrage>, "dateReglement" | "paiementId">
+    & { dateReglement?: string | null; paiementId?: string | null },
 ): Promise<ResultatLettrage> {
     // 1) Relire les lignes EN BASE plutôt que de faire confiance au client :
     // un montant falsifié côté navigateur produirait un lettrage déséquilibré.
@@ -349,10 +400,18 @@ export async function executerLettrage(
           .reduce((s, l) => s + (sens === "client" ? nb(l.debit) : nb(l.credit)), 0);
         if (montantSolde <= 0.005) continue;   // aucune ligne de facture de cette pièce ici
 
+        // Traçabilité : la facture est celle qu'estampillent les lignes de CETTE
+        // référence. On la lit sur les lignes plutôt que de la demander à
+        // l'appelant — le lettrage manuel ne la connaît pas.
+        const factureId = lignes
+          .filter((l) => String(l.reference_piece ?? "").trim() === ref)
+          .map((l) => (l as any).facture_id).find(Boolean) ?? null;
+
         const r = await basculerTvaSurReglement(sb, {
           dossierId: data.dossierId, reference: ref, sens,
           montantRegle: montantSolde, date: dateTva,
           lettrageCode: plan.code, origine: data.origine,
+          factureId, paiementId: data.paiementId ?? null,
         });
         if (r.error) {
           await annulerEstampillage();
@@ -551,7 +610,7 @@ export async function executerLettrageAuto(
 //      et poser le MÊME code sur les deux. Sans cela, la facture réglée reste un
 //      poste ouvert : elle continue d'alimenter la balance âgée et les relances.
 //
-//   2. TVA — rendre la TVA exigible (4458 → 4455 en vente, 3458 → 3455 en achat)
+//   2. TVA — rendre la TVA exigible (4458 → 44551 en vente, 3458 → 34552 en achat)
 //      IMMÉDIATEMENT, que le lettrage ait pu se faire ou non. Un règlement
 //      partiel n'est pas lettrable (un lettrage doit être équilibré) mais il est
 //      bel et bien encaissé : sa quote-part de TVA est due le jour même.

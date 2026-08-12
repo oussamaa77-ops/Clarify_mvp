@@ -45,15 +45,46 @@ export const TOLERANCE_LETTRAGE = 0.005;
 // Clés = le SENS DU TIERS (et non « vente »/« achat ») : c'est le compte lettré
 // qui désigne le couple, et l'indexer directement par `sens` supprime toute
 // possibilité de désaccord entre les deux vocabulaires.
+// Les comptes d'IMPUTATION sont les SOUS-COMPTES réellement mouvementés par les
+// journaux de vente et d'achat — 44551 « TVA facturée » et 34552 « TVA récupérable
+// sur charges » — et non leurs racines 4455 / 3455.
+//
+// C'était le défaut le plus coûteux de ce module : la facture créditait 44551, le
+// reclassement débitait 44551, mais la bascule au règlement créditait 4455. La TVA
+// exigible se retrouvait donc ÉCLATÉE sur deux comptes, dont un que la déclaration
+// ne regarde pas — 1 880,00 MAD échoués sur 4455 et 240,00 sur 3455 dans la base.
+// Un seul compte par nature, du fait générateur à la déclaration.
 export const COMPTES_TVA = {
-  /** Vente : TVA facturée en attente → TVA collectée exigible. */
-  client:      { attente: "4458", exigible: "4455" },
-  /** Achat : TVA sur achats en attente → TVA récupérable exigible. */
-  fournisseur: { attente: "3458", exigible: "3455" },
+  /** Vente : TVA facturée en attente (4458) → TVA collectée exigible (44551). */
+  client:      { attente: "4458", exigible: "44551", racineExigible: "4455" },
+  /** Achat : TVA sur achats en attente (3458) → TVA récupérable (34552). */
+  fournisseur: { attente: "3458", exigible: "34552", racineExigible: "3455" },
 } as const;
 
+/**
+ * Racines de DÉTECTION des comptes de TRANSIT du régime des encaissements —
+ * volontairement plus larges que les comptes d'imputation ci-dessus.
+ *
+ * Imputer et reconnaître sont deux besoins opposés : on impute sur le compte le
+ * PLUS PRÉCIS (44551), on reconnaît sur le plus LARGE (4455, qui couvre 44551 et
+ * les écritures historiques restées sur la racine).
+ *
+ * 4456 N'Y FIGURE PAS, et c'est délibéré : ces racines commandent aussi ce que le
+ * délettrage a le droit de SUPPRIMER (cf. `grouperOdBascule`). Y ranger le 4456
+ * exposerait l'OD de déclaration périodique — qui touche 44551, 34552 et 4456 —
+ * à être emportée par l'annulation d'un règlement. Le 4456 est interdit au
+ * lettrage (cf. `RACINES_TVA_NON_LETTRABLES`), ce qui est une autre question.
+ */
+export const RACINES_TVA_TRANSIT = ["4455", "4458", "3455", "3458"] as const;
+
+/**
+ * Tous les comptes de TVA interdits au lettrage — transit ET 4456 « État TVA due ».
+ * Aucun ne porte de créance : ils se soldent par la déclaration périodique.
+ */
+export const RACINES_TVA_NON_LETTRABLES = [...RACINES_TVA_TRANSIT, "4456"] as const;
+
 export type SensTiers = "client" | "fournisseur";
-export type ComptesTva = Record<SensTiers, { attente: string; exigible: string }>;
+export type ComptesTva = Record<SensTiers, { attente: string; exigible: string; racineExigible?: string }>;
 
 // ─── Référence propre des OD de reclassement ─────────────────────────────────
 //
@@ -199,9 +230,79 @@ export function estCompteTva(
 ): boolean {
   const c = String(compte ?? "").trim();
   if (!c) return false;
+  return racinesDetection(comptes).some((racine) => c === racine || c.startsWith(racine));
+}
+
+/**
+ * Racines à comparer pour un paramétrage donné.
+ *
+ * Sur le plan comptable PAR DÉFAUT, on élargit aux racines de transit : elles
+ * couvrent les sous-comptes (44551 ⊂ 4455) et l'existant resté sur la racine.
+ *
+ * Sur un plan PERSONNALISÉ, on s'en tient STRICTEMENT aux comptes fournis. Un
+ * cabinet qui déclare `attente: "44581"` a fait un choix ; y ajouter d'office
+ * « 4458 » reconnaîtrait des comptes qu'il n'emploie pas, et le délettrage
+ * supprimerait des lignes qui ne le regardent pas.
+ */
+function racinesDetection(comptes: ComptesTva): string[] {
+  if (comptes === (COMPTES_TVA as unknown as ComptesTva)) return [...RACINES_TVA_TRANSIT];
   return Object.values(comptes)
-    .flatMap((x) => [x.attente, x.exigible])
-    .some((racine) => c === racine || c.startsWith(racine));
+    .flatMap((x) => [x.attente, x.exigible, x.racineExigible])
+    .filter((x): x is string => Boolean(x));
+}
+
+// ─── Comptes LETTRABLES : les tiers, et eux seuls ────────────────────────────
+//
+// Le lettrage apparie une créance ou une dette avec son règlement. Il n'a de
+// sens que sur un compte de TIERS — 3421x clients, 4411x fournisseurs.
+//
+// Sur un compte de TVA il n'en a aucun : 4458 / 44551 / 3458 / 34552 / 4456 ne
+// portent pas des créances mais des positions fiscales, soldées par la
+// déclaration périodique (cf. src/lib/liquidation-tva.ts), jamais par
+// appariement. Les y autoriser produisait des « rapprochements » qui masquaient
+// des lignes de TVA aux yeux de la déclaration.
+//
+// NUANCE IMPORTANTE : les OD de bascule portent bien un `lettrage_code`, mais ce
+// n'est pas un lettrage — c'est le lien de traçabilité qui rattache l'OD au
+// règlement qui l'a déclenchée, posé par le moteur et jamais par l'utilisateur.
+// L'interdiction porte sur le lettrage MANUEL (`planifierLettrage`), pas sur ce
+// marquage interne.
+export interface VerdictLettrable {
+  ok: boolean;
+  sens: SensTiers | null;
+  raison: string | null;
+}
+
+/** Ce compte peut-il être lettré ? Rend le sens du tiers quand oui. */
+export function compteLettrable(
+  compte: string | null | undefined,
+  comptes: ComptesTva = COMPTES_TVA,
+): VerdictLettrable {
+  const c = String(compte ?? "").trim();
+  if (!c) return { ok: false, sens: null, raison: "Ligne sans compte : rien à lettrer." };
+
+  // Interdiction plus large que `estCompteTva` : elle englobe le 4456, qui n'est
+  // pas un compte de transit mais reste une position fiscale, non appariable.
+  const interdits = [
+    ...RACINES_TVA_NON_LETTRABLES,
+    ...Object.values(comptes).flatMap((x) => [x.attente, x.exigible, x.racineExigible]),
+  ].filter((x): x is string => Boolean(x));
+  if (interdits.some((r) => c === r || c.startsWith(r))) {
+    return {
+      ok: false, sens: null,
+      raison: `Lettrage interdit sur le compte de TVA ${c} : la TVA se solde par la `
+        + "déclaration périodique, pas par appariement.",
+    };
+  }
+  const sens = sensDuCompte(c);
+  if (!sens) {
+    return {
+      ok: false, sens: null,
+      raison: `Lettrage réservé aux comptes de tiers : ${c} n'est ni un client (3421x) `
+        + "ni un fournisseur (4411x).",
+    };
+  }
+  return { ok: true, sens, raison: null };
 }
 
 /**
@@ -228,11 +329,17 @@ export function estBasculeReglement(
     groupe.some((l) =>
       String(l.compte_numero ?? "").trim().startsWith(racine) && n(l[cote]) > 0);
 
+  // Détection sur la RACINE de l'exigible, jamais sur le sous-compte d'imputation :
+  // les bascules déjà en base visent 4455 / 3455, les nouvelles 44551 / 34552. Ne
+  // reconnaître que les secondes rendrait les premières indélettrables — leur ligne
+  // d'attente serait supprimée et leur contrepartie survivrait, en demi-écriture.
+  const exigible = (s: SensTiers) => comptes[s].racineExigible ?? comptes[s].exigible;
+
   // Vente : l'attente est DÉBITÉE (on la solde) et l'exigible CRÉDITÉ.
   const vente = surCompte(comptes.client.attente, "debit")
-    && surCompte(comptes.client.exigible, "credit");
+    && surCompte(exigible("client"), "credit");
   // Achat : le déductible est DÉBITÉ (le droit naît) et l'attente CRÉDITÉE.
-  const achat = surCompte(comptes.fournisseur.exigible, "debit")
+  const achat = surCompte(exigible("fournisseur"), "debit")
     && surCompte(comptes.fournisseur.attente, "credit");
   return vente || achat;
 }
@@ -359,6 +466,20 @@ export interface LigneOD {
   credit: number;
   reference_piece: string | null;
   lettrage_code: string;
+  /**
+   * Traçabilité EN BASE de la bascule : la facture dont la TVA devient exigible
+   * et le règlement qui l'a rendue telle.
+   *
+   * La référence de pièce ne suffisait pas — c'est du texte, tronqué à 50
+   * caractères à l'affichage, et deux pièces peuvent la partager. Ces deux clés
+   * étrangères rendent l'OD retrouvable sans interprétation, et permettent de
+   * répondre à « quel encaissement a rendu cette TVA due ? » d'une jointure.
+   *
+   * `paiement_id` demande la migration 20260809130000 ; tant qu'elle n'est pas
+   * appliquée, la colonne est ignorée à l'insertion (cf. basculerTvaSurReglement).
+   */
+  facture_id: string | null;
+  paiement_id: string | null;
 }
 
 export interface OptionsBasculeTva {
@@ -371,6 +492,10 @@ export interface OptionsBasculeTva {
   libelle?: string | null;
   lettrageCode: string;
   comptes?: ComptesTva;
+  /** Facture dont la TVA devient exigible (FK `ecritures_comptables.facture_id`). */
+  factureId?: string | null;
+  /** Règlement déclencheur (FK `ecritures_comptables.paiement_id`). */
+  paiementId?: string | null;
 }
 
 /**
@@ -388,10 +513,15 @@ export function construireBasculeTva(opts: OptionsBasculeTva): LigneOD[] {
 
   const comptes = (opts.comptes ?? COMPTES_TVA)[opts.sens];
   const ref = opts.reference ? String(opts.reference) : null;
-  const quoi = opts.libelle ? ` ${opts.libelle}` : ref ? ` ${ref}` : "";
-  const libelle = opts.sens === "client"
-    ? `TVA exigible sur encaissement${quoi}`
-    : `TVA déductible sur décaissement${quoi}`;
+
+  // Libellé LISIBLE, au format « TVA exigible - FAC-2026-001 ».
+  // L'ancien — « TVA exigible sur encaissement FAC - 2026 - 001 » — noyait le
+  // numéro de facture, seule information utile au comptable qui parcourt le
+  // journal d'OD, dans une phrase qui se répète à chaque ligne. Le séparateur
+  // explicite « - » rend aussi le numéro extractible d'un export.
+  const quoi = String(opts.libelle ?? ref ?? "").trim();
+  const nature = opts.sens === "client" ? "TVA exigible" : "TVA déductible";
+  const libelle = quoi ? `${nature} - ${quoi}` : nature;
 
   const commun = {
     journal_code: "OD" as const,
@@ -399,6 +529,8 @@ export function construireBasculeTva(opts: OptionsBasculeTva): LigneOD[] {
     libelle: libelle.slice(0, 200),
     reference_piece: ref,
     lettrage_code: opts.lettrageCode,
+    facture_id: opts.factureId ?? null,
+    paiement_id: opts.paiementId ?? null,
   };
 
   // L'ordre débit puis crédit n'a pas d'effet comptable, mais rend le journal
@@ -436,6 +568,9 @@ export interface PieceReglee {
   montantTtc: number;
   montantTva: number;
   reference?: string | null;
+  /** Clés étrangères tracées sur l'OD de bascule (cf. `LigneOD`). */
+  factureId?: string | null;
+  paiementId?: string | null;
 }
 
 export interface PlanLettrage {
@@ -481,13 +616,20 @@ export function planifierLettrage(opts: OptionsPlanLettrage): PlanLettrage {
   if (!eq.ok) return { ...vide, ok: false, raison: eq.raison };
 
   const compte = String(opts.lignes[0]?.compte_numero ?? "").trim();
-  const sens = sensDuCompte(compte);
+
+  // Le lettrage est RÉSERVÉ AUX COMPTES DE TIERS. Sur un compte de TVA il ne veut
+  // rien dire : ces comptes se soldent par la déclaration périodique, et les
+  // lettrer y masquait des lignes que la déclaration doit voir. On refuse la
+  // sélection au lieu de la lettrer « sans bascule », qui la laissait passer.
+  const lettrable = compteLettrable(compte, opts.comptes);
+  if (!lettrable.ok) return { ...vide, ok: false, raison: lettrable.raison };
+  const sens = lettrable.sens;
+
   const code = prochainCodeLettrage(opts.codesExistants);
   const date = opts.date ?? new Date().toISOString().slice(0, 10);
 
   // La bascule de TVA n'a de sens que sur un compte de tiers identifié : c'est
   // le sens (client / fournisseur) qui désigne le couple de comptes de TVA.
-  // Sur un compte non auxiliaire, on lettre sans basculer — et on le dit.
   const od = sens && opts.piece
     ? construireBasculeTva({
         sens,
@@ -496,12 +638,14 @@ export function planifierLettrage(opts: OptionsPlanLettrage): PlanLettrage {
         reference: opts.piece.reference ?? null,
         lettrageCode: code,
         comptes: opts.comptes,
+        factureId: opts.piece.factureId ?? null,
+        paiementId: opts.piece.paiementId ?? null,
       })
     : [];
 
   return {
     ok: true,
-    raison: sens ? null : `Compte ${compte} hors comptes de tiers : lettrage sans bascule de TVA.`,
+    raison: null,
     code,
     ligneIds: opts.lignes.map((l) => l.id),
     sens,

@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, Wallet, FileText, ShoppingCart, AlertCircle, CheckCircle, Clock, AlertTriangle, Users, Building2, Receipt, Mail, Loader2, Landmark, ArrowLeftRight, ExternalLink } from "lucide-react";
+import { TrendingUp, Wallet, FileText, ShoppingCart, AlertCircle, CheckCircle, Clock, AlertTriangle, Users, Building2, Receipt, Mail, Loader2, Landmark, ArrowLeftRight, ExternalLink, FileCheck2 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, BarChart, Bar } from "recharts";
 import {
   synthetiserTva, tvaRecuperableEnCours, echeanceSimplTva, joursAvant,
@@ -395,10 +395,27 @@ function DashboardPage() {
           {/* ── SUIVI TVA & FISCALITÉ DGI ────────────────────────────────────── */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <Receipt className="h-4 w-4" />Suivi TVA &amp; Fiscalité DGI
-                <Badge variant="secondary" className="text-[10px] font-normal">Régime de l'encaissement</Badge>
-              </CardTitle>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Receipt className="h-4 w-4" />Suivi TVA &amp; Fiscalité DGI
+                  <Badge variant="secondary" className="text-[10px] font-normal">Régime de l'encaissement</Badge>
+                </CardTitle>
+                {/* Ce bloc MESURE la TVA ; la liquidation l'ÉCRIT. Le bouton passe
+                    à l'onglet qui la comptabilise, en emportant la période de
+                    l'échéance affichée — sans quoi l'utilisateur atterrit sur le
+                    mois courant et doit retrouver la bonne période à la main. */}
+                <Button asChild size="sm" className="h-8 text-xs">
+                  <Link
+                    to="/dossiers/$dossierId/fiscalite"
+                    params={{ dossierId } as any}
+                    search={{ tab: "declaration", ...(periodeSimpl ? { periode: periodeSimpl } : {}) } as any}
+                    title="Générer l'OD de liquidation de la TVA et enregistrer le paiement DGI"
+                  >
+                    <FileCheck2 className="h-3.5 w-3.5 mr-1.5" />
+                    Déclarer la TVA
+                  </Link>
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

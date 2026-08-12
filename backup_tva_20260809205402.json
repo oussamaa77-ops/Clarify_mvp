@@ -1,0 +1,31 @@
+{
+  "date": "2026-08-09T20:54:02.266Z",
+  "lignes": [
+    {
+      "id": "f48e382e-20e9-4f38-948e-fb1a768ae89c",
+      "journal_code": "OD",
+      "date_ecriture": "2026-07-07",
+      "libelle": "TVA exigible sur encaissement FAC-2024-307",
+      "debit": 0,
+      "credit": 1880,
+      "reference_piece": "FAC-2024-307",
+      "compte_numero": "4455",
+      "dossier": "SOMADIR S.A.",
+      "compte_avant": "4455",
+      "compte_apres": "44551"
+    },
+    {
+      "id": "2c22beb5-da77-45ac-bb9e-abd399b1f038",
+      "journal_code": "OD",
+      "date_ecriture": "2026-08-04",
+      "libelle": "TVA déductible sur décaissement 36f3d530-d5ae-4c9c-879f-0a086925080e",
+      "debit": 240,
+      "credit": 0,
+      "reference_piece": "36f3d530-d5ae-4c9c-879f-0a086925080e",
+      "compte_numero": "3455",
+      "dossier": "DIGITAL SOLUTIONS MAROC SARL AU",
+      "compte_avant": "3455",
+      "compte_apres": "34552"
+    }
+  ]
+}
