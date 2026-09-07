@@ -350,10 +350,21 @@ describe("soldeTvaDue / resteExigible", () => {
 
 // ─── Régularisation d'une TVA déclarée par anticipation ─────────────────────
 //
-// Le cas SOMADIR 2024-11 : 3 360,00 de TVA déduits sur une facture fournisseur
-// jamais payée. Sous le régime des encaissements la déduction n'était pas
-// acquise ; la déclaration étant déposée, on ne la réécrit pas — on la reprend
-// sur l'exercice ouvert.
+// Le geste : une TVA déduite (ou collectée) déclarée avant que l'argent n'ait
+// bougé. Sous le régime des encaissements elle n'était pas acquise ; une
+// déclaration DÉPOSÉE ne se réécrivant pas, on la reprend sur l'exercice ouvert
+// par une pièce hors flux.
+//
+// Les montants ci-dessous viennent du cas SOMADIR 2024-11 (3 360,00 déduits sur
+// une facture ATLAS PACKAGING). Ce dossier a depuis été repris AUTREMENT : la
+// facture s'est révélée payée le 2026-05-04, si bien que la déduction était
+// simplement MAL DATÉE et non indue. Déclaration et régularisation ont donc été
+// retirées au profit de la bascule à la date du décaissement
+// (`scripts/corriger-ecritures-somadir.ts`).
+//
+// Ces tests restent le contrat de `construireOdRegularisationTva`, qui demeure
+// l'outil juste dès qu'une déclaration a RÉELLEMENT été déposée — c'est-à-dire
+// quand on ne peut pas la supprimer.
 describe("construireOdRegularisationTva", () => {
   const REGUL = {
     periodeRegularisee: "2024-11", sens: "deduction" as const,
