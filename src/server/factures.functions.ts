@@ -33,6 +33,10 @@ import { guardScan, libererScan } from "./billing";
 import { enregistrerPaiement } from "@/lib/paiements";
 import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
 import { compteVente } from "@/lib/compte-vente";
+import { assertLignesVente, lignesEcrituresVente, normaliserTypeVente } from "@/lib/ecritures-vente";
+import { assertEcrituresRegime, bornesExerciceActif } from "@/lib/genererEcritures";
+import { normaliserComptesLignes } from "@/lib/numero-compte";
+import { validerDateReglement } from "@/lib/date-reglement";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -607,7 +611,9 @@ export const generateFactureXml = createServerFn({ method: "POST" })
       // `secteur_activite` sert au choix du compte de produit (7111 marchandises
       // / 7124 services) quand les désignations ne tranchent pas.
       .select(
-        "*, clients(nom,ice,if_fiscal,adresse,email), dossiers(nom_societe,ice,if_fiscal,adresse,secteur_activite)"
+        // `date_debut_activite` borne le PREMIER exercice — sans elle, le cut-off
+        // laisserait passer une pièce datée avant la création de la société.
+        "*, clients(nom,ice,if_fiscal,adresse,email), dossiers(nom_societe,ice,if_fiscal,adresse,secteur_activite,date_debut_activite)"
       )
       .eq("id", data.facture_id)
       .single();
@@ -618,120 +624,56 @@ export const generateFactureXml = createServerFn({ method: "POST" })
     );
     const societe = (facture as any).dossiers;
     const client = (facture as any).clients;
-    const esc = (s: string | null | undefined) =>
-      (s ?? "").replace(
-        /[<>&'"]/g,
-        (c: string) =>
-          (
-            {
-              "<": "&lt;",
-              ">": "&gt;",
-              "&": "&amp;",
-              "'": "&apos;",
-              '"': "&quot;",
-            } as Record<string, string>
-          )[c]
-      );
 
-    const lignesXml = lignes
-      .map((l, i) => {
-        const ht = l.quantite * l.prix_unitaire;
-        const tva = ht * (l.taux_tva / 100);
-        return `  <cac:InvoiceLine>
-    <cbc:ID>${i + 1}</cbc:ID>
-    <cbc:InvoicedQuantity unitCode="C62">${l.quantite}</cbc:InvoicedQuantity>
-    <cbc:LineExtensionAmount currencyID="MAD">${ht.toFixed(2)}</cbc:LineExtensionAmount>
-    <cac:TaxTotal><cbc:TaxAmount currencyID="MAD">${tva.toFixed(2)}</cbc:TaxAmount>
-      <cac:TaxSubtotal>
-        <cbc:TaxableAmount currencyID="MAD">${ht.toFixed(2)}</cbc:TaxableAmount>
-        <cbc:TaxAmount currencyID="MAD">${tva.toFixed(2)}</cbc:TaxAmount>
-        <cac:TaxCategory><cbc:Percent>${l.taux_tva}</cbc:Percent><cac:TaxScheme><cbc:ID>TVA</cbc:ID></cac:TaxScheme></cac:TaxCategory>
-      </cac:TaxSubtotal>
-    </cac:TaxTotal>
-    <cac:Item><cbc:Name>${esc(l.designation)}</cbc:Name></cac:Item>
-    <cac:Price><cbc:PriceAmount currencyID="MAD">${l.prix_unitaire.toFixed(2)}</cbc:PriceAmount></cac:Price>
-  </cac:InvoiceLine>`;
-      })
-      .join("\n");
+    // ─── Volet fiscal : DÉLÉGUÉ au moteur de facturation électronique ────────
+    // Cette fonction fabriquait autrefois son propre XML UBL, sa propre
+    // empreinte SHA-256 et un identifiant « DGI-<timestamp> » de son cru. Depuis
+    // la mise en place du chantier e-Invoicing, il existe UNE chaîne fiscale :
+    // validation des identités, scellement avec clef secrète, UBL 2.1 ventilé
+    // par taux, connecteur DGI, journal des échanges.
+    //
+    // En garder une seconde ici avait deux conséquences concrètes :
+    //   • deux empreintes CONCURRENTES écrites tour à tour sur la même ligne,
+    //     selon le bouton cliqué en dernier — donc aucune vérifiable ;
+    //   • un statut « conforme » et un UUID inventés localement, apposés sur des
+    //     factures que la DGI n'avait jamais vues. Le panneau « Facture
+    //     Électronique » les lisait ensuite comme validées et refusait, à juste
+    //     titre au vu de l'état, de les transmettre pour de bon.
+    //
+    // Ce qui reste ici est ce que cette fonction seule fait : COMPTABILISER la
+    // vente, archiver en GED et prévenir le client.
+    const [{ DgiEInvoicingService }, { obtenirConnecteurDgi }, { clefSecreteFacturation }] =
+      await Promise.all([
+        import("./efacture.service"),
+        import("./dgi.connector"),
+        import("@/lib/invoice-hash"),
+      ]);
+    const moteurEfacture = new DgiEInvoicingService(
+      supabase as any,
+      obtenirConnecteurDgi(),
+      clefSecreteFacturation(),
+    );
 
-    if (
-      facture.date_echeance &&
-      facture.date_echeance <= facture.date_facture
-    ) {
-      const d = new Date(facture.date_facture);
-      d.setDate(d.getDate() + 30);
-      (facture as any).date_echeance = d.toISOString().slice(0, 10);
-    }
-
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
-  xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"
-  xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
-  xmlns:dgi="urn:dgi-ma:2026:1.0">
-  <cbc:CustomizationID>DGI-MA:2026:1.0</cbc:CustomizationID>
-  <cbc:ProfileID>urn:fdc:dgi.gov.ma:2026:einvoice</cbc:ProfileID>
-  <cbc:ID>${esc(facture.numero ?? facture.id)}</cbc:ID>
-  <cbc:IssueDate>${facture.date_facture}</cbc:IssueDate>
-  ${facture.date_echeance ? `<cbc:DueDate>${facture.date_echeance}</cbc:DueDate>` : ""}
-  <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>
-  <cbc:DocumentCurrencyCode>MAD</cbc:DocumentCurrencyCode>
-  <cac:AccountingSupplierParty><cac:Party>
-    <cac:PartyName><cbc:Name>${esc(societe?.nom_societe)}</cbc:Name></cac:PartyName>
-    <cac:PostalAddress><cbc:StreetName>${esc(societe?.adresse)}</cbc:StreetName><cac:Country><cbc:IdentificationCode>MA</cbc:IdentificationCode></cac:Country></cac:PostalAddress>
-    <cac:PartyTaxScheme><cbc:CompanyID>${esc(societe?.ice)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>ICE</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
-  </cac:Party></cac:AccountingSupplierParty>
-  <cac:AccountingCustomerParty><cac:Party>
-    <cac:PartyName><cbc:Name>${esc(client?.nom)}</cbc:Name></cac:PartyName>
-    <cac:PartyTaxScheme><cbc:CompanyID>${esc(client?.ice)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>ICE</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
-  </cac:Party></cac:AccountingCustomerParty>
-  <cac:TaxTotal><cbc:TaxAmount currencyID="MAD">${Number(facture.montant_tva).toFixed(2)}</cbc:TaxAmount></cac:TaxTotal>
-  <cac:LegalMonetaryTotal>
-    <cbc:LineExtensionAmount currencyID="MAD">${Number(facture.montant_ht).toFixed(2)}</cbc:LineExtensionAmount>
-    <cbc:TaxExclusiveAmount currencyID="MAD">${Number(facture.montant_ht).toFixed(2)}</cbc:TaxExclusiveAmount>
-    <cbc:TaxInclusiveAmount currencyID="MAD">${Number(facture.montant_ttc).toFixed(2)}</cbc:TaxInclusiveAmount>
-    <cbc:PayableAmount currencyID="MAD">${Number(facture.montant_ttc).toFixed(2)}</cbc:PayableAmount>
-  </cac:LegalMonetaryTotal>
-${lignesXml}
-</Invoice>`;
-
-    const hash = createHash("sha256").update(xml).digest("hex");
-    await supabase
-      .from("factures")
-      .update({
-        xml_ubl: xml,
-        hash_sha256: hash,
-        statut: "envoyee",
-        statut_dgi: "en_analyse",
-      })
-      .eq("id", data.facture_id);
-
-    const validation = await validerXmlUBL(xml);
-    const { conforme, erreurs, avertissements, source } = validation;
-    const dgi_uuid = conforme
-      ? `DGI-${Date.now().toString(36).toUpperCase()}-${Math.random()
-          .toString(36)
-          .slice(2, 8)
-          .toUpperCase()}`
-      : null;
+    const transmission = await moteurEfacture.transmettre(data.facture_id);
+    const conforme = transmission.succes;
+    const dgi_uuid = transmission.dgi_uuid;
+    const hash = transmission.hash_sha256 ?? "";
+    const erreurs = (transmission.erreurs as { message: string }[]).map((e) => e.message);
     const dgi_response = {
-      source,
-      conforme,
-      timestamp: new Date().toISOString(),
-      uuid: dgi_uuid,
-      message: conforme ? "Facture validée" : "Facture rejetée",
-      erreurs,
-      avertissements,
+      statut: transmission.statut,
+      message: transmission.message,
+      erreurs: transmission.erreurs,
+      avertissements: transmission.avertissements,
     };
 
-    await supabase
+    // Le XML est relu plutôt que reconstruit : c'est l'octet EXACT qui vient
+    // d'être scellé et transmis qui doit être rendu à l'appelant.
+    const { data: apresTransmission } = await supabase
       .from("factures")
-      .update({
-        dgi_uuid,
-        dgi_response,
-        statut: conforme ? "conforme" : "rejetee",
-        statut_dgi: conforme ? "conforme" : "rejetee",
-      })
-      .eq("id", data.facture_id);
+      .select("xml_ubl")
+      .eq("id", data.facture_id)
+      .maybeSingle();
+    const xml = (apresTransmission as any)?.xml_ubl ?? "";
 
     if (conforme && Number(facture.montant_ttc) > 0) {
       const ref = facture.numero ?? facture.id;
@@ -739,7 +681,10 @@ ${lignesXml}
       // fiche porte un code, sinon le collectif 3421. Le lettrage et la balance
       // âgée raisonnent par préfixe « 342 » : rien à adapter en aval.
       const { data: cliRow } = facture.client_id
-        ? await supabase.from("clients").select("code_auxiliaire").eq("id", facture.client_id).maybeSingle()
+        ? await supabase.from("clients")
+            // `compte_produit_defaut` : le compte que l'utilisateur a EXPLICITEMENT
+            // arrêté pour ce client depuis l'écran de création (cf. ci-dessous).
+            .select("code_auxiliaire,compte_produit_defaut").eq("id", facture.client_id).maybeSingle()
         : { data: null as any };
       const compteClient = compteTiersAuxiliaire("client", cliRow?.code_auxiliaire ?? null);
       const typeFacture = (facture as any).type ?? "facture";
@@ -749,32 +694,59 @@ ${lignesXml}
       // services logeait ses honoraires en ventes de marchandises et présentait
       // un compte de résultat de négociant. Les désignations des lignes priment,
       // le secteur du dossier tranche à défaut (cf. src/lib/compte-vente.ts).
-      const { compte: compteVenteFacture } = compteVente({
-        nature: (facture as any).nature_vente ?? null,
-        designations: lignes.map((l) => l.designation),
-        secteur: (facture as any).dossiers?.secteur_activite ?? null,
+      //
+      // Le choix EXPLICITE de l'utilisateur passe avant toute déduction. Le panneau
+      // de création propose un compte, laisse le corriger et enregistre la
+      // correction sur la fiche client — mais ce compte n'était relu par personne :
+      // la comptabilisation refaisait sa propre déduction et écrasait l'arbitrage.
+      const compteVenteFacture = String(cliRow?.compte_produit_defaut ?? "").trim()
+        || compteVente({
+          nature: (facture as any).nature_vente ?? null,
+          designations: lignes.map((l) => l.designation),
+          secteur: (facture as any).dossiers?.secteur_activite ?? null,
+        }).compte;
+
+      // Les trois jeux d'écritures (ordinaire / acompte / solde) sont désormais
+      // fabriqués par une fonction PURE, testée à part (src/lib/ecritures-vente.ts).
+      // `assertLignesVente` interdit ce que ce bloc pouvait produire sans qu'on
+      // s'en aperçoive : un crédit du 4191 — compte de PASSIF — sur une facture
+      // ordinaire, qui escamote le chiffre d'affaires du compte de résultat.
+      const typeVente = normaliserTypeVente(typeFacture);
+      const ecrituresVente = lignesEcrituresVente({
+        dossier_id: facture.dossier_id,
+        facture_id: facture.id,
+        reference: String(ref),
+        date_facture: facture.date_facture,
+        montant_ht: Number(facture.montant_ht),
+        montant_tva: Number(facture.montant_tva),
+        montant_ttc: Number(facture.montant_ttc),
+        compte_client: compteClient,
+        compte_produit: compteVenteFacture,
+        type: typeVente,
       });
-      if (typeFacture === "acompte") {
-        await supabase.from("ecritures_comptables").insert([
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Acompte ${ref}`,     debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: "4191",  date_ecriture: facture.date_facture, libelle: `Avance reçue ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA acompte en attente ${ref}`,  debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
-        ]);
-      } else if (typeFacture === "solde") {
-        await supabase.from("ecritures_comptables").insert([
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Solde ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteVenteFacture,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA en attente ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: "4191",  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: Number(facture.montant_ht), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "OD",  compte_numero: compteVenteFacture,  date_ecriture: facture.date_facture, libelle: `Imputation acompte ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
-        ]);
-      } else {
-        await supabase.from("ecritures_comptables").insert([
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteClient,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: Number(facture.montant_ttc), credit: 0, reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: compteVenteFacture,  date_ecriture: facture.date_facture, libelle: `Vente ${ref}`, debit: 0, credit: Number(facture.montant_ht), reference_piece: ref, facture_id: facture.id, valide: true },
-          { dossier_id: facture.dossier_id, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente, date_ecriture: facture.date_facture, libelle: `TVA en attente ${ref}`, debit: 0, credit: Number(facture.montant_tva), reference_piece: ref, facture_id: facture.id, valide: true },
-        ]);
-      }
+      assertLignesVente(ecrituresVente, typeVente);
+
+      // Cut-off + unicité de la référence, juste avant l'insert.
+      //
+      // Le cut-off oppose la date de la pièce aux bornes de l'exercice ACTIF —
+      // celui de l'horloge, resserré au premier exercice par la date de début
+      // d'activité. C'est ce qui interdit qu'une facture datée 2024 vienne se
+      // loger dans un dossier repris en 2026, où elle fausserait deux liasses.
+      //
+      // L'unicité VTE/ACH se contrôle contre le grand livre DÉJÀ en base : la
+      // collision réelle est celle d'une pièce nouvelle heurtant une pièce
+      // ancienne, jamais celle des trois lignes qu'on vient de fabriquer.
+      const { data: refsExistantes } = await supabase
+        .from("ecritures_comptables")
+        .select("journal_code,reference_piece")
+        .eq("dossier_id", facture.dossier_id)
+        .eq("reference_piece", String(ref));
+
+      assertEcrituresRegime(ecrituresVente, {
+        bornes: bornesExerciceActif((facture as any).dossiers ?? null),
+        existantes: (refsExistantes ?? []) as any[],
+      });
+      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresVente));
       await supabase.from("ged_documents").insert({
         dossier_id: facture.dossier_id,
         facture_id: facture.id,
@@ -831,6 +803,13 @@ ${lignesXml}
       hash,
       dgi_uuid,
       dgi_response,
+      // Remontés à l'écran : le message dit POURQUOI l'envoi n'a pas abouti
+      // (rejet, facture déjà validée, plateforme injoignable — trois cas très
+      // différents), et les avertissements portent notamment la mention du bac
+      // à sable, sans laquelle un récépissé simulé passe pour un vrai.
+      message: transmission.message,
+      erreurs,
+      avertissements: transmission.avertissements,
       email_sent: conforme && !!client?.email,
       client_email_manquant: conforme && !client?.email,
     };
@@ -1369,10 +1348,21 @@ export const marquerPayee = createServerFn({ method: "POST" })
     const table = estClient ? "factures" : "factures_fournisseurs";
     const { data: f } = await (supabase as any)
       .from(table)
-      .select(`dossier_id,montant_ttc,montant_paye,numero,${estClient ? "client_id" : "fournisseur_id"}`)
+      // `date_facture` : sans elle, aucun contrôle de vraisemblance de la date de
+      // règlement n'est possible côté serveur.
+      .select(`dossier_id,montant_ttc,montant_paye,numero,date_facture,${estClient ? "client_id" : "fournisseur_id"}`)
       .eq("id", data.facture_id)
       .single();
     if (!f) throw new Error("Facture introuvable");
+
+    // ── Vraisemblance de la date, AVANT toute écriture ────────────────────────
+    // Cette date n'est pas un champ de confort : elle date l'écriture de
+    // trésorerie, l'OD de bascule de TVA et le relevé DGI. Une date antérieure à
+    // l'émission range l'encaissement dans la mauvaise déclaration et fausse le
+    // délai de règlement de la balance âgée. Le formulaire pose déjà la question,
+    // mais l'API est appelable sans lui : la règle doit tenir ici aussi.
+    const validite = validerDateReglement(f.date_facture, data.date_paiement);
+    if (!validite.ok) throw new Error(validite.message ?? "Date de règlement invalide");
 
     // Le règlement doit SOLDER le compte exact qu'a mouvementé la facture : si la
     // vente est partie sur l'auxiliaire 34210002, un crédit sur le collectif 3421
@@ -1444,7 +1434,7 @@ export const marquerPayee = createServerFn({ method: "POST" })
     // elle, ces deux lignes seraient exactement l'écriture fantôme que la règle
     // interdit (une banque qui bouge sans qu'aucun argent n'ait bougé).
     assertEcrituresTresorerie(ecritures, { origine: "saisie_manuelle", piece });
-    await (supabase as any).from("ecritures_comptables").insert(ecritures);
+    await (supabase as any).from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
 
     // Estampille du mode réellement employé : c'est elle que lit la colonne
     // « Mode de paiement » quand aucune pièce bancaire n'explique le règlement

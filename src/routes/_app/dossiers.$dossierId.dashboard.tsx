@@ -21,6 +21,10 @@ import { logAudit } from "@/lib/audit";
 import {
   COMPTE_CLIENTS, encoursTiersGrandLivre, soldeBancaireAffiche, type LigneGrandLivre,
 } from "@/lib/encours-grandlivre";
+import {
+  bornesExercice, dansExercice, exerciceCourant, exercicesDisponibles,
+} from "@/lib/exercice-comptable";
+import { sansANouveaux } from "@/lib/a-nouveaux";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/dashboard")({ component: DashboardPage });
 
@@ -85,12 +89,28 @@ function DashboardPage() {
   const [sendingTva, setSendingTva] = useState(false);
   const { user, profile } = useAuth();
 
+  // ── EXERCICE ──────────────────────────────────────────────────────────────
+  // Les KPI lisaient TOUT le dossier, sans borne de date : sur un dossier repris,
+  // le CA « de l'exercice » cumulait 2024, 2025 et 2026. Un chiffre d'affaires
+  // qui agrège trois exercices ne correspond à aucune liasse.
+  //
+  // Deux régimes, parce que flux et stock ne se bornent pas pareil :
+  //   • FLUX (CA, achats, charges, produits) — strictement DANS l'exercice. Le
+  //     compte de résultat n'est rien d'autre que cela ;
+  //   • STOCK (encours clients, dettes, trésorerie) — CUMULÉ jusqu'à la clôture.
+  //     Les borner par le bas ferait disparaître une créance de 2024 restée
+  //     ouverte : faute d'écritures d'À-NOUVEAUX dans cette base, son solde n'est
+  //     porté que par sa ligne d'origine.
+  const [exercice, setExercice] = useState<number>(() => exerciceCourant());
+  const [exercicesDispo, setExercicesDispo] = useState<number[]>([]);
+  const bornes = bornesExercice(exercice);
+
   // Tracé d'audit : ouverture / changement de dossier (une fois par dossierId).
   useEffect(() => { logAudit({ dossierId, action: "ouverture_dossier", ressourceType: "dossier", ressourceId: dossierId }); }, [dossierId]);
 
   useEffect(() => {
     (async () => {
-      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }, { data: pcm }, { data: glTiers }] = await Promise.all([
+      const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }, { data: pcm }, { data: glTiers }, { data: millesimes }] = await Promise.all([
         supabase.from("dossiers").select("nom_societe,ice,statut").eq("id", dossierId).single(),
         // Ajouter montant_paye et montant_restant pour calculs corrects + tiers pour les alertes
         supabase.from("factures").select("numero,statut,statut_paiement,montant_ht,montant_ttc,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,clients(nom)").eq("dossier_id", dossierId),
@@ -110,8 +130,10 @@ function DashboardPage() {
         // Charges (classe 6) ET produits (classe 7) pour les deux ventilations
         // par compte PCM. Les écritures sont la seule source portant un compte :
         // ni `factures` ni `factures_fournisseurs` n'en ont.
+        // FLUX : bornés des deux côtés par l'exercice ouvert.
         supabase.from("ecritures_comptables").select("compte_numero,debit,credit,date_ecriture")
-          .eq("dossier_id", dossierId).or("compte_numero.like.6%,compte_numero.like.7%"),
+          .eq("dossier_id", dossierId).or("compte_numero.like.6%,compte_numero.like.7%")
+          .gte("date_ecriture", bornes.debut).lte("date_ecriture", bornes.fin),
         // Référentiel PCM (global, sans dossier_id) : donne son INTITULÉ à chaque
         // compte. Limité aux classes 6 et 7 — le reste ne sert pas ici.
         supabase.from("pcm_reference").select("numero,intitule")
@@ -121,10 +143,16 @@ function DashboardPage() {
         // et non plus dans les colonnes dérivées (cf. src/lib/encours-grandlivre.ts).
         // `lettrage_code` est indispensable : c'est lui qui distingue un poste
         // ouvert d'une facture soldée.
+        //
+        // STOCK : borné à la seule CLÔTURE. Un poste ouvert de 2024 fait bien
+        // partie de l'encours au 31/12/2026 tant qu'il n'est pas lettré.
         supabase.from("ecritures_comptables")
           .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
           .eq("dossier_id", dossierId)
-          .or("compte_numero.like.34%,compte_numero.like.44%,compte_numero.like.51%"),
+          .or("compte_numero.like.34%,compte_numero.like.44%,compte_numero.like.51%")
+          .lte("date_ecriture", bornes.fin),
+        // Millésimes réellement portés par le dossier, pour le sélecteur.
+        supabase.from("ecritures_comptables").select("date_ecriture").eq("dossier_id", dossierId),
       ]);
       setDossier(d);
       setFactures(f ?? []);
@@ -135,13 +163,21 @@ function DashboardPage() {
       setFlux(fluxNonLettres);
       setEcrExploitation(charges ?? []);
       setIntitulesPcm(Object.fromEntries(((pcm ?? []) as any[]).map(c => [c.numero, c.intitule])));
-      setEcrTiers((glTiers ?? []) as LigneGrandLivre[]);
+      // Le stock est lu en CUMULÉ depuis l'origine (aucune borne basse) : les
+      // à-nouveaux y feraient doublon avec les lignes qu'ils reportent. Ils ne
+      // valent que dans une vue bornée à UN exercice, où l'origine est absente.
+      setEcrTiers(sansANouveaux((glTiers ?? []) as LigneGrandLivre[]));
+      setExercicesDispo(exercicesDisponibles(((millesimes ?? []) as any[]).map((x) => x.date_ecriture)));
       setLoading(false);
     })();
-  }, [dossierId]);
+  }, [dossierId, bornes.debut, bornes.fin]);
 
   // ── KPIs ──────────────────────────────────────────────────────────────────
-  const conformes = factures.filter(f => f.statut === "conforme");
+  // Le chiffre d'affaires est un FLUX : il appartient à l'exercice où la facture
+  // a été ÉMISE. Une facture de 2024 n'entre pas dans le CA 2026, quel que soit
+  // le moment où elle est réglée.
+  const facturesExercice = factures.filter(f => dansExercice(f.date_facture, bornes));
+  const conformes = facturesExercice.filter(f => f.statut === "conforme");
 
   // CA HT = factures standard conformes uniquement (acompte → 4191, pas CA)
   const caHT = conformes
@@ -169,23 +205,29 @@ function DashboardPage() {
   // Repli : tant qu'aucune écriture de tiers n'existe (dossier non comptabilisé),
   // l'ancien calcul reste le seul disponible.
   const encoursGL = encoursTiersGrandLivre(ecrTiers, COMPTE_CLIENTS);
-  const encoursFactures = conformes
-    .filter(f => f.statut_paiement !== "payee")
+  // STOCK : toutes les factures ÉMISES jusqu'à la clôture, pas seulement celles
+  // de l'exercice. Une créance de 2024 encore ouverte est due au 31/12/2026.
+  const encoursFactures = factures
+    .filter(f => f.statut === "conforme" && f.statut_paiement !== "payee"
+      && String(f.date_facture ?? "").slice(0, 10) <= bornes.fin)
     .reduce((s, f) => s + Number(f.montant_restant ?? f.montant_ttc), 0);
   const comptabilise = ecrTiers.some(l => String(l.compte_numero ?? "").startsWith(COMPTE_CLIENTS));
   const encours = comptabilise ? encoursGL.total : encoursFactures;
 
   // Achats facturés (toutes factures fournisseurs reçues, réglées ou non) —
-  // pendant du « CA HT facturé » côté ventes.
-  const achatsHT = ff.reduce((s, f) => s + Number(f.montant_ht ?? 0), 0);
-  const achatsTTC = ff.reduce((s, f) => s + Number(f.montant_ttc ?? 0), 0);
+  // pendant du « CA HT facturé » côté ventes, donc borné au même exercice.
+  const ffExercice = ff.filter(f => dansExercice(f.date_facture, bornes));
+  const achatsHT = ffExercice.reduce((s, f) => s + Number(f.montant_ht ?? 0), 0);
+  const achatsTTC = ffExercice.reduce((s, f) => s + Number(f.montant_ttc ?? 0), 0);
 
-  // Dettes fournisseurs = montant_restant (ou montant_ttc si pas encore renseigné)
+  // Dettes fournisseurs = montant_restant (ou montant_ttc si pas encore renseigné).
+  // STOCK, donc cumulé jusqu'à la clôture — comme l'encours clients.
   const dettes = ff
-    .filter(f => f.statut_paiement !== "payee")
+    .filter(f => f.statut_paiement !== "payee"
+      && String(f.date_facture ?? "").slice(0, 10) <= bornes.fin)
     .reduce((s, f) => s + Number(f.montant_restant ?? f.montant_ttc), 0);
 
-  const enAnalyse = factures.filter(f => f.statut === "envoyee").length;
+  const enAnalyse = facturesExercice.filter(f => f.statut === "envoyee").length;
 
   // ── CENTRE D'ALERTES : retards clients / fournisseurs / échéance TVA ─────────
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -334,10 +376,30 @@ function DashboardPage() {
   return (
     <div className="p-8 max-w-7xl mx-auto">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold">{dossier?.nom_societe ?? "Dashboard"}</h1>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <h1 className="text-3xl font-bold">{dossier?.nom_societe ?? "Dashboard"}</h1>
+          {/* Le périmètre des chiffres, RENDU VISIBLE. Sans lui, l'utilisateur
+              n'a aucun moyen de savoir de quel exercice parle un KPI — et c'est
+              précisément ce qui laissait passer un CA cumulant 2024 et 2026. */}
+          <select
+            className="h-9 rounded-md border bg-background px-3 text-sm"
+            value={exercice}
+            onChange={(e) => setExercice(Number(e.target.value))}
+            aria-label="Exercice comptable"
+          >
+            {[...new Set([exerciceCourant(), exercice, ...exercicesDispo])]
+              .sort((a, b) => b - a)
+              .map((a) => <option key={a} value={a}>Exercice {a}</option>)}
+          </select>
+        </div>
         <div className="flex items-center gap-3 mt-1">
           {dossier?.ice && <span className="font-mono text-xs text-muted-foreground">ICE: {dossier.ice}</span>}
           <Badge variant="outline" className="text-green-600">{dossier?.statut}</Badge>
+          {/* Flux et stock ne se bornent pas pareil : le dire évite de croire à
+              une incohérence entre le CA (dans l'exercice) et l'encours (cumulé). */}
+          <span className="text-xs text-muted-foreground">
+            Flux du {bornes.debut} au {bornes.fin} · encours et trésorerie cumulés à la clôture
+          </span>
         </div>
       </div>
 

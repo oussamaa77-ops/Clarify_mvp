@@ -572,6 +572,14 @@ export type Database = {
           updated_at: string | null
           date_reprise: string | null
           secteur_activite: string | null
+          date_debut_activite: string | null
+          valeur_locative_tp: number | null
+          classe_tp: number | null
+          taux_cm: number | null
+          regime_is: string | null
+          compte_caisse: string | null
+          compte_banque: string | null
+          patente: string | null
         }
         Insert: {
           id?: string
@@ -589,6 +597,14 @@ export type Database = {
           updated_at?: string | null
           date_reprise?: string | null
           secteur_activite?: string | null
+          date_debut_activite?: string | null
+          valeur_locative_tp?: number | null
+          classe_tp?: number | null
+          taux_cm?: number | null
+          regime_is?: string | null
+          compte_caisse?: string | null
+          compte_banque?: string | null
+          patente?: string | null
         }
         Update: {
           id?: string
@@ -606,6 +622,14 @@ export type Database = {
           updated_at?: string | null
           date_reprise?: string | null
           secteur_activite?: string | null
+          date_debut_activite?: string | null
+          valeur_locative_tp?: number | null
+          classe_tp?: number | null
+          taux_cm?: number | null
+          regime_is?: string | null
+          compte_caisse?: string | null
+          compte_banque?: string | null
+          patente?: string | null
         }
         Relationships: [
         {
@@ -640,6 +664,12 @@ export type Database = {
           batch_id: string | null
           lettree: boolean
           code_lettrage: string | null
+          lettrage_code: string | null
+          lettrage_date: string | null
+          lettrage_origine: string | null
+          paiement_id: string | null
+          pointe: boolean
+          pointe_le: string | null
         }
         Insert: {
           id?: string
@@ -663,6 +693,12 @@ export type Database = {
           batch_id?: string | null
           lettree?: boolean
           code_lettrage?: string | null
+          lettrage_code?: string | null
+          lettrage_date?: string | null
+          lettrage_origine?: string | null
+          paiement_id?: string | null
+          pointe?: boolean
+          pointe_le?: string | null
         }
         Update: {
           id?: string
@@ -686,6 +722,12 @@ export type Database = {
           batch_id?: string | null
           lettree?: boolean
           code_lettrage?: string | null
+          lettrage_code?: string | null
+          lettrage_date?: string | null
+          lettrage_origine?: string | null
+          paiement_id?: string | null
+          pointe?: boolean
+          pointe_le?: string | null
         }
         Relationships: [
         {
@@ -728,6 +770,13 @@ export type Database = {
           columns: ["batch_id"]
           isOneToOne: false
           referencedRelation: "import_batches"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "ecritures_comptables_paiement_id_fkey"
+          columns: ["paiement_id"]
+          isOneToOne: false
+          referencedRelation: "paiements"
           referencedColumns: ["id"]
         },
       ]
@@ -933,6 +982,16 @@ export type Database = {
           montant_restant: number | null
           mode_reglement: string | null
           echeances: Json | null
+          ice_vendeur: string | null
+          if_vendeur: string | null
+          rc_vendeur: string | null
+          patente_vendeur: string | null
+          ice_acheteur: string | null
+          if_acheteur: string | null
+          dgi_status: string
+          dgi_submission_at: string | null
+          dgi_validated_at: string | null
+          dgi_response_payload: Json
         }
         Insert: {
           id?: string
@@ -972,6 +1031,16 @@ export type Database = {
           montant_restant?: number | null
           mode_reglement?: string | null
           echeances?: Json | null
+          ice_vendeur?: string | null
+          if_vendeur?: string | null
+          rc_vendeur?: string | null
+          patente_vendeur?: string | null
+          ice_acheteur?: string | null
+          if_acheteur?: string | null
+          dgi_status?: string
+          dgi_submission_at?: string | null
+          dgi_validated_at?: string | null
+          dgi_response_payload: Json
         }
         Update: {
           id?: string
@@ -1011,6 +1080,16 @@ export type Database = {
           montant_restant?: number | null
           mode_reglement?: string | null
           echeances?: Json | null
+          ice_vendeur?: string | null
+          if_vendeur?: string | null
+          rc_vendeur?: string | null
+          patente_vendeur?: string | null
+          ice_acheteur?: string | null
+          if_acheteur?: string | null
+          dgi_status?: string
+          dgi_submission_at?: string | null
+          dgi_validated_at?: string | null
+          dgi_response_payload?: Json
         }
         Relationships: [
         {
@@ -1065,6 +1144,11 @@ export type Database = {
           fichier_original_url: string | null
           fichier_original_nom: string | null
           fichier_original_type: string | null
+          ice_vendeur: string | null
+          if_vendeur: string | null
+          ice_acheteur: string | null
+          if_acheteur: string | null
+          dgi_status: string
         }
         Insert: {
           id?: string
@@ -1094,6 +1178,11 @@ export type Database = {
           fichier_original_url?: string | null
           fichier_original_nom?: string | null
           fichier_original_type?: string | null
+          ice_vendeur?: string | null
+          if_vendeur?: string | null
+          ice_acheteur?: string | null
+          if_acheteur?: string | null
+          dgi_status?: string
         }
         Update: {
           id?: string
@@ -1123,6 +1212,11 @@ export type Database = {
           fichier_original_url?: string | null
           fichier_original_nom?: string | null
           fichier_original_type?: string | null
+          ice_vendeur?: string | null
+          if_vendeur?: string | null
+          ice_acheteur?: string | null
+          if_acheteur?: string | null
+          dgi_status?: string
         }
         Relationships: [
         {
@@ -2055,6 +2149,9 @@ export type Database = {
           document_type: string | null
           categorie: string | null
           compte_comptable: string | null
+          pointe: boolean
+          quittance_path: string | null
+          quittance_nom: string | null
         }
         Insert: {
           id?: string
@@ -2075,6 +2172,9 @@ export type Database = {
           document_type?: string | null
           categorie?: string | null
           compte_comptable?: string | null
+          pointe?: boolean
+          quittance_path?: string | null
+          quittance_nom?: string | null
         }
         Update: {
           id?: string
@@ -2095,6 +2195,9 @@ export type Database = {
           document_type?: string | null
           categorie?: string | null
           compte_comptable?: string | null
+          pointe?: boolean
+          quittance_path?: string | null
+          quittance_nom?: string | null
         }
         Relationships: [
         {

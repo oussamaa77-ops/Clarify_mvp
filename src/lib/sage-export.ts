@@ -4,6 +4,8 @@
 //
 // Compte collectif (général) côté Maroc : clients = 3421, fournisseurs = 4411.
 
+import { normaliserNumeroCompte } from "./numero-compte";
+
 export type TiersType = "client" | "fournisseur";
 
 export interface TiersSage {
@@ -17,6 +19,9 @@ export interface TiersSage {
   telephone?: string | null;
 }
 
+// Racines PCM, en forme COURTE : elles servent de prefixe dans tout le code.
+// La colonne CSV, elle, sort en forme canonique 8 chiffres — Sage attend une
+// longueur fixe et refuse un fichier qui melange 4 et 8.
 const COMPTE_COLLECTIF: Record<TiersType, string> = { client: "3421", fournisseur: "4411" };
 const PREFIXE: Record<TiersType, string> = { client: "C", fournisseur: "F" };
 
@@ -51,7 +56,7 @@ const esc = (v: unknown): string => {
  * afin que chaque ligne ait un n° de compte tiers (obligatoire dans Sage).
  */
 export function buildSageTiersCSV(tiers: TiersSage[], type: TiersType): string {
-  const collectif = COMPTE_COLLECTIF[type];
+  const collectif = normaliserNumeroCompte(COMPTE_COLLECTIF[type]);
   const typeLabel = type === "client" ? "Client" : "Fournisseur";
 
   // Pré-affecte un code auto aux tiers sans code, sans collisionner l'existant.

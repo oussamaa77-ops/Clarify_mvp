@@ -29,6 +29,13 @@ const etats: [string, EtatPeriode, Quittance | null][] = [
     ...base, declaree: true, resteAPayer: 7500,
     detailBouclage: "Période non soldée au 2026-03-31 : 4456 = 7500.00.",
   }, null],
+  ["2b — PRÉLEVÉE LE 20 AVRIL (hors bornes de mars : le solde au 31/03 ment)", {
+    ...base, declaree: true,
+    // Le bouclage, arrêté au 31 mars, ignore le règlement d'avril — à bon droit.
+    resteAPayer: 7500, detailBouclage: "Période non soldée au 2026-03-31 : 4456 = 7500.00 (TVA due non prélevée).",
+    resteAPayerPeriode: 0, solde4456: 0, resteAPayable: 0,
+    regle: true, montantRegle: 7500, dateReglement: "2026-04-20",
+  }, null],
   ["3 — PAYÉE, QUITTANCE JOINTE, RESTE À POINTER", {
     ...base, declaree: true, resteAPayer: 0, bouclee: true, detailBouclage: null,
   }, { nom: "DECL-TVA-2026-03.pdf", chemin: "x/DECL-TVA-2026-03.pdf", traceEnBase: true }],
@@ -58,7 +65,18 @@ const etats: [string, EtatPeriode, Quittance | null][] = [
   }, null],
 ];
 
+const MONTRER_MODALE = true; // TEMPORAIRE
+
 function Preview() {
+  if (MONTRER_MODALE) {
+    return (
+      <ModalPrelevementDgi
+        periode="2026-03" tvaNette={7500} soldeCumule={11700} plafond={7500}
+        plusieursComptes={false} travail={false}
+        onFermer={() => {}} onValider={() => {}}
+      />
+    );
+  }
   return (
     <div className="p-8 max-w-4xl mx-auto space-y-10 bg-background">
       {etats.map(([titre, etat, quittance]) => (

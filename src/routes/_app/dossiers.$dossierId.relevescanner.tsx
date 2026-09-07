@@ -17,6 +17,7 @@ import { enregistrerPaiement } from "@/lib/paiements";
 import { traiterPagesEnPipeline } from "@/lib/pipeline-pages";
 import { COMPTE_CAISSE_DEFAUT } from "@/lib/comptes-tresorerie";
 import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
+import { normaliserComptesLignes } from "@/lib/numero-compte";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/relevescanner")({
   component: RelEveScanner,
@@ -661,7 +662,7 @@ function RelEveScanner() {
       // Le lot est refusé EN ENTIER si une seule estampille manque : mieux vaut
       // un scan à rejouer qu'un grand livre à auditer.
       assertEcrituresTresorerie(ecritures, { origine: "releve" });
-      await supabase.from("ecritures_comptables").insert(ecritures);
+      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
 
       // Solder les factures rapprochées via un PAIEMENT (source de vérité) couvrant le
       // reste dû ; le trigger recalcule montant_paye/restant/statut. Ces transactions

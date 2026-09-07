@@ -26,6 +26,22 @@ export interface DocumentViewerSource {
   /** Bucket privé + chemin — téléchargé via l'API storage. */
   bucket?: string | null;
   path?: string | null;
+  /**
+   * Contenu EN MÉMOIRE, encodé en base64. Pour les documents qui n'existent
+   * dans aucun bucket parce qu'ils sont fabriqués à la demande : la facture
+   * officielle PDF/A-3, notamment, est reconstruite à chaque affichage à partir
+   * des données scellées, et n'a donc pas de fichier à télécharger.
+   */
+  base64?: string | null;
+}
+
+/** base64 → octets, sans passer par une chaîne intermédiaire de la taille du
+ *  fichier (un PDF de 300 Ko fait 400 Ko de base64). */
+function base64VersBlob(base64: string, mimeType: string): Blob {
+  const binaire = atob(base64);
+  const octets = new Uint8Array(binaire.length);
+  for (let i = 0; i < binaire.length; i++) octets[i] = binaire.charCodeAt(i);
+  return new Blob([octets], { type: mimeType });
 }
 
 // Extrait { bucket, path } d'une URL de stockage Supabase (public/sign/authenticated),
@@ -101,7 +117,11 @@ export function DocumentViewer({
         let store = (source.bucket && source.path) ? { bucket: source.bucket, path: source.path } : null;
         if (!store && source.url) store = parseStorageUrl(source.url);
 
-        if (store) {
+        // Le contenu en mémoire prime : il a été fabriqué pour CET affichage et
+        // n'a pas d'équivalent en stockage à aller rechercher.
+        if (source.base64) {
+          blob = base64VersBlob(source.base64, mime || "application/octet-stream");
+        } else if (store) {
           const { data, error: dlErr } = await supabase.storage.from(store.bucket).download(store.path);
           if (dlErr || !data) throw dlErr ?? new Error("Fichier introuvable dans le stockage.");
           blob = data;
@@ -157,7 +177,11 @@ export function DocumentViewer({
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, source?.url, source?.bucket, source?.path]);
+    // `source.base64` est comparé par VALEUR : c'est ce qui permet de ré-ouvrir
+    // le panneau sur un PDF régénéré (empreinte ou statut changés) sans que
+    // React croie voir la même source. Le coût est une comparaison de chaînes,
+    // négligeable devant le rendu du document lui-même.
+  }, [open, source?.url, source?.bucket, source?.path, source?.base64]);
 
   // Libère l'object URL au démontage.
   useEffect(() => () => { if (rawUrlRef.current) URL.revokeObjectURL(rawUrlRef.current); }, []);

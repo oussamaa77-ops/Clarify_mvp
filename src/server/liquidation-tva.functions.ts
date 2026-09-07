@@ -34,8 +34,10 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
   COMPTE_TVA_DUE, bornesPeriode, construireOdDeclaration, construireOdPaiementDgi,
   controlerBouclagePeriode, controlerPiece, liquiderTva, referenceDeclaration,
+  reglementsDgiPeriode, resteExigible, soldeTvaDue,
   type LiquidationTva,
 } from "@/lib/liquidation-tva";
+import { normaliserComptesLignes } from "@/lib/numero-compte";
 
 let PROXY_DIRECT = false;
 async function proxyFetch(input: any, init?: any): Promise<Response> {
@@ -109,8 +111,25 @@ export interface EtatPeriodeTva {
   liquidation: LiquidationTva | null;
   /** La déclaration a-t-elle déjà été générée ? */
   declaree: boolean;
-  /** Montant restant au 4456 : 0,00 quand la TVA déclarée a été prélevée. */
+  /**
+   * Solde du 4456 arrêté à la FIN de la période — la grandeur du BOUCLAGE.
+   *
+   * Ne pas s'en servir pour savoir si la période est payée : le prélèvement
+   * d'avril n'y figure pas quand la période est mars. Utiliser `resteAPayable`.
+   */
   resteAPayer: number;
+  /** Solde du 4456 à ce jour, toutes dates confondues : le plafond d'un paiement. */
+  solde4456: number;
+  /** Reste dû sur la déclaration de CETTE période, règlements postérieurs déduits. */
+  resteAPayerPeriode: number;
+  /** Ce qui est réellement exigible : min des deux précédents, jamais négatif. */
+  resteAPayable: number;
+  /** Un règlement DGI est-il rattaché à la déclaration, quelle qu'en soit la date ? */
+  regle: boolean;
+  /** Montant déjà prélevé sur cette déclaration. */
+  montantRegle: number;
+  /** Date du dernier prélèvement — souvent POSTÉRIEURE à la période. */
+  dateReglement: string | null;
   /** La période est-elle close ? Un crédit reportable ne l'en empêche pas. */
   bouclee: boolean;
   detailBouclage: string | null;
@@ -134,7 +153,9 @@ export async function lireEtatPeriodeTva(
 ): Promise<EtatPeriodeTva> {
   const vide: EtatPeriodeTva = {
     ok: false, raison: null, periode: data.periode, liquidation: null,
-    declaree: false, resteAPayer: 0, bouclee: false, detailBouclage: null,
+    declaree: false, resteAPayer: 0, solde4456: 0, resteAPayerPeriode: 0,
+    resteAPayable: 0, regle: false, montantRegle: 0, dateReglement: null,
+    bouclee: false, detailBouclage: null,
     creditReporte: 0, pointe: false, pointeLe: null, transactionId: null,
     quittancePath: null, quittanceNom: null, tracable: false,
   };
@@ -145,8 +166,12 @@ export async function lireEtatPeriodeTva(
   if (erreur) return { ...vide, raison: erreur };
 
   const liquidation = liquiderTva(lignes, data.periode);
+  // Deux lectures du même cycle : `lignesDuCycle` rend les LIGNES (pointage,
+  // transaction rapprochée), `reglementsDgiPeriode` rend les MONTANTS, sans
+  // filtre de date — le prélèvement de la TVA de mars est daté d'avril.
   const cycle = lignesDuCycle(lignes, data.periode);
-  const declaree = cycle.length > 0;
+  const reglements = reglementsDgiPeriode(lignes, data.periode);
+  const declaree = reglements.declaree;
 
   // Le cycle n'est pointé que si TOUTES ses lignes le sont : une déclaration
   // cochée dont le prélèvement ne l'est pas n'est pas un règlement vérifié.
@@ -166,9 +191,16 @@ export async function lireEtatPeriodeTva(
   }
 
   const bouclage = controlerBouclagePeriode(lignes, data.periode);
+  const solde4456 = soldeTvaDue(lignes);
   return {
     ok: true, raison: null, periode: bornes.label, liquidation, declaree,
     resteAPayer: bouclage?.due ?? 0,
+    solde4456,
+    resteAPayerPeriode: reglements.reste,
+    resteAPayable: resteExigible(reglements.reste, solde4456),
+    regle: reglements.regle > 0.005,
+    montantRegle: reglements.regle,
+    dateReglement: reglements.dernierReglement,
     bouclee: bouclage?.solde ?? false,
     detailBouclage: bouclage?.raison ?? null,
     creditReporte: bouclage?.creditReporte ?? 0,
@@ -222,7 +254,7 @@ export async function executerDeclarationTva(
   }
 
   const { error } = await sb.from("ecritures_comptables").insert(
-    od.map((l) => ({ ...l, dossier_id: data.dossierId, valide: true })),
+    normaliserComptesLignes(od.map((l) => ({ ...l, dossier_id: data.dossierId, valide: true }))),
   );
   if (error) return { ...vide, liquidation: liq, raison: String(error.message ?? error) };
 
@@ -304,11 +336,19 @@ export async function executerPaiementDgi(
     return { ...vide, raison: `La période ${etat.periode} n'est pas déclarée : générez d'abord l'OD de déclaration.` };
   }
 
-  const reste = etat.resteAPayer;
+  // Exigible = reste de CETTE déclaration, borné par le solde vivant du 4456.
+  // Prendre le solde arrêté à la fin de période autoriserait un second
+  // prélèvement pour une déclaration déjà réglée le mois suivant.
+  const reste = etat.resteAPayable;
   const montant = data.montant != null ? Math.round(Number(data.montant) * 100) / 100 : reste;
   if (montant <= 0) {
     return { ...vide, ok: true, resteApres: reste,
-      raison: reste <= 0 ? "Rien à payer : le compte 4456 est déjà soldé." : "Montant nul." };
+      raison: reste <= 0
+        ? etat.regle
+          ? `Rien à payer : la déclaration ${etat.periode} a déjà été réglée (${etat.montantRegle.toFixed(2)} MAD`
+            + `${etat.dateReglement ? ` le ${etat.dateReglement}` : ""}).`
+          : "Rien à payer : le compte 4456 est déjà soldé."
+        : "Montant nul." };
   }
   // On tolère un paiement PARTIEL (échéancier DGI) mais jamais un paiement
   // supérieur à la dette : il rendrait le 4456 débiteur, ce qui ne veut rien dire.
@@ -323,14 +363,14 @@ export async function executerPaiementDgi(
   const ctrl = controlerPiece(od);
   if (!ctrl.ok) return { ...vide, raison: ctrl.raison };
 
-  const lignes = od.map((l) => ({
+  const lignes = normaliserComptesLignes(od.map((l) => ({
     ...l, dossier_id: data.dossierId, valide: true,
     transaction_id: data.transactionId ?? null,
-  }));
+  })));
   let { error } = await sb.from("ecritures_comptables").insert(lignes);
   if (error && (error.code === "42703" || String(error.message ?? "").includes("transaction_id"))) {
     ({ error } = await sb.from("ecritures_comptables")
-      .insert(od.map((l) => ({ ...l, dossier_id: data.dossierId, valide: true }))));
+      .insert(normaliserComptesLignes(od.map((l) => ({ ...l, dossier_id: data.dossierId, valide: true })))));
   }
   if (error) return { ...vide, raison: String(error.message ?? error) };
 
@@ -381,9 +421,11 @@ export async function executerPointageTva(
     return { ...vide, raison:
       `La période ${etat.periode} dégage un crédit de TVA reportable : aucun prélèvement DGI à pointer.` };
   }
-  if (data.pointe && etat.resteAPayer > 0.005) {
+  // Exigible, et non solde de fin de période : un prélèvement passé en avril
+  // solde bien la déclaration de mars, et doit pouvoir être pointé.
+  if (data.pointe && etat.resteAPayable > 0.005) {
     return { ...vide, raison:
-      `Le compte 4456 n'est pas soldé (${etat.resteAPayer.toFixed(2)} MAD restants) : `
+      `Le compte 4456 n'est pas soldé (${etat.resteAPayable.toFixed(2)} MAD restants) : `
       + "enregistrez le prélèvement DGI avant de pointer le règlement." };
   }
 

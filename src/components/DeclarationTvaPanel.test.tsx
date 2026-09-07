@@ -22,7 +22,9 @@ vi.mock("@/server/liquidation-tva.functions", () => ({
   pointerTvaPeriode: vi.fn(), enregistrerQuittanceTva: vi.fn(),
 }));
 
-import { VueDeclarationTva, type EtatPeriode, type Quittance } from "./DeclarationTvaPanel";
+import {
+  ModalPrelevementDgi, VueDeclarationTva, type EtatPeriode, type Quittance,
+} from "./DeclarationTvaPanel";
 
 const periodes = [{ valeur: "2026-03", label: "Mars 2026" }];
 
@@ -277,6 +279,125 @@ describe("Période en crédit de TVA", () => {
   it("valide aussi sur la seule trace en base du récépissé", () => {
     monter({ ...enCredit, quittancePath: "d1/DECL-TVA-2026-03.pdf" });
     expect(screen.getByText(/Période validée/)).toBeDefined();
+  });
+});
+
+// ─── Prélèvement DGI : deux montants qu'il ne faut pas confondre ─────────────
+// La TVA nette de la période est ce que la déclaration doit ; le solde du 4456
+// est un compte courant avec l'État, toutes périodes mêlées. Pré-remplir avec le
+// second faisait payer l'arriéré d'un autre mois sous la référence de celui-ci.
+describe("Modale de prélèvement DGI", () => {
+  const monterModale = (props: Partial<Parameters<typeof ModalPrelevementDgi>[0]> = {}) => {
+    const onValider = vi.fn();
+    const onFermer = vi.fn();
+    render(
+      <ModalPrelevementDgi
+        periode="2026-03" tvaNette={7500} soldeCumule={7500} plafond={7500}
+        plusieursComptes={false} travail={false}
+        onFermer={onFermer} onValider={onValider}
+        {...props}
+      />,
+    );
+    return { onValider, onFermer };
+  };
+  const champMontant = () => screen.getByLabelText(/Montant \(MAD\)/i) as HTMLInputElement;
+
+  it("pré-remplit avec la TVA NETTE de la période, pas avec le solde du 4456", () => {
+    monterModale({ tvaNette: 7500, soldeCumule: 11700, plafond: 11700 });
+    expect(champMontant().value).toBe("7500");
+  });
+
+  it("affiche les deux montants côte à côte dans la légende", () => {
+    monterModale({ tvaNette: 7500, soldeCumule: 11700, plafond: 11700 });
+    const legende = screen.getByText(/TVA de la période/).textContent ?? "";
+    expect(legende).toContain(mad(7500));
+    expect(legende).toMatch(/Solde cumulé 4456/);
+    expect(legende).toContain(mad(11700));
+  });
+
+  it("ne propose jamais plus que ce qui est exigible", () => {
+    // Dette de 7 500 déclarée, mais un crédit antérieur ne laisse que 3 000 dus.
+    monterModale({ tvaNette: 7500, soldeCumule: 3000, plafond: 3000 });
+    expect(champMontant().value).toBe("3000");
+  });
+
+  it("transmet la saisie telle quelle, virgule décimale comprise", () => {
+    const { onValider } = monterModale();
+    fireEvent.change(champMontant(), { target: { value: "2500,50" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Enregistrer$/ }));
+    expect(onValider).toHaveBeenCalledWith(
+      expect.objectContaining({ montant: 2500.5, compteBanque: "5141" }),
+    );
+  });
+
+  it("bloque une saisie au-delà du plafond au lieu de la laisser partir en erreur", () => {
+    const { onValider } = monterModale({ plafond: 7500 });
+    fireEvent.change(champMontant(), { target: { value: "9000" } });
+    expect(screen.getByText(/dépasse le solde exigible/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: /^Enregistrer$/ }));
+    expect(onValider).not.toHaveBeenCalled();
+  });
+
+  it("refuse un montant vide ou nul", () => {
+    const { onValider } = monterModale();
+    fireEvent.change(champMontant(), { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Enregistrer$/ }));
+    expect(onValider).not.toHaveBeenCalled();
+  });
+
+  it("laisse le champ vide quand il n'y a rien à payer", () => {
+    monterModale({ tvaNette: 0, soldeCumule: -3000, plafond: 0 });
+    expect(champMontant().value).toBe("");
+  });
+});
+
+// ─── Détection du règlement, date ignorée ────────────────────────────────────
+describe("Étape 2 — règlement postérieur à la période", () => {
+  /** Mars déclarée puis prélevée le 20 avril : le solde au 31 mars ment. */
+  const regleEnAvril: Partial<EtatPeriode> = {
+    declaree: true, resteAPayer: 7500, resteAPayerPeriode: 0, solde4456: 0,
+    resteAPayable: 0, regle: true, montantRegle: 7500, dateReglement: "2026-04-20",
+  };
+
+  it("passe l'étape 2 au vert et nomme le prélèvement détecté", () => {
+    monter(regleEnAvril);
+    expect(screen.queryByRole("button", { name: /Enregistrer le prélèvement/i })).toBeNull();
+    const detail = screen.getByText(/Prélèvement de/);
+    expect(detail.textContent).toContain(mad(7500));
+    expect(detail.textContent).toContain("2026-04-20");
+    expect(screen.queryByText(/Reste 7/)).toBeNull();
+  });
+
+  it("explique pourquoi le bouclage, arrêté au 31/03, ne voit pas ce règlement", () => {
+    monter({
+      ...regleEnAvril, bouclee: false,
+      detailBouclage: "Période non soldée au 2026-03-31 : 4456 = 7500.00 (TVA due non prélevée).",
+    });
+    const carte = screen.getByText(/TVA due non prélevée/).closest("span");
+    expect(carte?.textContent).toMatch(/postérieur au 2026-03-31/);
+    expect(carte?.textContent).toMatch(/La déclaration, elle, est réglée/);
+  });
+
+  it("débloque le pointage de l'étape 4", () => {
+    monter({ ...regleEnAvril, tracable: true });
+    const interrupteur = screen.getByRole("switch", { name: /Pointer le règlement/i });
+    expect(interrupteur.getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it("réclame toujours le solde quand rien n'a été prélevé", () => {
+    monter({ declaree: true, resteAPayer: 7500, resteAPayerPeriode: 7500, solde4456: 7500, resteAPayable: 7500 });
+    expect(screen.getByRole("button", { name: /Enregistrer le prélèvement/i })).toBeDefined();
+    expect(screen.getByText(/Reste 7\.500,00 MAD au compte 4456|Reste 7 500,00 MAD au compte 4456/))
+      .toBeDefined();
+  });
+
+  it("dit qu'un crédit antérieur a éteint le compte, sans inventer de prélèvement", () => {
+    monter({
+      declaree: true, resteAPayer: -902, resteAPayerPeriode: 1880, solde4456: -902,
+      resteAPayable: 0, regle: false,
+    });
+    expect(screen.getByText(/éteint par un crédit antérieur/)).toBeDefined();
+    expect(screen.queryByText(/Prélèvement de/)).toBeNull();
   });
 });
 

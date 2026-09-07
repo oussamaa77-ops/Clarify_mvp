@@ -10,6 +10,8 @@
 // de tableaux (AOA) déjà lu. Ça garde le module trivialement testable.
 // ============================================================================
 
+import { normaliserNumeroCompte } from "./numero-compte";
+
 export type TargetField =
   | "date" | "journal" | "compte" | "libelle"
   | "debit" | "credit" | "reference"
@@ -222,7 +224,12 @@ export function normalizeRows(dataRows: unknown[][], mapping: Mapping): {
     const isEmpty = !row || row.every((c) => str(c) === "");
     if (isEmpty) { skipped++; return; }
 
-    const compte = str(cell(row, mapping.compte));
+    // Forme canonique 8 chiffres dès la lecture : un grand livre Sage exporte
+    // « 5141 » là où un autre exporte « 51410000 ». Sans normalisation ici,
+    // deux imports du même dossier créent deux comptes pour la même banque.
+    // `inferJournal` et `deriveTiers` raisonnent par préfixe : ils sont
+    // indifférents au padding (cf. src/lib/numero-compte.ts).
+    const compte = normaliserNumeroCompte(str(cell(row, mapping.compte)));
     const libelle = str(cell(row, mapping.libelle));
     if (looksLikeTotal(libelle, compte)) { skipped++; return; }
 

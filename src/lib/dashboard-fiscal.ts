@@ -3,6 +3,7 @@
 // écrans ne font que l'afficher.
 
 import { DICTIONNAIRE_PCM } from "./categorization-engine";
+import { numeroSignificatif } from "./numero-compte";
 
 /** Facture (vente ou achat) vue sous l'angle des montants et du règlement. */
 export interface FactureFiscale {
@@ -324,12 +325,37 @@ const INTITULES_MOTEUR: Record<string, string> = Object.fromEntries(
  * On n'invente jamais : à défaut, l'intitulé reste vide et l'écran n'affiche que
  * le numéro de compte, qui lui est certain.
  */
+/**
+ * Vue du catalogue indexée AUSSI par forme courte.
+ *
+ * Depuis la normalisation à 8 chiffres, un référentiel peut arriver dans l'une
+ * ou l'autre forme selon qu'il a été migré ou non : « 6141 » ou « 61410000 ».
+ * La cascade ci-dessous raccourcit le compte, jamais la clef du catalogue — un
+ * catalogue déjà normalisé n'y serait donc plus jamais trouvé, et TOUS les
+ * intitulés disparaîtraient d'un coup. On indexe les deux formes, une seule
+ * fois par objet catalogue (les appels sont en boucle sur les comptes).
+ */
+const CATALOGUES_INDEXES = new WeakMap<Record<string, string>, Record<string, string>>();
+
+function indexerCatalogue(catalogue: Record<string, string>): Record<string, string> {
+  const cache = CATALOGUES_INDEXES.get(catalogue);
+  if (cache) return cache;
+  const index: Record<string, string> = { ...catalogue };
+  for (const [cle, valeur] of Object.entries(catalogue)) {
+    const court = numeroSignificatif(cle);
+    if (court && index[court] === undefined) index[court] = valeur;
+  }
+  CATALOGUES_INDEXES.set(catalogue, index);
+  return index;
+}
+
 export function intitulePcm(compte: string, catalogue: Record<string, string> = {}): string {
   const c = String(compte ?? "").trim();
   if (!c) return "";
+  const index = indexerCatalogue(catalogue);
   for (let i = c.length; i >= 4; i--) {
     const cle = c.slice(0, i);
-    const hit = catalogue[cle] ?? INTITULES_MOTEUR[cle];
+    const hit = index[cle] ?? INTITULES_MOTEUR[cle];
     if (hit) return hit;
   }
   return RUBRIQUES_PCM[c.slice(0, 3)] ?? "";

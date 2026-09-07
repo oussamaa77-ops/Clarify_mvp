@@ -14,6 +14,7 @@
 // ============================================================================
 
 import { createServerFn } from "@tanstack/react-start";
+import { normaliserNumeroCompte } from "@/lib/numero-compte";
 import { z } from "zod";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { normalizeLibelle } from "@/lib/import-grandlivre";
@@ -60,10 +61,13 @@ async function insertChunked(sb: SupabaseClient, table: string, rows: any[], siz
   }
 }
 
+// Le padding est porté par le SCHEMA, pas par l'appelant : l'import passe par
+// une server fn publique, et un client plus ancien (ou un appel direct) doit
+// produire la même forme canonique que l'écran courant.
 const ecritureSchema = z.object({
   date: z.string().nullable(),          // ISO ou null → ligne ignorée (date_ecriture NOT NULL)
   journal_code: z.string().default("OD"),
-  compte_numero: z.string().default(""),
+  compte_numero: z.string().default("").transform(normaliserNumeroCompte),
   libelle: z.string().default(""),
   debit: z.number().default(0),
   credit: z.number().default(0),
@@ -74,7 +78,7 @@ const ecritureSchema = z.object({
 const tierSchema = z.object({
   type: z.enum(["client", "fournisseur"]),
   nom: z.string(),
-  compte_numero: z.string().default(""),
+  compte_numero: z.string().default("").transform(normaliserNumeroCompte),
 });
 
 // ── importerGrandLivre ───────────────────────────────────────────────────────

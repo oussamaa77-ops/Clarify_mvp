@@ -17,6 +17,11 @@
 //   D 4456    montant déclaré
 //   C 5141    banque
 //
+// Ce prélèvement tombe APRÈS la période — la TVA de mars se paie en avril. Il se
+// rattache donc à sa déclaration par la RÉFÉRENCE DE PIÈCE, jamais par sa date :
+// c'est ce que fait `reglementsDgiPeriode`, et c'est ce qui permet de voir qu'une
+// période est réglée sans la déclarer « non soldée » pour cause de calendrier.
+//
 // À la fin de ce cycle, 44551, 34552 et 4456 sont tous les trois à 0,00 : c'est
 // le contrôle qui prouve que la période est réellement soldée.
 //
@@ -29,6 +34,10 @@
 // Logique pure : l'écran, l'écriture générée et le contrôle de cohérence
 // consomment le MÊME calcul.
 // ============================================================================
+
+// Le couple (compte de trésorerie → journal) vit dans comptes-tresorerie.ts, et
+// pas ici : le paiement DGI est un décaissement comme un autre.
+import { journalDeTresorerie } from "@/lib/comptes-tresorerie";
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 const nb = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
@@ -49,7 +58,22 @@ export interface LigneTva {
   debit?: number | null;
   credit?: number | null;
   reference_piece?: string | null;
+  libelle?: string | null;
 }
+
+/**
+ * Libellés des lignes de 4456 — ce sont eux qui disent QUEL geste a écrit la
+ * ligne, et le nom n'est pas cosmétique.
+ *
+ * Sur le 4456, la déclaration et le paiement se ressemblent : même référence de
+ * pièce, et un DÉBIT peut être l'un ou l'autre — le paiement d'une dette, mais
+ * aussi la constatation d'un crédit reportable. Ni le sens ni la date ne les
+ * séparent (le prélèvement peut tomber le dernier jour de la période). Le
+ * libellé, lui, est écrit par ce module et ne varie pas.
+ */
+export const LIBELLE_TVA_DUE = "TVA due";
+export const LIBELLE_CREDIT_REPORTABLE = "Crédit de TVA reportable";
+export const LIBELLE_PAIEMENT_DGI = "Paiement TVA DGI";
 
 /** Référence portée par l'OD de déclaration — la rend retrouvable et idempotente. */
 export const PREFIXE_DECLARATION_TVA = "DECL-TVA-";
@@ -106,6 +130,35 @@ const dansPeriode = (l: LigneTva, b: BornesPeriode): boolean => {
 const estDeclaration = (l: LigneTva): boolean =>
   txt(l.reference_piece).startsWith(PREFIXE_DECLARATION_TVA);
 
+/**
+ * Régularisation d'une période ANTÉRIEURE déjà déclarée.
+ *
+ * ─── Pourquoi elle doit sortir du flux ───────────────────────────────────────
+ * Une déclaration déposée ne se réécrit pas : c'est un acte transmis à la DGI.
+ * Quand elle s'avère fausse, on la corrige par une écriture de la période
+ * COURANTE — mais cette écriture ne décrit pas l'activité de la période
+ * courante, et la compter dans son flux la rendrait sans effet.
+ *
+ * Le cas concret : une TVA déduite trop tôt laisse le 34552 CRÉDITEUR. Pour le
+ * solder il faut le débiter — or tout débit de 3455 est, pour `liquiderTva`,
+ * une TVA déductible de la période. La régularisation s'accorderait donc à
+ * elle-même la déduction qu'elle est censée reprendre, et le compte repartirait
+ * créditeur à la déclaration suivante, indéfiniment.
+ *
+ * Hors flux, la mécanique se referme : le 34552 se solde, le 4456 porte la dette
+ * rendue à l'État, et le 3458 reste intact — la TVA redeviendra déductible le
+ * jour où le fournisseur sera réellement payé, et cette fois une seule fois.
+ *
+ * C'est aussi ce que dit l'imprimé SIMPL-TVA, qui range les régularisations sur
+ * une ligne à part et non dans la TVA déductible du mois.
+ */
+export const PREFIXE_REGULARISATION_TVA = "REGUL-TVA-";
+const estRegularisation = (l: LigneTva): boolean =>
+  txt(l.reference_piece).startsWith(PREFIXE_REGULARISATION_TVA);
+
+/** Lignes que la liquidation d'une période ne doit PAS compter dans son flux. */
+const estHorsFlux = (l: LigneTva): boolean => estDeclaration(l) || estRegularisation(l);
+
 export interface LiquidationTva {
   periode: string;
   bornes: BornesPeriode;
@@ -136,7 +189,7 @@ export function liquiderTva(lignes: LigneTva[], periode: string): LiquidationTva
   const bornes = bornesPeriode(periode);
   if (!bornes) return null;
 
-  const retenues = lignes.filter((l) => dansPeriode(l, bornes) && !estDeclaration(l));
+  const retenues = lignes.filter((l) => dansPeriode(l, bornes) && !estHorsFlux(l));
   const collectee = round2(retenues
     .filter((l) => txt(l.compte_numero).startsWith(RACINE_COLLECTEE))
     .reduce((s, l) => s + nb(l.credit) - nb(l.debit), 0));
@@ -155,7 +208,12 @@ export function liquiderTva(lignes: LigneTva[], periode: string): LiquidationTva
 }
 
 export interface LigneDeclaration {
-  journal_code: "OD";
+  /**
+   * OD pour la DÉCLARATION (un reclassement, aucun argent ne bouge) ; BQ ou CAI
+   * pour le PAIEMENT (cf. `construireOdPaiementDgi`). Le journal OD n'a pas le
+   * droit de porter de la trésorerie — voir `controlerJournalOd`.
+   */
+  journal_code: "OD" | "BQ" | "CAI";
   compte_numero: string;
   date_ecriture: string;
   libelle: string;
@@ -203,19 +261,110 @@ export function construireOdDeclaration(liq: LiquidationTva): LigneDeclaration[]
       debit: liq.dette ? 0 : liq.montant,
       credit: liq.dette ? liq.montant : 0,
       libelle: (liq.dette
-        ? `TVA due - ${liq.periode}`
-        : `Crédit de TVA reportable - ${liq.periode}`).slice(0, 200),
+        ? `${LIBELLE_TVA_DUE} - ${liq.periode}`
+        : `${LIBELLE_CREDIT_REPORTABLE} - ${liq.periode}`).slice(0, 200),
     });
   }
   return lignes;
 }
 
+/** Libellés des régularisations — ils disent quel sens a été repris. */
+export const LIBELLE_REGUL_DEDUCTION = "Régularisation TVA déduite par anticipation";
+export const LIBELLE_REGUL_COLLECTE = "Régularisation TVA déclarée par anticipation";
+
+export interface ContexteRegularisationTva {
+  /** Période DÉJÀ DÉCLARÉE que l'on corrige (« 2024-11 »), pas celle où l'on écrit. */
+  periodeRegularisee: string;
+  /**
+   * `deduction` : TVA déduite trop tôt (34552 créditeur) — on la rend à l'État.
+   * `collecte`  : TVA déclarée trop tôt (44551 débiteur) — l'État la doit.
+   */
+  sens: "deduction" | "collecte";
+  /** Montant à reprendre, toujours POSITIF. */
+  montant: number;
+  /** Date de l'écriture : dans l'exercice OUVERT, jamais dans la période corrigée. */
+  date: string;
+  /** Précision libre ajoutée au libellé (n° de facture, fournisseur…). */
+  motif?: string | null;
+}
+
 /**
- * Écriture du PAIEMENT de la TVA à la DGI : D 4456 / C compte de banque.
+ * Écriture de régularisation d'une TVA déclarée par anticipation.
+ *
+ * ─── Le sens, et pourquoi il n'est pas symétrique ────────────────────────────
+ * Déduction anticipée : on a déduit une TVA non encore exigible. Le 34552 est
+ * créditeur du montant indûment déduit ; on le débite pour le solder, et on
+ * CRÉDITE le 4456 — la somme est due à l'État.
+ *
+ *   D 34552   montant      (solde la déduction prise à tort)
+ *   C 4456    montant      (dette rendue à l'État)
+ *
+ * Collecte anticipée : on a déclaré une TVA pas encore encaissée. Le 44551 est
+ * débiteur ; on le crédite, et on DÉBITE le 4456 — l'État nous doit cette
+ * avance, imputable sur les déclarations suivantes.
+ *
+ * ─── Ce qu'elle ne touche PAS ────────────────────────────────────────────────
+ * Le compte d'attente (3458 / 4458) reste intact, et c'est l'essentiel. La TVA
+ * y demeure en attente du fait générateur réel — le paiement du fournisseur, ou
+ * l'encaissement du client. Elle deviendra alors exigible par la bascule
+ * ordinaire, et sera déclarée là, une seule fois. Purger l'attente en même temps
+ * reviendrait à ratifier l'anticipation au lieu de la corriger.
+ */
+export function construireOdRegularisationTva(
+  ctx: ContexteRegularisationTva,
+): LigneDeclaration[] {
+  const montant = round2(Math.abs(nb(ctx.montant)));
+  if (montant < 0.005) return [];
+  const periode = txt(ctx.periodeRegularisee);
+  if (!bornesPeriode(periode)) return [];
+
+  const deduction = ctx.sens === "deduction";
+  const libelle = [
+    deduction ? LIBELLE_REGUL_DEDUCTION : LIBELLE_REGUL_COLLECTE,
+    periode,
+    txt(ctx.motif) || null,
+  ].filter(Boolean).join(" - ").slice(0, 200);
+
+  const commun = {
+    journal_code: "OD" as const,
+    date_ecriture: txt(ctx.date).slice(0, 10),
+    // La référence porte la période CORRIGÉE, pas celle de l'écriture : c'est
+    // elle qui rend la régularisation retrouvable depuis la déclaration fautive,
+    // et c'est le préfixe qui la sort du flux (cf. `estRegularisation`).
+    reference_piece: `${PREFIXE_REGULARISATION_TVA}${periode}`,
+    libelle,
+  };
+
+  const compteTva = deduction ? COMPTE_TVA_DEDUCTIBLE : COMPTE_TVA_COLLECTEE;
+  return [
+    { ...commun, compte_numero: compteTva, debit: deduction ? montant : 0, credit: deduction ? 0 : montant },
+    { ...commun, compte_numero: COMPTE_TVA_DUE, debit: deduction ? 0 : montant, credit: deduction ? montant : 0 },
+  ];
+}
+
+/**
+ * Écriture du PAIEMENT de la TVA à la DGI : D 4456 / C compte de trésorerie.
  *
  * Elle éteint la dette née de la déclaration. Le compte de trésorerie est un
  * paramètre et non 5141 en dur : le prélèvement peut tomber sur un autre compte
  * bancaire du dossier.
+ *
+ * ─── Pourquoi BQ / CAI et non OD ─────────────────────────────────────────────
+ * Cette pièce était émise en journal OD. C'était la violation la plus visible de
+ * l'invariant « pas de trésorerie en OD » (cf. `controlerJournalOd`) : le
+ * prélèvement de TVA est un vrai décaissement, il doit se retrouver dans le
+ * journal que le rapprochement bancaire lit. Logé en OD, il créditait 5141 sans
+ * qu'aucun écran de trésorerie ne le voie — le grand livre divergeait du relevé
+ * du montant de la TVA, chaque mois.
+ *
+ * Le journal se déduit du compte, jamais de l'appelant : un compte de rubrique
+ * 516 (caisse) va en CAI, tout le reste en BQ. Les rendre ENSEMBLE est la seule
+ * façon d'empêcher une pièce qui dirait « caisse » au compte et « banque » au
+ * journal (même raison que `imputationTresorerie`).
+ *
+ * Le rattachement du règlement à sa déclaration se fait par `reference_piece`
+ * (`DECL-TVA-<période>`) et par le compte 4456, jamais par le journal : le
+ * changement est donc sans effet sur `reglementsDgiPeriode`.
  */
 export function construireOdPaiementDgi(p: {
   montant: number; date: string; periode: string;
@@ -225,9 +374,9 @@ export function construireOdPaiementDgi(p: {
   if (m <= 0) return [];
   const banque = txt(p.compteBanque) || "5141";
   const commun = {
-    journal_code: "OD" as const,
+    journal_code: journalDeTresorerie(banque),
     date_ecriture: p.date,
-    libelle: `Paiement TVA DGI - ${txt(p.periode)}`.slice(0, 200),
+    libelle: `${LIBELLE_PAIEMENT_DGI} - ${txt(p.periode)}`.slice(0, 200),
     reference_piece: txt(p.reference) || referenceDeclaration(p.periode),
   };
   return [
@@ -235,6 +384,90 @@ export function construireOdPaiementDgi(p: {
     { ...commun, compte_numero: banque, debit: 0, credit: m },
   ];
 }
+
+// ─── Règlements DGI d'une période — SANS filtre de date ──────────────────────
+
+/** Ligne écrite par l'OD de DÉCLARATION (et non par un règlement). */
+const estLigneDeclarationTva = (l: LigneTva): boolean => {
+  const lib = txt(l.libelle);
+  return lib.startsWith(LIBELLE_TVA_DUE) || lib.startsWith(LIBELLE_CREDIT_REPORTABLE);
+};
+
+export interface ReglementsPeriode {
+  /** L'OD de déclaration existe-t-elle ? */
+  declaree: boolean;
+  /** Dette portée au crédit du 4456 par la déclaration, en positif (0 sur un crédit). */
+  detteConstatee: number;
+  /** Σ des règlements DGI imputés sur cette déclaration, à quelque date que ce soit. */
+  regle: number;
+  /** Reste dû sur la déclaration de CETTE période. */
+  reste: number;
+  /** Date du dernier règlement, ou `null` — elle peut tomber APRÈS la période. */
+  dernierReglement: string | null;
+}
+
+/**
+ * Règlements rattachés à la déclaration d'une période, DATE IGNORÉE.
+ *
+ * Le rattachement se fait par `reference_piece` (`DECL-TVA-<période>`), qui suit
+ * la pièce et non le calendrier. C'est indispensable : la TVA de mars se paie en
+ * avril. Chercher le règlement dans les bornes de la période — ce que fait
+ * `controlerBouclagePeriode`, à bon droit pour le BOUCLAGE — le rendrait
+ * invisible, et l'écran réclamerait éternellement un prélèvement déjà passé.
+ *
+ * Le reste dû ici est celui de la PIÈCE, pas du compte : le 4456 est un compte
+ * courant avec l'État, il mélange les périodes (cf. `soldeTvaDue`). Ce qui est
+ * réellement exigible est le plus petit des deux — voir `resteExigible`.
+ */
+export function reglementsDgiPeriode(lignes: LigneTva[], periode: string): ReglementsPeriode {
+  const ref = referenceDeclaration(periode);
+  const cycle = lignes.filter((l) =>
+    txt(l.reference_piece) === ref && txt(l.compte_numero).startsWith(COMPTE_TVA_DUE));
+
+  const declarations = cycle.filter(estLigneDeclarationTva);
+  // Un crédit reportable est un DÉBIT du 4456 : le net est négatif, et il n'y a
+  // aucune dette à éteindre. D'où le plancher à zéro.
+  const detteConstatee = Math.max(0, round2(
+    declarations.reduce((s, l) => s + nb(l.credit) - nb(l.debit), 0)));
+
+  const paiements = cycle.filter((l) => !estLigneDeclarationTva(l) && nb(l.debit) > 0);
+  const regle = round2(paiements.reduce((s, l) => s + nb(l.debit), 0));
+
+  return {
+    declaree: cycle.length > 0,
+    detteConstatee, regle,
+    reste: round2(detteConstatee - regle),
+    dernierReglement: paiements.map((l) => txt(l.date_ecriture).slice(0, 10))
+      .filter(Boolean).sort().pop() ?? null,
+  };
+}
+
+/**
+ * Solde du 4456 À CE JOUR, toutes dates confondues : positif = dette envers
+ * l'État, négatif = crédit de TVA.
+ *
+ * C'est le montant qu'on peut réellement prélever maintenant, donc le plafond de
+ * la saisie. À ne pas confondre avec le solde arrêté à la fin d'une période, qui
+ * répond à une autre question (« cette période est-elle bouclée ? ») et ignore
+ * par construction les règlements postérieurs.
+ */
+export function soldeTvaDue(lignes: LigneTva[]): number {
+  return round2(lignes
+    .filter((l) => txt(l.compte_numero).startsWith(COMPTE_TVA_DUE))
+    .reduce((s, l) => s + nb(l.credit) - nb(l.debit), 0));
+}
+
+/**
+ * Ce qui est réellement exigible sur une période : le reste de SA déclaration,
+ * borné par le solde du compte.
+ *
+ * Les deux bornes disent une vérité différente et il faut les deux. Le reste de
+ * la pièce empêche de payer deux fois la même déclaration ; le solde du compte
+ * empêche de réclamer une dette qu'un crédit antérieur a déjà absorbée — cas
+ * réel, le 4456 étant un compte courant. Jamais négatif : « rien à payer ».
+ */
+export const resteExigible = (resteCycle: number, soldeCompte: number): number =>
+  Math.max(0, round2(Math.min(nb(resteCycle), nb(soldeCompte))));
 
 // ─── Contrôles & invariants ──────────────────────────────────────────────────
 

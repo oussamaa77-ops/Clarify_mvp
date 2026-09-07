@@ -14,12 +14,26 @@
 // plus que le peindre — et le test le vérifie sans navigateur.
 // ============================================================================
 
+import { resteExigible } from "./liquidation-tva";
+
 export type EtapeCycleTva =
   | "neant" | "a_declarer" | "a_payer" | "a_justifier" | "a_pointer" | "liquidee";
 
 export interface EtatCycleTva {
   declaree?: boolean | null;
+  /**
+   * Solde du 4456 arrêté à la FIN de la période (bouclage).
+   *
+   * Sert de repli quand les deux champs suivants manquent, mais ne décide plus
+   * seul : arrêté au 31 mars, il ignore le prélèvement du 20 avril.
+   */
   resteAPayer?: number | null;
+  /** Solde du 4456 à ce jour, toutes dates confondues. */
+  solde4456?: number | null;
+  /** Reste dû sur la déclaration de CETTE période, règlements postérieurs déduits. */
+  resteAPayerPeriode?: number | null;
+  /** Un règlement DGI est-il rattaché à la déclaration de la période ? */
+  regle?: boolean | null;
   pointe?: boolean | null;
   tracable?: boolean | null;
   /**
@@ -36,6 +50,24 @@ export interface EtatCycleTva {
 const EPS = 0.005;
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
+
+/** Solde du 4456 à retenir : le solde vivant, à défaut celui de fin de période. */
+const solde4456 = (etat: EtatCycleTva | null | undefined): number =>
+  Number(etat?.solde4456 ?? etat?.resteAPayer ?? 0);
+
+/**
+ * Ce qu'il reste À PAYER sur la période, tel que l'écran doit le lire.
+ *
+ * Deux bornes, et il faut les deux (cf. `resteExigible`) : le reste de la pièce
+ * — qui tombe à zéro dès qu'un prélèvement est rattaché à la déclaration, même
+ * daté du mois suivant — et le solde du compte, qui peut déjà être éteint par un
+ * crédit antérieur. Lire `resteAPayer` seul réclamerait un prélèvement déjà fait.
+ */
+export function resteAPayerTva(etat: EtatCycleTva | null | undefined): number {
+  const solde = solde4456(etat);
+  const cycle = etat?.resteAPayerPeriode;
+  return resteExigible(cycle == null ? solde : Number(cycle), solde);
+}
 
 /**
  * La période dégage-t-elle un CRÉDIT de TVA — TVA nette à payer nulle et report
@@ -61,7 +93,7 @@ export function estCreditTva(etat: EtatCycleTva | null | undefined): boolean {
  */
 export function soldeHistoriqueTva(etat: EtatCycleTva | null | undefined): number {
   if (!estCreditTva(etat)) return 0;
-  const du = Number(etat?.resteAPayer ?? 0);
+  const du = solde4456(etat);
   return du > EPS ? round2(du) : 0;
 }
 
@@ -79,7 +111,7 @@ export function etapeCycleTva(etat: EtatCycleTva | null | undefined): EtapeCycle
   if (!liq || liq.neant) return "neant";
   if (!etat?.declaree) return "a_declarer";
   if (estCreditTva(etat)) return etat?.quittance ? "liquidee" : "a_justifier";
-  if (Number(etat?.resteAPayer ?? 0) > EPS) return "a_payer";
+  if (resteAPayerTva(etat) > EPS) return "a_payer";
   if (etat?.pointe) return "liquidee";
   return "a_pointer";
 }
@@ -153,7 +185,7 @@ export function actionsCycleTva(etat: EtatCycleTva | null | undefined): ActionsC
       ? etat?.quittance
         ? "Aucun prélèvement à pointer : la période en crédit de TVA est validée par l'OD de liquidation et son récépissé."
         : "Aucun prélèvement à pointer : la période dégage un crédit de TVA reportable — déposez le récépissé SIMPL-TVA pour la valider."
-      : Number(etat?.resteAPayer ?? 0) > EPS
+      : resteAPayerTva(etat) > EPS
         ? "Le compte 4456 n'est pas soldé : enregistrez le prélèvement DGI."
         : !tracable
           ? "Colonnes de traçabilité absentes : appliquez la migration 20260809130000."

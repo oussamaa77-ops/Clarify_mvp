@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   sousTotauxParClasse, totalGeneralBalance, resultatNetBalance, synthetiserBalance,
   ventilerSolde, CLASSES_CGNC, type LigneBalance,
+  comptesSuspensNonApures, auditComptesSuspens,
+  RACINE_COMPTES_SUSPENS, COMPTES_ATTENTE_BANQUE,
 } from "./balance-comptable";
 
 /** Ligne de balance ; le solde/sens sont dérivés comme dans l'écran. */
@@ -196,5 +198,110 @@ describe("synthetiserBalance", () => {
     const c6 = s.sousTotaux.find(c => c.classe === "6")!;
     const c7 = s.sousTotaux.find(c => c.classe === "7")!;
     expect(s.resultat.resultat).toBe(c7.solde - c6.solde);
+  });
+});
+
+// ── Comptes d'attente non apurés (contrôle d'arrêté) ─────────────────────────
+describe("comptesSuspensNonApures", () => {
+  it("signale un 4712 créditeur — le cas réel du rapprochement bancaire", () => {
+    const sus = comptesSuspensNonApures([...BALANCE, l("4712", 0, 41500)]);
+    expect(sus).toHaveLength(1);
+    expect(sus[0]).toMatchObject({ compte: "4712", solde: 41500, sens: "C", attenteBancaire: true });
+    expect(sus[0].message).toMatch(/aucune pièce justificative/);
+  });
+
+  it("signale aussi un 4711 débiteur", () => {
+    const sus = comptesSuspensNonApures([l("4711", 1200, 0)]);
+    expect(sus[0]).toMatchObject({ compte: "4711", solde: 1200, sens: "D", attenteBancaire: true });
+  });
+
+  it("détecte par RACINE : le sous-compte normalisé sur 8 chiffres est vu", () => {
+    const sus = comptesSuspensNonApures([l("47120000", 0, 500)]);
+    expect(sus).toHaveLength(1);
+    expect(sus[0].attenteBancaire).toBe(true);
+  });
+
+  it("couvre toute la classe 47, pas seulement l'attente bancaire", () => {
+    const sus = comptesSuspensNonApures([l("4718", 900, 0)]);
+    expect(sus).toHaveLength(1);
+    expect(sus[0].attenteBancaire).toBe(false);
+    expect(sus[0].message).toMatch(/Compte transitoire/);
+  });
+
+  it("un compte d'attente SOLDÉ ne remonte pas — c'est l'état normal", () => {
+    expect(comptesSuspensNonApures([l("4712", 41500, 41500)])).toEqual([]);
+  });
+
+  it("ignore un résidu d'arrondi sous le seuil", () => {
+    expect(comptesSuspensNonApures([l("4712", 0, 0.004)])).toEqual([]);
+    expect(comptesSuspensNonApures([l("4712", 0, 0.5)])).toHaveLength(1);
+  });
+
+  it("ne se déclenche sur aucune autre classe", () => {
+    expect(comptesSuspensNonApures(BALANCE)).toEqual([]);
+    // 4411 fournisseur créditeur : une dette ordinaire, pas une attente.
+    expect(comptesSuspensNonApures([l("44110", 0, 1200)])).toEqual([]);
+  });
+
+  it("recalcule le solde depuis les CUMULS, pas depuis le champ solde", () => {
+    const menteuse: LigneBalance = {
+      compte: "4712", total_debit: 0, total_credit: 800, solde: 0, sens: "D",
+    };
+    expect(comptesSuspensNonApures([menteuse])[0].solde).toBe(800);
+  });
+
+  it("classe du plus lourd au plus léger", () => {
+    const sus = comptesSuspensNonApures([l("4711", 100, 0), l("4712", 0, 9000), l("4718", 500, 0)]);
+    expect(sus.map(s => s.compte)).toEqual(["4712", "4718", "4711"]);
+  });
+
+  it("tolère une balance vide", () => {
+    expect(comptesSuspensNonApures([])).toEqual([]);
+  });
+});
+
+describe("auditComptesSuspens", () => {
+  it("rend un verdict apuré quand rien ne traîne", () => {
+    const a = auditComptesSuspens(BALANCE);
+    expect(a).toMatchObject({ apure: true, total: 0, alerte: null });
+    expect(a.comptes).toEqual([]);
+  });
+
+  it("totalise en valeur ABSOLUE : un débit et un crédit ne se compensent pas", () => {
+    // 4711 débiteur 1000 et 4712 créditeur 1000 : deux travaux inachevés,
+    // pas un compte soldé. Les netter afficherait « rien à faire ».
+    const a = auditComptesSuspens([l("4711", 1000, 0), l("4712", 0, 1000)]);
+    expect(a.apure).toBe(false);
+    expect(a.total).toBe(2000);
+    expect(a.comptes).toHaveLength(2);
+  });
+
+  it("l'alerte nomme les comptes, le total et la conséquence", () => {
+    const a = auditComptesSuspens([l("4712", 0, 41500)]);
+    expect(a.alerte).toContain("4712");
+    expect(a.alerte).toContain("41500.00");
+    expect(a.alerte).toMatch(/à-nouveau/);
+  });
+
+  it("les constantes exposées sont celles du PCM marocain", () => {
+    expect(RACINE_COMPTES_SUSPENS).toBe("47");
+    expect(COMPTES_ATTENTE_BANQUE).toEqual(["4711", "4712"]);
+  });
+});
+
+describe("synthetiserBalance — le contrôle voyage avec le pied de balance", () => {
+  it("expose l'audit d'attente à côté des totaux", () => {
+    expect(synthetiserBalance(BALANCE).suspens.apure).toBe(true);
+    const s = synthetiserBalance([...BALANCE, l("4712", 0, 41500)]);
+    expect(s.suspens.apure).toBe(false);
+    expect(s.suspens.total).toBe(41500);
+  });
+
+  it("un compte d'attente n'altère NI les totaux NI le résultat", () => {
+    // Il pèse sur le bilan (classe 4), jamais sur le compte de résultat : c'est
+    // précisément pour ça qu'il faut l'alerte, le résultat affiché reste « beau ».
+    const avec = synthetiserBalance([...BALANCE, l("4712", 0, 41500)]);
+    const sans = synthetiserBalance(BALANCE);
+    expect(avec.resultat).toEqual(sans.resultat);
   });
 });

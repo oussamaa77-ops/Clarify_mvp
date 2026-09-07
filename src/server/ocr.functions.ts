@@ -356,14 +356,25 @@ export const writeAuditLog = createServerFn({ method: "POST" })
 // ─── PCM initialisation for new dossier ──────────────────────────────────────
 
 const PCM_COMPTES = [
+  // Report à nouveau — les deux contreparties de l'écriture d'à-nouveau, qui
+  // rouvre l'exercice en reportant les soldes de bilan (cf. src/lib/a-nouveaux.ts).
+  { numero: "1161", intitule: "Report à nouveau (solde créditeur)", type_compte: "passif" },
+  { numero: "1169", intitule: "Report à nouveau (solde débiteur)", type_compte: "passif" },
   { numero: "3421", intitule: "Clients", type_compte: "actif" },
+  { numero: "4191", intitule: "Clients — avances et acomptes reçus", type_compte: "passif" },
   { numero: "4411", intitule: "Fournisseurs", type_compte: "passif" },
   { numero: "44551", intitule: "TVA collectée", type_compte: "passif" },
   { numero: "34552", intitule: "TVA récupérable", type_compte: "actif" },
   { numero: "5141", intitule: "Banque", type_compte: "actif" },
   { numero: "5161", intitule: "Caisse", type_compte: "actif" },
+  // Les trois comptes de vente du PCM, avec leurs VRAIS intitulés. Le 7121 était
+  // libellé « Ventes de services » alors qu'il porte les BIENS PRODUITS, et le
+  // 7124 — le compte des prestations, celui que `compteVente` désigne pour une
+  // société de services — n'était pas créé du tout : le plan du dossier ne
+  // proposait donc aucun compte pour l'activité la plus courante.
   { numero: "7111", intitule: "Ventes de marchandises", type_compte: "produit" },
-  { numero: "7121", intitule: "Ventes de services", type_compte: "produit" },
+  { numero: "7121", intitule: "Ventes de biens produits", type_compte: "produit" },
+  { numero: "7124", intitule: "Ventes de services produits", type_compte: "produit" },
   { numero: "6141", intitule: "Achats de marchandises", type_compte: "charge" },
   { numero: "6111", intitule: "Achats de matières premières", type_compte: "charge" },
   { numero: "6131", intitule: "Locations", type_compte: "charge" },
@@ -371,6 +382,10 @@ const PCM_COMPTES = [
 ];
 
 const PCM_JOURNAUX = [
+  // Journal technique des à-nouveaux : il ne porte QUE l'écriture d'ouverture.
+  // Toute lecture multi-exercices doit l'exclure, sous peine de doubler les
+  // soldes qu'il reporte (cf. `sansANouveaux`).
+  { code: "AN", intitule: "À-nouveaux (ouverture d'exercice)", type_journal: "od" },
   { code: "VTE", intitule: "Journal des ventes", type_journal: "ventes" },
   { code: "ACH", intitule: "Journal des achats", type_journal: "achats" },
   { code: "BQ", intitule: "Journal de banque", type_journal: "banque" },

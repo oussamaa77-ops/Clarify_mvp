@@ -126,6 +126,57 @@ export function indexerDatesReglement(
   return index;
 }
 
+// ─── Vraisemblance : on ne règle pas une facture avant de l'émettre ──────────
+
+export interface ValiditeDateReglement {
+  ok: boolean;
+  /** Message prêt à afficher, `null` quand la date est acceptable. */
+  message: string | null;
+}
+
+/**
+ * Contrôle d'une date de règlement saisie.
+ *
+ * Deux impossibilités, et une seule tolérance :
+ *   • une date ANTÉRIEURE à l'émission — la base en portait deux (FA-2026-0084
+ *     réglée le 10 mars pour une facture du 17 mai). Une telle date range
+ *     l'encaissement dans la mauvaise déclaration de TVA et fausse le délai de
+ *     règlement de la balance âgée ;
+ *   • une date dans le FUTUR — un encaissement qui n'a pas eu lieu.
+ *
+ * La tolérance : une date de facture absente ou illisible ne bloque rien. Le
+ * contrôle sert à empêcher une saisie fausse, pas à rendre une facture
+ * inutilisable parce qu'un import ancien n'a pas renseigné son émission.
+ *
+ * Même règle des deux côtés du fil : le formulaire l'appelle pour désactiver le
+ * bouton, la server function pour refuser l'appel. Une validation qui n'existe
+ * qu'au formulaire n'est pas une validation.
+ */
+export function validerDateReglement(
+  dateFacture: string | null | undefined,
+  dateReglement: string | null | undefined,
+  aujourdhui: string | Date = new Date(),
+): ValiditeDateReglement {
+  const regl = jour(dateReglement);
+  if (!regl) return { ok: false, message: "Saisissez la date de règlement" };
+
+  const fact = jour(dateFacture);
+  if (fact && regl < fact) {
+    return {
+      ok: false,
+      message: `Date de règlement (${regl}) antérieure à la facture (${fact}) : `
+        + "une facture ne peut pas être réglée avant d'être émise.",
+    };
+  }
+
+  const now = typeof aujourdhui === "string" ? jour(aujourdhui) : jour(aujourdhui.toISOString());
+  if (now && regl > now) {
+    return { ok: false, message: `Date de règlement dans le futur (${regl}).` };
+  }
+
+  return { ok: true, message: null };
+}
+
 /** Rendu court et localisé pour la colonne « Date de règlement ». */
 export const formaterDateReglement = (d: DateReglement | null): string =>
   d ? new Date(d.date).toLocaleDateString("fr-MA") : "—";

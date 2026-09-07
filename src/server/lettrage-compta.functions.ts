@@ -13,13 +13,14 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import {
-  COMPTES_TVA, construireBasculeTva, controlerEquilibre, planifierDelettrage,
+  COMPTES_TVA, controlerEquilibre, planifierDelettrage,
   planifierLettrage, referencesPiece, regrouperParCompte, sensDuCompte,
-  tvaProportionnelle,
   type LigneLettrable, type SensTiers,
 } from "@/services/lettrage";
 import { synchroniserApresLettrage } from "./factures-gl.functions";
 import { controlerPiece } from "@/lib/liquidation-tva";
+import { controlerEcrituresRegime, estJournalReglement, genererOdBasculeTva } from "@/lib/genererEcritures";
+import { memeCompte, normaliserNumeroCompte } from "@/lib/numero-compte";
 
 /**
  * Insère une pièce d'OD construite par le moteur, en dégradant proprement.
@@ -30,7 +31,11 @@ import { controlerPiece } from "@/lib/liquidation-tva";
  * basculerait plus du tout. On réessaie donc SANS la colonne : la traçabilité
  * fine est perdue, la comptabilité reste juste. C'est le bon ordre de priorité.
  */
-async function insererPiece(
+// Exportée : les scripts de reprise doivent inscrire par LE MÊME chemin que
+// l'application, verrous compris. Un `insert` direct depuis un script
+// contournerait `controlerEcrituresRegime` — c'est-à-dire exactement les règles
+// que la reprise est censée rétablir.
+export async function insererPiece(
   sb: any,
   dossierId: string,
   lignes: { journal_code: string; compte_numero: string; date_ecriture: string; libelle: string;
@@ -38,10 +43,21 @@ async function insererPiece(
     facture_id?: string | null; paiement_id?: string | null }[],
   opts: { lettrageCode?: string | null; origine?: string } = {},
 ): Promise<{ error: string | null }> {
+  // Dernier verrou avant la base : pas de trésorerie en OD, pas de TVA exigible
+  // en VTE/ACH, partie double soldée. Rendu comme une erreur et non jeté — cette
+  // fonction est appelée depuis des chemins qui ne doivent jamais faire échouer
+  // le règlement qu'ils suivent (cf. `comptabiliserReglement`).
+  const verdict = controlerEcrituresRegime(lignes);
+  if (!verdict.ok) return { error: verdict.violations.join(" ") };
+
   const base = lignes.map((l) => ({
     dossier_id: dossierId,
     journal_code: l.journal_code,
-    compte_numero: l.compte_numero,
+    // Forme canonique sur 8 chiffres, posée ICI et pas chez l'appelant : c'est
+    // le passage obligé de toute pièce d'OD, application comme scripts de
+    // reprise. Les verrous ci-dessus raisonnent par racine, donc le padding ne
+    // les concerne pas (cf. src/lib/numero-compte.ts).
+    compte_numero: normaliserNumeroCompte(l.compte_numero),
     date_ecriture: l.date_ecriture,
     libelle: l.libelle,
     debit: l.debit,
@@ -140,7 +156,7 @@ export const getPostesTiers = createServerFn({ method: "POST" })
 
       const lignes = data.compte
         ? lignesTiers
-            .filter((l) => String(l.compte_numero ?? "").trim() === data.compte)
+            .filter((l) => memeCompte(l.compte_numero, data.compte))
             .filter((l) => !data.seulementNonLettres || !String(l.lettrage_code ?? "").trim())
             .sort((a, b) => String(a.date_ecriture ?? "").localeCompare(String(b.date_ecriture ?? "")))
         : [];
@@ -191,8 +207,13 @@ async function tvaEnAttenteDeLaPiece(
 
   const lignes = (data ?? []) as any[];
   const attente = COMPTES_TVA[sens].attente;
+  // `memeCompte` et non une égalité stricte : `attente` est la racine PCM
+  // (« 4458 »), tandis que la base porte la forme canonique sur 8 chiffres
+  // (« 44580000 »). Avec une égalité stricte, `dejaBasculee` retombait à zéro et
+  // le SECOND acompte rebasculait la TVA ENTIÈRE au lieu du reste — la TVA
+  // devenait exigible deux fois sur une même facture.
   const lignesAttente = lignes
-    .filter((l) => String(l.compte_numero ?? "").trim() === attente);
+    .filter((l) => memeCompte(l.compte_numero, attente));
 
   // Vente : l'attente est créditée à la facture puis débitée à chaque bascule.
   // Achat : l'inverse.
@@ -250,19 +271,27 @@ export async function basculerTvaSurReglement(
   if (tvaAttente <= 0) return { tva: 0, od: 0 };      // pièce sans TVA, ou déjà basculée
   if (p.montantRegle <= 0.005) return { tva: 0, od: 0 };
 
-  // Base du prorata : le TTC de la pièce. À défaut (pièce sans ligne de tiers
-  // exploitable), le montant réglé lui-même — la bascule est alors intégrale.
-  const base = ttcPiece > 0 ? ttcPiece : p.montantRegle;
-  const aBasculer = Math.min(
-    tvaAttente,
-    tvaProportionnelle(p.montantRegle, base, tvaTotale > 0 ? tvaTotale : tvaAttente),
-  );
-  const od = construireBasculeTva({
-    sens: p.sens, montantTva: aBasculer, date: p.date,
-    reference: p.reference, lettrageCode: p.lettrageCode ?? "",
+  // Le prorata appartient au générateur (src/lib/genererEcritures.ts), et à lui
+  // seul : la règle « au prorata de la TVA d'ORIGINE, plafonné au reste en
+  // attente » vivait ici ET là-bas, et deux copies d'une règle de calcul finissent
+  // par diverger. Le plafond `tvaAttente` est ce qui rend l'échelonnement
+  // idempotent ; la base du prorata est le TTC de la pièce, ou à défaut (pièce
+  // sans ligne de tiers exploitable) le montant réglé — bascule alors intégrale.
+  const od = genererOdBasculeTva({
+    sens: p.sens,
+    montantTva: tvaTotale > 0 ? tvaTotale : tvaAttente,
+    montantTtc: ttcPiece,
+    montantRegle: p.montantRegle,
+    plafond: tvaAttente,
+    date: p.date,
+    reference: p.reference,
+    lettrageCode: p.lettrageCode ?? "",
     factureId: p.factureId ?? null, paiementId: p.paiementId ?? null,
   });
   if (!od.length) return { tva: 0, od: 0 };
+  // Les deux lignes portent le même montant, l'une au débit l'autre au crédit :
+  // le débit de la première EST la TVA basculée, quel que soit le sens.
+  const aBasculer = round2(nb(od[0].debit));
 
   // INVARIANT : toute pièce générée est équilibrée. Le contrôle est ici, juste
   // avant l'insertion — une OD boiteuse insérée ne se voit plus qu'à la balance,
@@ -570,6 +599,37 @@ export interface ResultatLettrageAuto {
 }
 
 /** CŒUR du lettrage automatique — voir `executerLettrage` pour la séparation. */
+/**
+ * Date d'exigibilité de la TVA d'un groupe apparié : celle du RÈGLEMENT.
+ *
+ * Le lettrage automatique n'a pas d'utilisateur pour saisir une date, et il
+ * n'en a pas besoin : le groupe qu'il vient d'apparier CONTIENT la ligne de
+ * règlement, sur le même compte de tiers mais en journal BQ ou CAI. Sa date est
+ * le jour où l'argent a bougé — le fait générateur du régime des encaissements.
+ *
+ * Il la laissait tomber, et `executerLettrage` retombait alors sur le jour même.
+ * Toutes les bascules d'une reprise atterrissaient donc à la date de la reprise :
+ * la TVA d'un encaissement de mars devenait exigible en août, disparaissait de
+ * la déclaration de mars et réapparaissait dans celle d'août. L'erreur ne se
+ * voit pas au journal — les montants sont justes — seulement à la déclaration,
+ * une fois déposée.
+ *
+ * Le MAXIMUM, et non le minimum : sur un règlement échelonné, la pièce n'est
+ * soldée qu'au dernier versement, et c'est ce jour-là que le solde devient
+ * exigible. Sans ligne de trésorerie identifiable (compensation, avoir passé en
+ * OD), on prend la date la plus tardive du groupe : toujours plus proche de la
+ * réalité que la date du jour.
+ */
+export function dateDuReglement(
+  groupe: { date_ecriture?: string | null; journal_code?: string | null }[],
+): string | null {
+  const jour = (l: { date_ecriture?: string | null }) => String(l.date_ecriture ?? "").slice(0, 10);
+  const dates = groupe.filter((l) => estJournalReglement(l.journal_code)).map(jour).filter(Boolean);
+  const retenues = dates.length ? dates : groupe.map(jour).filter(Boolean);
+  if (!retenues.length) return null;
+  return retenues.reduce((a, b) => (a > b ? a : b));
+}
+
 export async function executerLettrageAuto(
   sb: any, data: { dossierId: string; compte?: string },
 ): Promise<ResultatLettrageAuto> {
@@ -581,7 +641,7 @@ export async function executerLettrageAuto(
 
     const lignesTiers = ((toutes ?? []) as LigneLettrable[])
       .filter((l) => sensDuCompte(l.compte_numero) !== null)
-      .filter((l) => !data.compte || String(l.compte_numero ?? "").trim() === data.compte);
+      .filter((l) => !data.compte || memeCompte(l.compte_numero, data.compte));
 
     // L'appariement raisonne compte par compte : un groupe ne doit jamais
     // mélanger deux tiers (cf. controlerEquilibre).
@@ -592,6 +652,7 @@ export async function executerLettrageAuto(
         // rien à un appelant serveur, et les codes posés seraient perdus.
         const r = await executerLettrage(sb, {
           dossierId: data.dossierId, ligneIds: groupe.map((l) => l.id), origine: "auto",
+          dateReglement: dateDuReglement(groupe),
         });
         if (r.ok && r.code) codesPoses.push(r.code);
       }

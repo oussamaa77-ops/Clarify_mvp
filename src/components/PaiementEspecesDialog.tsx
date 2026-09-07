@@ -13,6 +13,7 @@
 import { useEffect, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { marquerPayee } from "@/server/factures.functions";
+import { validerDateReglement } from "@/lib/date-reglement";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,6 +30,8 @@ export interface FacturePayable {
   montant_ttc: number;
   montant_paye?: number | null;
   montant_restant?: number | null;
+  /** Émission — borne basse de la date de règlement (cf. validerDateReglement). */
+  date_facture?: string | null;
 }
 
 const fmt = (n: number) =>
@@ -73,12 +76,16 @@ export function PaiementEspecesDialog({
   }, [facture?.id]);
 
   const valeur = Number(montant.replace(",", "."));
+  // Même règle que la server function, appelée depuis la même fonction pure :
+  // le bouton refuse ce que l'API refuserait, au lieu de laisser l'utilisateur
+  // découvrir l'erreur après coup dans un toast.
+  const validiteDate = validerDateReglement(facture?.date_facture ?? null, date);
   const erreur =
     !montant.trim() || !Number.isFinite(valeur) ? "Saisissez un montant"
     : valeur <= 0 ? "Le montant doit être supérieur à 0"
     // Tolérance d'un centime, comme côté serveur : un arrondi ne doit pas bloquer.
     : valeur - solde > 0.01 ? `Maximum ${fmt(solde)} (reste dû)`
-    : !date ? "Saisissez la date de paiement"
+    : !validiteDate.ok ? validiteDate.message
     : null;
 
   const handleSubmit = async () => {
@@ -160,7 +167,12 @@ export function PaiementEspecesDialog({
             <Label htmlFor="paie-date">
               Date de règlement <span className="text-destructive">*</span>
             </Label>
+            {/* `min` / `max` bornent directement le sélecteur natif : l'émission
+                d'un côté, aujourd'hui de l'autre. C'est la même règle que
+                `validerDateReglement`, rendue au clavier ET à la souris. */}
             <Input id="paie-date" type="date" value={date} required
+              min={facture?.date_facture?.slice(0, 10) || undefined}
+              max={new Date().toISOString().slice(0, 10)}
               onChange={(e) => setDate(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }} />
             {/* Cette date n'est pas décorative : elle date l'écriture de

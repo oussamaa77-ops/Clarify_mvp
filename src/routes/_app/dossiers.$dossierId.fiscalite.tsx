@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -71,8 +71,11 @@ function FiscalitePage() {
     setDossier(data ?? null);
   };
 
-  useEffect(() => {
-    (async () => {
+  // Rappelable : le panneau de déclaration TVA écrit dans le grand livre, et
+  // c'est le MÊME grand livre qui nourrit le résultat fiscal et l'IS de cette
+  // page. Sans relecture, l'onglet voisin resterait sur l'état d'avant l'OD.
+  const chargerDonnees = useCallback(async () => {
+    {
       const [{ data: ecr }, { data: v }, { data: a }, { data: p }] = await Promise.all([
         // Écritures : base du résultat fiscal et de l'IS (les factures ne portent
         // ni compte ni charge — seul le grand livre le fait).
@@ -98,7 +101,11 @@ function FiscalitePage() {
       setVentes((v ?? []).filter((f: any) => f.statut !== "rejetee"));
       setAchats(a ?? []);
       setPaiements(p ?? []);
-    })();
+    }
+  }, [dossierId]);
+
+  useEffect(() => {
+    chargerDonnees();
     chargerDossier();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dossierId]);
@@ -526,7 +533,10 @@ function FiscalitePage() {
 
         {/* ── Déclaration & paiement SIMPL-TVA ── */}
         <TabsContent value="declaration" className="mt-4">
-          <DeclarationTvaPanel dossierId={dossierId} exercice={exercice} periodeInitiale={recherche.periode} />
+          <DeclarationTvaPanel
+            dossierId={dossierId} exercice={exercice} periodeInitiale={recherche.periode}
+            onEcriture={chargerDonnees}
+          />
         </TabsContent>
 
         {/* ── IS ── */}

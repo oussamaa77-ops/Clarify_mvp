@@ -23,7 +23,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
-import { COMPTES_TVA, referencesPiece } from "@/services/lettrage";
+import { referencesPiece } from "@/services/lettrage";
+import { assertLignesAchat, genererEcrituresAchat } from "@/lib/genererEcritures";
 import { useServerFn } from "@tanstack/react-start";
 import { ocrFacture, matcherDocumentAvecTransactions } from "@/server/factures.functions";
 import { memoriserTiers } from "@/server/tiers-memoire.functions";
@@ -46,13 +47,13 @@ import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { FacturesFiltres } from "@/components/FacturesFiltres";
 import { suggestAccount, type SuggestionCompte } from "@/lib/categorization-engine";
-import { compteTiersAuxiliaire } from "@/lib/comptes-auxiliaires";
 import { filtrerFactures, joursRetard, trancheRetard, type CriteresFiltre } from "@/lib/factures-filtres";
 import {
   indexerModesPaiement, modePaiementFacture,
   MODE_PAIEMENT_LABEL, MODE_PAIEMENT_CLS, type ModePaiement,
 } from "@/lib/mode-paiement";
 import { Scale } from "lucide-react";
+import { normaliserComptesLignes } from "@/lib/numero-compte";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/fournisseurs")({
   component: FournisseursPage,
@@ -737,51 +738,33 @@ function FournisseursPage() {
         fournAux = fRow?.code_auxiliaire ?? null;
       }
 
-      // Accounting entries ACH — reference_piece = factureId for clean cascade delete
-      await supabase.from("ecritures_comptables").insert([
-        {
-          dossier_id: dossierId,
-          journal_code: "ACH",
-          // Compte de charge issu du moteur de catégorisation (Règle tiers/mots-clés/
-          // secteur), éditable par l'utilisateur. Repli sur 6141 par sécurité.
-          compte_numero: compteCharge || "6141",
-          date_ecriture: dateFacture,
-          libelle: `Achat ${nomFourn} ${ref}`,
-          debit: montantHt,
-          credit: 0,
-          valide: true,
-          reference_piece: factureId,
-        },
-        {
-          dossier_id: dossierId,
-          journal_code: "ACH",
-          // TVA au régime des ENCAISSEMENTS : le droit à déduction ne naît qu'au
-          // décaissement. La TVA attend donc en 3458 et ne rejoint 3455
-          // (récupérable exigible) qu'au lettrage du règlement.
-          compte_numero: COMPTES_TVA.fournisseur.attente,
-          date_ecriture: dateFacture,
-          libelle: `TVA en attente ${nomFourn} ${ref}`,
-          debit: montantTva,
-          credit: 0,
-          valide: true,
-          reference_piece: factureId,
-        },
-        {
-          dossier_id: dossierId,
-          journal_code: "ACH",
-          // Ligne 3 — compte de TIERS. Compte AUXILIAIRE du fournisseur quand il a
-          // un code (F0005 → 44110005), sinon le collectif 4411 : la balance
-          // auxiliaire distingue alors chaque fournisseur, et le lettrage (qui
-          // raisonne par préfixe « 441 ») continue de fonctionner à l'identique.
-          compte_numero: compteTiersAuxiliaire("fournisseur", fournAux),
-          date_ecriture: dateFacture,
-          libelle: `Dette ${nomFourn} ${ref}`,
-          debit: 0,
-          credit: montantTtc,
-          valide: true,
-          reference_piece: factureId,
-        },
-      ]);
+      // Écritures ACH — fabriquées par le générateur PUR (src/lib/genererEcritures.ts),
+      // le même que celui du script de reconstruction. Les trois lignes qui vivaient
+      // ici en clair ne pouvaient être vérifiées qu'en saisissant une facture ; le
+      // générateur les rend testables, et `assertLignesAchat` rend opposable la règle
+      // du régime des encaissements — la TVA d'origine se pose sur 3458, jamais sur
+      // 34552, que seule l'OD de bascule atteint au décaissement.
+      //
+      // reference_piece = factureId, pour une suppression en cascade propre.
+      const ecrituresAchat = genererEcrituresAchat({
+        dossier_id: dossierId,
+        facture_id: factureId,
+        reference: factureId,
+        date_facture: dateFacture,
+        montant_ht: montantHt,
+        montant_tva: montantTva,
+        montant_ttc: montantTtc,
+        // Compte de charge issu du moteur de catégorisation (Règle tiers/mots-clés/
+        // secteur), éditable par l'utilisateur. Repli sur 6141 par sécurité.
+        compte_charge: compteCharge,
+        fournisseur_nom: nomFourn,
+        // Compte AUXILIAIRE du fournisseur quand il a un code (F0005 → 44110005),
+        // sinon le collectif 4411 : la balance auxiliaire distingue alors chaque
+        // fournisseur, et le lettrage (préfixe « 4411 ») fonctionne à l'identique.
+        code_auxiliaire: fournAux,
+      });
+      assertLignesAchat(ecrituresAchat);
+      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresAchat));
 
       toast.success("Facture fournisseur enregistrée ✅");
 

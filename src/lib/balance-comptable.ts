@@ -202,17 +202,146 @@ export function resultatNetBalance(balance: LigneBalance[]): ResultatNet {
   };
 }
 
+
+// ── Contrôle d'arrêté : les comptes d'ATTENTE non apurés ─────────────────────
+//
+// Un compte de la classe 47 (« comptes transitoires ou d'attente ») n'a pas
+// vocation à porter un solde. Il sert de PARKING : le rapprochement bancaire y
+// pose les transactions sans pièce justificative — 4711 au débit, 4712 au
+// crédit (cf. src/lib/comptabilite-bq.ts) — en attendant qu'on les impute.
+//
+// Le laisser garni à la clôture n'est pas une imprécision de présentation, et
+// c'est pourquoi ce contrôle existe :
+//
+//   • l'à-nouveau REPORTE le solde (classe 4 = bilan), donc l'attente traverse
+//     l'exercice et le nouvel exercice ouvre déjà en anomalie ;
+//   • la charge ou le produit correspondant n'a jamais été comptabilisé : le
+//     résultat de l'exercice qu'on arrête est FAUX du montant parqué ;
+//   • aucun écran ne le disait — un 4712 créditeur se lit comme une dette
+//     ordinaire au milieu des fournisseurs.
+//
+// Le contrôle ALERTE, il ne bloque pas. Un arrêté peut légitimement se faire
+// avec une attente résiduelle (une pièce manquante qu'on obtiendra), et refuser
+// l'à-nouveau laisserait le dossier sans exercice ouvert — bien pire que le
+// défaut signalé. La décision reste au comptable ; ce qui n'est plus permis,
+// c'est de ne pas la voir.
+
+/** Racine PCM des comptes transitoires ou d'attente. */
+export const RACINE_COMPTES_SUSPENS = "47";
+
+/**
+ * Comptes d'attente posés automatiquement par le rapprochement bancaire.
+ * Ce sont les seuls que l'application ALIMENTE seule : ils méritent d'être
+ * nommés, parce qu'un solde résiduel y désigne un travail inachevé et non un
+ * choix de comptabilisation.
+ */
+export const COMPTES_ATTENTE_BANQUE = ["4711", "4712"] as const;
+
+/** Un compte d'attente qui porte encore un solde à l'arrêté. */
+export interface CompteSuspens {
+  /** Numéro tel qu'il figure en balance. */
+  compte: string;
+  /** Solde, en valeur absolue. */
+  solde: number;
+  sens: "D" | "C";
+  /** Posé par le rapprochement bancaire (4711 / 4712) ? */
+  attenteBancaire: boolean;
+  /** Grief en clair, prêt à afficher. */
+  message: string;
+}
+
+/**
+ * Comptes d'attente (47*) non apurés, du plus lourd au plus léger.
+ *
+ * Le solde est recalculé depuis les cumuls — jamais lu dans `solde`/`sens`, qui
+ * sont dérivés côté appelant (même raison que `ventilerSolde`).
+ *
+ * La détection se fait par RACINE et non par égalité : le plan réel emploie des
+ * sous-comptes, et « 47120000 » comme « 4712 » désignent le même parking. C'est
+ * aussi ce qui rend le contrôle insensible à la normalisation des numéros de
+ * comptes sur 8 chiffres (cf. src/lib/numero-compte.ts).
+ */
+export function comptesSuspensNonApures(
+  balance: LigneBalance[],
+  options: { seuil?: number } = {},
+): CompteSuspens[] {
+  const seuil = options.seuil ?? 0.01;
+  const out: CompteSuspens[] = [];
+
+  for (const l of balance ?? []) {
+    const compte = String(l.compte ?? "").trim();
+    if (!compte.startsWith(RACINE_COMPTES_SUSPENS)) continue;
+    const delta = round2(n(l.total_debit) - n(l.total_credit));
+    if (Math.abs(delta) < seuil) continue;
+
+    const sens: "D" | "C" = delta > 0 ? "D" : "C";
+    const solde = Math.abs(delta);
+    const attenteBancaire = COMPTES_ATTENTE_BANQUE.some((c) => compte.startsWith(c));
+    out.push({
+      compte, solde, sens, attenteBancaire,
+      message: attenteBancaire
+        ? `Compte d'attente bancaire ${compte} non apuré : ${solde.toFixed(2)} MAD `
+          + `au ${sens === "D" ? "débit" : "crédit"}. Ces mouvements de banque n'ont `
+          + "reçu aucune pièce justificative — la charge ou le produit correspondant "
+          + "manque au résultat de l'exercice."
+        : `Compte transitoire ${compte} non apuré : ${solde.toFixed(2)} MAD `
+          + `au ${sens === "D" ? "débit" : "crédit"}. Un compte de la classe 47 doit `
+          + "être soldé à la clôture ; sinon l'attente est reportée à l'exercice suivant.",
+    });
+  }
+
+  return out.sort((a, b) => b.solde - a.solde);
+}
+
+/** Bilan du contrôle des comptes d'attente, pour un pied de balance ou un arrêté. */
+export interface AuditSuspens {
+  comptes: CompteSuspens[];
+  /** Σ des soldes en valeur absolue — l'ampleur de ce qui reste à imputer. */
+  total: number;
+  /** `true` quand aucun compte 47 ne porte de solde : l'arrêté est propre. */
+  apure: boolean;
+  /** Résumé en une phrase, ou `null` si rien à signaler. */
+  alerte: string | null;
+}
+
+/**
+ * Le contrôle, sous la forme qu'un écran ou un script d'arrêté consomme.
+ *
+ * `apure: true` sur un dossier sans aucun compte 47 : l'absence d'attente et
+ * l'attente soldée sont le même état comptable, et les distinguer obligerait
+ * chaque appelant à traiter deux cas pour un seul verdict.
+ */
+export function auditComptesSuspens(
+  balance: LigneBalance[],
+  options: { seuil?: number } = {},
+): AuditSuspens {
+  const comptes = comptesSuspensNonApures(balance, options);
+  const total = round2(comptes.reduce((s, c) => s + c.solde, 0));
+  if (!comptes.length) return { comptes, total: 0, apure: true, alerte: null };
+
+  const liste = comptes.map((c) => `${c.compte} (${c.solde.toFixed(2)} ${c.sens})`).join(", ");
+  return {
+    comptes, total, apure: false,
+    alerte: `${comptes.length} compte(s) d'attente non apuré(s) pour ${total.toFixed(2)} MAD : `
+      + `${liste}. À imputer AVANT l'arrêté : la classe 47 est reportée à `
+      + "l'exercice suivant par l'à-nouveau, et le résultat arrêté est faux d'autant.",
+  };
+}
+
 export interface SyntheseBalance {
   sousTotaux: SousTotalClasse[];
   total: TotalGeneralBalance;
   resultat: ResultatNet;
+  /** Contrôle d'audit des comptes d'attente (47*) — vide quand tout est apuré. */
+  suspens: AuditSuspens;
 }
 
-/** Les trois blocs de pied de balance, calculés d'un seul appel. */
+/** Les blocs de pied de balance, calculés d'un seul appel. */
 export function synthetiserBalance(balance: LigneBalance[]): SyntheseBalance {
   return {
     sousTotaux: sousTotauxParClasse(balance),
     total: totalGeneralBalance(balance),
     resultat: resultatNetBalance(balance),
+    suspens: auditComptesSuspens(balance),
   };
 }

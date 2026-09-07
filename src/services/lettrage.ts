@@ -273,6 +273,29 @@ export interface VerdictLettrable {
   raison: string | null;
 }
 
+/**
+ * Les SEULS comptes lettrables, et rien d'autre : clients 3421x, fournisseurs
+ * 4411x.
+ *
+ * Plus étroit que `sensDuCompte`, délibérément. Celui-ci reconnaît aussi 342x et
+ * 441x en général — ce qui est juste pour LIRE (une reprise peut avoir logé un
+ * tiers en 3423, et la balance auxiliaire doit l'afficher) mais faux pour
+ * LETTRER. Les autres comptes de ces racines ne portent pas de créance appariable :
+ *
+ *   3425 « Clients — créances douteuses »  se solde par une provision (6196),
+ *   3427 « Clients — factures à établir »  se solde par contre-passation,
+ *   4417 « Fournisseurs — factures non parvenues » de même.
+ *
+ * Les lettrer y masquerait des postes que la provision ou la contre-passation
+ * doit voir, exactement comme le lettrage d'un compte de TVA masquait des lignes
+ * à la déclaration. La distinction lire / lettrer est donc portée par deux
+ * fonctions séparées, et non par un seul jeu de préfixes élargi.
+ */
+export const COMPTES_LETTRABLES: Record<SensTiers, string> = {
+  client: "3421",
+  fournisseur: "4411",
+};
+
 /** Ce compte peut-il être lettré ? Rend le sens du tiers quand oui. */
 export function compteLettrable(
   compte: string | null | undefined,
@@ -294,12 +317,31 @@ export function compteLettrable(
         + "déclaration périodique, pas par appariement.",
     };
   }
-  const sens = sensDuCompte(c);
+  // Le lettrage est RÉSERVÉ à 3421x et 4411x — pas à l'ensemble des classes 3
+  // et 4, ni même à tout 342x / 441x (cf. `COMPTES_LETTRABLES`). Le test porte
+  // sur ces deux préfixes et non sur `sensDuCompte`, qui est le test de LECTURE.
+  const sens = (Object.entries(COMPTES_LETTRABLES) as [SensTiers, string][])
+    .find(([, prefixe]) => c.startsWith(prefixe))?.[0] ?? null;
   if (!sens) {
+    // Un compte de classe 3 ou 4 mérite un grief PRÉCIS : il ressemble à un
+    // compte de tiers, et l'utilisateur qui le sélectionne croit lettrer un
+    // client. Lui répondre « réservé aux comptes de tiers » l'enverrait chercher
+    // une erreur de sélection au lieu de la nature du compte.
+    const classe = c[0];
+    if (classe === "3" || classe === "4") {
+      return {
+        ok: false, sens: null,
+        raison: `Lettrage interdit sur ${c} : seuls les comptes de tiers `
+          + `${COMPTES_LETTRABLES.client}x (clients) et ${COMPTES_LETTRABLES.fournisseur}x `
+          + "(fournisseurs) portent une créance ou une dette appariable. Les autres comptes "
+          + "de classe 3 et 4 se soldent autrement — provision, contre-passation ou "
+          + "déclaration périodique.",
+      };
+    }
     return {
       ok: false, sens: null,
-      raison: `Lettrage réservé aux comptes de tiers : ${c} n'est ni un client (3421x) `
-        + "ni un fournisseur (4411x).",
+      raison: `Lettrage réservé aux comptes de tiers : ${c} n'est ni un client `
+        + `(${COMPTES_LETTRABLES.client}x) ni un fournisseur (${COMPTES_LETTRABLES.fournisseur}x).`,
     };
   }
   return { ok: true, sens, raison: null };

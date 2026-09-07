@@ -4,6 +4,13 @@ import {
   executerPointageTva, liquiderPeriodeTva, lireEtatPeriodeTva,
 } from "./liquidation-tva.functions";
 
+// Comparaison de comptes par `memeCompte` et non par égalité stricte : depuis
+// la normalisation sur 8 chiffres, les lignes INSÉRÉES par le code ressortent
+// canoniques (« 44560000 ») tandis que les fixtures restent en forme courte
+// (« 4456 »). `memeCompte` reconnaît les deux, donc le test dit ce qu'il veut
+// dire — « le compte de TVA due » — au lieu d'une longueur.
+import { memeCompte } from "@/lib/numero-compte";
+
 /**
  * Faux Supabase sur deux tables en mémoire : le grand livre et les lignes de
  * relevé.
@@ -106,7 +113,7 @@ describe("executerDeclarationTva", () => {
     const debit = od.reduce((s, l) => s + Number(l.debit ?? 0), 0);
     const credit = od.reduce((s, l) => s + Number(l.credit ?? 0), 0);
     expect(debit).toBeCloseTo(credit, 2);
-    expect(od.find((l) => l.compte_numero === "4456")).toMatchObject({ credit: 7500 });
+    expect(od.find((l) => memeCompte(l.compte_numero, "4456"))).toMatchObject({ credit: 7500 });
   });
 
   it("REFUSE de déclarer deux fois la même période", async () => {
@@ -116,7 +123,7 @@ describe("executerDeclarationTva", () => {
     expect(r2.ok).toBe(false);
     expect(r2.raison).toMatch(/déjà déclarée/);
     // La dette n'a pas doublé.
-    expect(sb.rows.filter((l) => l.compte_numero === "4456")).toHaveLength(1);
+    expect(sb.rows.filter((l) => memeCompte(l.compte_numero, "4456"))).toHaveLength(1);
   });
 
   it("ne génère rien sur une période néant, et le dit", async () => {
@@ -142,7 +149,7 @@ describe("executerDeclarationTva", () => {
     ]);
     const r = await executerDeclarationTva(sb, { dossierId: D, periode: "2026-03" });
     expect(r).toMatchObject({ ok: true, montant: 3000, dette: false });
-    expect(sb.rows.find((l) => l.compte_numero === "4456")).toMatchObject({ debit: 3000 });
+    expect(sb.rows.find((l) => memeCompte(l.compte_numero, "4456"))).toMatchObject({ debit: 3000 });
   });
 });
 
@@ -185,19 +192,60 @@ describe("executerPaiementDgi", () => {
     expect(etat.bouclee).toBe(false);
   });
 
-  it("ne fait rien quand la dette est déjà soldée", async () => {
+  it("ne fait rien quand la dette est déjà soldée, et dit quel règlement l'a soldée", async () => {
     const sb = await declarer();
     await executerPaiementDgi(sb, { dossierId: D, periode: "2026-03", date: "2026-03-31" });
     const r = await executerPaiementDgi(sb, { dossierId: D, periode: "2026-03", date: "2026-03-31" });
     expect(r.ok).toBe(true);
     expect(r.lignesInserees).toBe(0);
-    expect(r.raison).toMatch(/déjà soldé/);
+    expect(r.raison).toMatch(/déjà été réglée \(7500\.00 MAD le 2026-03-31\)/);
+  });
+
+  // ─── Le prélèvement tombe le mois SUIVANT — le cas normal, en fait ─────────
+  // La TVA de mars se paie en avril. Le solde du 4456 arrêté au 31 mars ignore
+  // ce règlement : s'y fier laissait la période éternellement « à payer » et
+  // autorisait un second prélèvement pour la même déclaration.
+  describe("règlement postérieur à la période", () => {
+    const payerEnAvril = async () => {
+      const sb = await declarer();
+      const r = await executerPaiementDgi(sb, { dossierId: D, periode: "2026-03", date: "2026-04-20" });
+      expect(r).toMatchObject({ ok: true, montant: 7500, lignesInserees: 2 });
+      return sb;
+    };
+
+    it("détecte le règlement d'avril sur la déclaration de mars", async () => {
+      const etat = await lireEtatPeriodeTva(await payerEnAvril(), { dossierId: D, periode: "2026-03" });
+      expect(etat.regle).toBe(true);
+      expect(etat.montantRegle).toBe(7500);
+      expect(etat.dateReglement).toBe("2026-04-20");
+      expect(etat.resteAPayerPeriode).toBe(0);
+      expect(etat.resteAPayable).toBe(0);
+      expect(etat.solde4456).toBe(0);
+      // Le solde ARRÊTÉ AU 31 MARS, lui, porte toujours la dette : c'est correct
+      // (au 31 mars elle n'était pas payée) et c'est pourquoi il ne décide plus.
+      expect(etat.resteAPayer).toBe(7500);
+    });
+
+    it("REFUSE un second prélèvement pour une déclaration déjà réglée", async () => {
+      const sb = await payerEnAvril();
+      const r = await executerPaiementDgi(sb, { dossierId: D, periode: "2026-03", date: "2026-05-02" });
+      expect(r.lignesInserees).toBe(0);
+      expect(r.raison).toMatch(/déjà été réglée/);
+      expect(sb.rows.filter((l) => memeCompte(l.compte_numero, "4456") && Number(l.debit) > 0)).toHaveLength(1);
+    });
+
+    it("débloque le pointage : le 4456 est soldé, même si c'est en avril", async () => {
+      const sb = await payerEnAvril();
+      const r = await executerPointageTva(sb, { dossierId: D, periode: "2026-03", pointe: true });
+      expect(r.ok).toBe(true);
+      expect(r.lignesPointees).toBe(2);
+    });
   });
 
   it("crédite le compte bancaire indiqué", async () => {
     const sb = await declarer();
     await executerPaiementDgi(sb, { dossierId: D, periode: "2026-03", date: "2026-03-31", compteBanque: "51420000" });
-    expect(sb.rows.some((l) => l.compte_numero === "51420000" && Number(l.credit) === 7500)).toBe(true);
+    expect(sb.rows.some((l) => memeCompte(l.compte_numero, "51420000") && Number(l.credit) === 7500)).toBe(true);
   });
 });
 
@@ -225,11 +273,11 @@ describe("executerPointageTva", () => {
     const r = await executerPointageTva(sb, { dossierId: D, periode: "2026-03", pointe: true });
     expect(r).toMatchObject({ ok: true, pointe: true, lignesPointees: 2 });
 
-    const cycle = sb.rows.filter((l) => l.reference_piece === "DECL-TVA-2026-03" && l.compte_numero === "4456");
+    const cycle = sb.rows.filter((l) => l.reference_piece === "DECL-TVA-2026-03" && memeCompte(l.compte_numero, "4456"));
     expect(cycle).toHaveLength(2);
     expect(cycle.every((l) => l.pointe === true && !!l.pointe_le)).toBe(true);
     // Les comptes de TVA restants ne sont PAS touchés : pointer n'est pas lettrer.
-    expect(sb.rows.filter((l) => l.compte_numero === "44551").every((l) => !l.pointe)).toBe(true);
+    expect(sb.rows.filter((l) => memeCompte(l.compte_numero, "44551")).every((l) => !l.pointe)).toBe(true);
 
     const etat = await lireEtatPeriodeTva(sb, { dossierId: D, periode: "2026-03" });
     expect(etat.pointe).toBe(true);
@@ -277,7 +325,7 @@ describe("executerPointageTva", () => {
     const r = await executerPointageTva(sb, { dossierId: D, periode: "2026-03", pointe: false });
     expect(r).toMatchObject({ ok: true, pointe: false });
 
-    const cycle = sb.rows.filter((l) => l.reference_piece === "DECL-TVA-2026-03" && l.compte_numero === "4456");
+    const cycle = sb.rows.filter((l) => l.reference_piece === "DECL-TVA-2026-03" && memeCompte(l.compte_numero, "4456"));
     expect(cycle.every((l) => l.pointe === false && l.pointe_le === null)).toBe(true);
   });
 
@@ -371,7 +419,7 @@ describe("liquiderPeriodeTva", () => {
     ]);
     const r = await liquiderPeriodeTva(D, "2026-05", { client: sb });
     expect(r).toMatchObject({ ok: true, montant: 240, dette: false });
-    const du = sb.rows.find((x: any) => x.compte_numero === "4456" && x.reference_piece === "DECL-TVA-2026-05");
+    const du = sb.rows.find((x: any) => memeCompte(x.compte_numero, "4456") && x.reference_piece === "DECL-TVA-2026-05");
     expect(du).toMatchObject({ debit: 240, credit: 0 });
   });
 

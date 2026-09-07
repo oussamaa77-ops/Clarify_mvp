@@ -27,6 +27,7 @@ import { encoderCanvasPourOcr, preparerImageBanquePourOcr, cumulerMesures, journ
 import { BankLogo } from "@/components/BankLogo";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
+import { normaliserComptesLignes } from "@/lib/numero-compte";
 // NB : pdfjs-dist n'est PAS importé statiquement — il tire `canvas` (binaire natif)
 // qui polluerait le bundle SERVEUR (SSR) et casserait le déploiement serverless.
 // On le charge donc UNIQUEMENT côté client, à la demande, via import() dynamique.
@@ -1410,7 +1411,7 @@ function BanquePage() {
       // EN ENTIER s'il manque une seule estampille — n'en insérer qu'une partie
       // déséquilibrerait le journal.
       assertEcrituresTresorerie(ecritures,{origine:"releve"});
-      await supabase.from("ecritures_comptables").insert(ecritures);
+      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
 
       if(txInsertedIds.length){
         await (supabase.from("transactions_bancaires") as any).update({statut:"cloture"}).in("id",txInsertedIds);
@@ -1738,7 +1739,7 @@ function BanquePage() {
 
       // Origine « relevé » : chaque ligne porte le transaction_id de sa transaction.
       assertEcrituresTresorerie(ecritures, { origine: "releve" });
-      await supabase.from("ecritures_comptables").insert(ecritures);
+      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
       await (supabase.from("transactions_bancaires") as any)
         .update({ statut: "cloture" })
         .in("id", txAcloturer.map(t => t.id));
@@ -1946,7 +1947,7 @@ function BanquePage() {
       // Origine « saisie manuelle formelle » — justifiée par l'encaissement
       // qu'on vient d'insérer, dont l'id sert de pièce.
       assertEcrituresTresorerie(ecrituresEnc,{origine:"saisie_manuelle",piece:encInsere?.id??refPiece});
-      await supabase.from("ecritures_comptables").insert(ecrituresEnc);
+      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresEnc));
       // Imputation du règlement sur la facture. Deux corrections par rapport à l'ancien
       // code, qui posait `statut_paiement:'payee'` en dur :
       //  • les colonnes « Payé » / « Restant » de l'UI viennent de montant_paye /

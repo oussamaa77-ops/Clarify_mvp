@@ -2,6 +2,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
 import { compteTiersAuxiliaire, suffixeAuxiliaire } from "@/lib/comptes-auxiliaires";
 import { synthetiserBalance, ventilerSolde, type LigneBalance as LigneBalanceLib } from "@/lib/balance-comptable";
+import { normaliserNumeroCompte } from "@/lib/numero-compte";
+import { bornesExercice, exerciceParDefaut, exercicesDisponibles } from "@/lib/exercice-comptable";
+import { JOURNAL_AN, sansANouveaux } from "@/lib/a-nouveaux";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,7 +45,7 @@ interface Ecriture {
 
 type LigneBalance = LigneBalanceLib;
 
-const JOURNAUX = ["BQ","VTE","ACH","CAI","OD","VTE-AVR","ACH-AVR"];
+const JOURNAUX = ["AN","BQ","VTE","ACH","CAI","OD","VTE-AVR","ACH-AVR"];
 
 // ── 3 Grands Livres distincts (Sage) ──
 // Le journal_code est déjà ventilé à l'insertion (ventes→VTE, achats→ACH,
@@ -53,7 +56,7 @@ const LIVRES: Record<LivreKey, { label: string; court: string; journaux: string[
   ventes:     { label: "Grand Livre des Ventes",    court: "Ventes",          journaux: ["VTE","VTE-AVR"] },
   achats:     { label: "Grand Livre des Achats",    court: "Achats",          journaux: ["ACH","ACH-AVR"] },
   tresorerie: { label: "Grand Livre de Trésorerie", court: "Trésorerie",      journaux: ["BQ","CAI"] },
-  divers:     { label: "Opérations diverses & TVA", court: "Divers (OD/TVA)", journaux: ["OD","TVA"] },
+  divers:     { label: "Opérations diverses & TVA", court: "Divers (OD/TVA)", journaux: ["OD","TVA","AN"] },
 };
 
 const fmt = (n: number) => Number(n).toLocaleString("fr-MA", { minimumFractionDigits: 2 });
@@ -82,6 +85,20 @@ function ComptabilitePage() {
   const [filtreDateDeb, setFiltreDateDeb] = useState("");
   const [filtreDateFin, setFiltreDateFin] = useState("");
 
+  // ── EXERCICE : le périmètre par défaut, et non plus « tout ce qui existe » ──
+  // Le grand livre chargeait toutes les écritures du dossier, sans borne de
+  // date. Sur un dossier repris, les écritures 2024 et 2025 s'affichaient donc
+  // au milieu de 2026, et la balance additionnait trois exercices — un total qui
+  // ne correspond à aucune liasse. On ouvre désormais sur UN exercice.
+  // `null` = « tous les exercices », qui reste accessible mais n'est plus le
+  // comportement par défaut.
+  const [exercice, setExercice] = useState<number | null>(null);
+  const [exercicesDispo, setExercicesDispo] = useState<number[]>([]);
+  const [dateDebutActivite, setDateDebutActivite] = useState<string | null>(null);
+  const [exerciceInitialise, setExerciceInitialise] = useState(false);
+
+  const bornes = exercice == null ? null : bornesExercice(exercice, dateDebutActivite);
+
   // Nouvelle écriture
   const [newDate, setNewDate] = useState(new Date().toISOString().slice(0,10));
   const [newJournal, setNewJournal] = useState("OD");
@@ -96,6 +113,23 @@ function ComptabilitePage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteLot, setDeleteLot] = useState<{journal?:string;date?:string}|null>(null);
 
+  // Exercices RÉELLEMENT portés par le dossier + date de début d'activité (qui
+  // resserre l'ouverture du premier exercice). Chargé une fois : proposer une
+  // liste d'années en dur ferait chercher l'utilisateur dans des exercices vides.
+  useEffect(() => {
+    (async () => {
+      const [{ data: dates }, { data: dos }] = await Promise.all([
+        supabase.from("ecritures_comptables").select("date_ecriture").eq("dossier_id", dossierId),
+        (supabase.from("dossiers") as any).select("*").eq("id", dossierId).maybeSingle(),
+      ]);
+      const dispo = exercicesDisponibles(((dates ?? []) as any[]).map((d) => d.date_ecriture));
+      setExercicesDispo(dispo);
+      setDateDebutActivite((dos as any)?.date_debut_activite ?? null);
+      setExercice(exerciceParDefaut(dispo));
+      setExerciceInitialise(true);
+    })();
+  }, [dossierId]);
+
   const load = useCallback(async () => {
     setLoading(true);
     let query = supabase.from("ecritures_comptables")
@@ -105,17 +139,32 @@ function ComptabilitePage() {
 
     if (filtreJournal !== "TOUS") query = query.eq("journal_code", filtreJournal);
     if (filtreCompte) query = query.eq("compte_numero", filtreCompte);
-    if (filtreDateDeb) query = query.gte("date_ecriture", filtreDateDeb);
-    if (filtreDateFin) query = query.lte("date_ecriture", filtreDateFin);
+    // L'exercice est la borne EXTÉRIEURE : les filtres de date de l'utilisateur
+    // ne peuvent que la resserrer, jamais la déborder. Sans cette intersection,
+    // saisir une date de début en 2024 rouvrirait un exercice clos dans une vue
+    // qui annonce 2026.
+    const debut = [bornes?.debut, filtreDateDeb].filter(Boolean).sort().at(-1);
+    const fin = [bornes?.fin, filtreDateFin].filter(Boolean).sort().at(0);
+    if (debut) query = query.gte("date_ecriture", debut);
+    if (fin) query = query.lte("date_ecriture", fin);
 
     const { data, error } = await query.limit(1000);
     if (error) { toast.error(error.message); setLoading(false); return; }
-    setEcritures((data ?? []) as Ecriture[]);
+    // ── Vue MULTI-EXERCICES : les à-nouveaux doivent sortir ────────────────
+    // Un solde reporté existe deux fois en base : sur sa ligne d'origine (ACH
+    // 16/12/2025) et sur son report (AN 01/01/2026). Bornés à un exercice, les
+    // deux ne se rencontrent jamais. Cumulés, ils doublent le solde — le 4411
+    // d'ACOSOLUTIONS afficherait 49 200 au lieu de 24 600. Le journal AN est le
+    // seul discriminant (cf. src/lib/a-nouveaux.ts).
+    const brutes = (data ?? []) as Ecriture[];
+    setEcritures(exercice == null && filtreJournal !== JOURNAL_AN ? sansANouveaux(brutes) : brutes);
     setLoading(false);
     setDeleteIds(new Set());
-  }, [dossierId, filtreJournal, filtreCompte, filtreDateDeb, filtreDateFin]);
+  }, [dossierId, filtreJournal, filtreCompte, filtreDateDeb, filtreDateFin, bornes?.debut, bornes?.fin, exercice]);
 
-  useEffect(() => { load(); }, [load]);
+  // On attend de savoir QUEL exercice ouvrir : charger avant afficherait un
+  // instant le dossier entier, tous exercices confondus.
+  useEffect(() => { if (exerciceInitialise) load(); }, [load, exerciceInitialise]);
 
   // PCM (référentiel global) pour l'autocomplétion des comptes — chargé une fois.
   useEffect(() => {
@@ -159,7 +208,9 @@ function ComptabilitePage() {
         const { error } = await supabase.from("ecritures_comptables").update({
           date_ecriture: e.date_ecriture,
           journal_code: e.journal_code,
-          compte_numero: e.compte_numero,
+          // La saisie est libre (« 5141 ») : on canonise à l'enregistrement,
+          // sinon la balance affiche deux lignes pour la même banque.
+          compte_numero: normaliserNumeroCompte(e.compte_numero),
           libelle: e.libelle,
           debit: Number(e.debit),
           credit: Number(e.credit),
@@ -183,7 +234,7 @@ function ComptabilitePage() {
       const { error } = await supabase.from("ecritures_comptables").insert({
         dossier_id: dossierId,
         journal_code: newJournal,
-        compte_numero: newCompte,
+        compte_numero: normaliserNumeroCompte(newCompte),
         date_ecriture: newDate,
         libelle: newLibelle,
         debit: newDebit || 0,
@@ -280,7 +331,7 @@ function ComptabilitePage() {
   // Pied de balance : sous-totaux par classe CGNC, total général et résultat net.
   // Même calcul pour l'écran et pour l'export — un total affiché ne peut pas
   // diverger d'un total exporté.
-  const { sousTotaux, total: totalBalance, resultat } = synthetiserBalance(balance);
+  const { sousTotaux, total: totalBalance, resultat, suspens } = synthetiserBalance(balance);
 
   // Export Excel
   // Export vers un logiciel comptable tiers (Sage 100 / FEC / CSV). Le code de
@@ -311,7 +362,9 @@ function ComptabilitePage() {
       telechargerExport(
         format, ecritures as any[],
         dossierId,
-        filtreDateFin || `${new Date().getFullYear()}-12-31`,
+        // Date de clôture de l'export : celle de l'EXERCICE ouvert. L'année de
+        // l'horloge datait un export d'un exercice antérieur au 31/12 courant.
+        filtreDateFin || bornes?.fin || `${new Date().getFullYear()}-12-31`,
         { intitules },
       );
       toast.success(`${FORMATS_EXPORT[format].label} — ${controle.lignes} écriture(s), dont ${controle.nbLettrees} lettrée(s)`);
@@ -439,6 +492,18 @@ function ComptabilitePage() {
 
       {/* Filtres */}
       <div className="flex gap-3 mb-4 flex-wrap">
+        {/* L'EXERCICE d'abord : c'est lui qui définit le périmètre, les autres
+            filtres ne font que le resserrer. */}
+        <Select value={exercice == null ? "TOUS" : String(exercice)}
+          onValueChange={v => setExercice(v === "TOUS" ? null : Number(v))}>
+          <SelectTrigger className="w-40"><SelectValue placeholder="Exercice"/></SelectTrigger>
+          <SelectContent>
+            {exercicesDispo.map(a => <SelectItem key={a} value={String(a)}>Exercice {a}</SelectItem>)}
+            {/* Conservé pour les reprises et les contrôles inter-exercices — mais
+                il faut désormais le demander explicitement. */}
+            <SelectItem value="TOUS">Tous exercices</SelectItem>
+          </SelectContent>
+        </Select>
         <Select value={filtreJournal} onValueChange={setFiltreJournal}>
           <SelectTrigger className="w-32"><SelectValue placeholder="Journal"/></SelectTrigger>
           <SelectContent>
@@ -456,6 +521,17 @@ function ComptabilitePage() {
           </Button>
         )}
       </div>
+
+      {/* Les autres exercices ne sont pas cachés, ils sont AILLEURS : le dire
+          évite de croire que des écritures ont disparu. */}
+      {exercice != null && exercicesDispo.some(a => a !== exercice) && (
+        <p className="text-xs text-muted-foreground mb-4">
+          Périmètre : {bornes?.debut} → {bornes?.fin}
+          {bornes?.premierExercice && " (premier exercice, ouvert à la date de début d'activité)"}.
+          Ce dossier porte aussi des écritures en{" "}
+          {exercicesDispo.filter(a => a !== exercice).join(", ")} — changez d'exercice pour les consulter.
+        </p>
+      )}
 
       <Tabs value={tab} onValueChange={v=>setTab(v as any)}>
         <TabsList>
@@ -643,6 +719,39 @@ function ComptabilitePage() {
               <div className="col-span-2 text-right font-mono text-red-600">{fmt(totalBalance.total_solde_debiteur)}</div>
               <div className="col-span-2 text-right font-mono text-green-600">{fmt(totalBalance.total_solde_crediteur)}</div>
             </div>
+
+            {/* Contrôle d'arrêté : comptes d'attente (47*) non apurés.
+                Placé ENTRE le total et le résultat à dessein : un 4712 garni
+                n'entame pas le résultat affiché juste en dessous, et c'est
+                précisément ce qui le rend invisible sans ce bandeau. */}
+            {!suspens.apure && (
+              <div className="px-4 py-3 border-t bg-amber-50 dark:bg-amber-950/20">
+                <div className="flex items-start gap-2">
+                  <span className="text-amber-600 text-sm leading-5">⚠️</span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+                      Comptes d'attente non apurés — {fmt(suspens.total)} MAD
+                    </div>
+                    <ul className="mt-1 space-y-0.5">
+                      {suspens.comptes.map((c) => (
+                        <li key={c.compte} className="text-xs font-mono text-amber-900/90 dark:text-amber-200/90">
+                          {c.compte} · {fmt(c.solde)} {c.sens}
+                          {c.attenteBancaire && (
+                            <span className="ml-2 font-sans text-amber-700 dark:text-amber-300">
+                              mouvement de banque sans pièce justificative
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-1.5 text-xs text-amber-800/80 dark:text-amber-300/80">
+                      À imputer avant l'arrêté : la classe 47 est reportée à l'exercice
+                      suivant par l'à-nouveau, et le résultat ci-dessous est faux d'autant.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Résultat net — formation du résultat par les classes 6 et 7. */}
             <div className={`px-4 py-3 border-t ${resultat.benefice ? "bg-emerald-50 dark:bg-emerald-950/20" : "bg-red-50 dark:bg-red-950/20"}`}>

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   COMPTE_BANQUE_DEFAUT, COMPTE_CAISSE_DEFAUT,
-  compteBanque, compteCaisse, imputationTresorerie,
+  compteBanque, compteCaisse, imputationTresorerie, journalDeTresorerie,
 } from "./comptes-tresorerie";
 
 describe("compteCaisse — rubrique 516 du PCM", () => {
@@ -77,5 +77,28 @@ describe("imputationTresorerie — compte et journal indissociables", () => {
     const r = imputationTresorerie("especes", { compte_caisse: "5143" });
     expect(r.compte.startsWith("516")).toBe(true);
     expect(r.journal).toBe("CAI");
+  });
+});
+
+describe("journalDeTresorerie — la réciproque, à partir du COMPTE", () => {
+  it("envoie la caisse en CAI et tout le reste en BQ", () => {
+    expect(journalDeTresorerie("5161")).toBe("CAI");
+    expect(journalDeTresorerie("51610000")).toBe("CAI");
+    expect(journalDeTresorerie("5141")).toBe("BQ");
+    expect(journalDeTresorerie("51420000")).toBe("BQ");
+    // 5143 est la Trésorerie Générale, pas une caisse : elle reste en banque.
+    expect(journalDeTresorerie("5143")).toBe("BQ");
+  });
+
+  it("retombe sur BQ sur une entrée vide", () => {
+    expect(journalDeTresorerie(null)).toBe("BQ");
+    expect(journalDeTresorerie("")).toBe("BQ");
+  });
+
+  it("s'accorde avec imputationTresorerie, qui part du MODE", () => {
+    for (const mode of ["especes", "virement", "cheque", null]) {
+      const i = imputationTresorerie(mode);
+      expect(journalDeTresorerie(i.compte)).toBe(i.journal);
+    }
   });
 });

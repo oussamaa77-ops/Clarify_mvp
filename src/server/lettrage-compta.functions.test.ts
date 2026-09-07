@@ -9,7 +9,8 @@
 // ============================================================================
 
 import { describe, it, expect } from "vitest";
-import { basculerTvaSurReglement, comptabiliserReglement } from "./lettrage-compta.functions";
+import { basculerTvaSurReglement, comptabiliserReglement, dateDuReglement } from "./lettrage-compta.functions";
+import { memeCompte } from "@/lib/numero-compte";
 
 // ─── Faux client Supabase sur un grand livre en mémoire ─────────────────────
 interface Ecriture {
@@ -70,9 +71,16 @@ function fakeSb(initial: Partial<Ecriture>[]) {
   return sb;
 }
 
-/** Somme signée d'un compte : débit − crédit. */
+/**
+ * Somme signée d'un compte : débit − crédit.
+ *
+ * Le compte cherché se donne en forme COURTE (« 4458 ») et se compare par
+ * `memeCompte` : les fixtures sont posées telles quelles, tandis que les
+ * écritures produites par le code ressortent normalisées sur 8 chiffres. Une
+ * égalité stricte ne verrait plus que la moitié des lignes — et rendrait 0.
+ */
 const solde = (sb: any, compte: string) =>
-  Math.round(sb.rows.filter((r: Ecriture) => r.compte_numero === compte)
+  Math.round(sb.rows.filter((r: Ecriture) => memeCompte(r.compte_numero, compte))
     .reduce((s: number, r: Ecriture) => s + r.debit - r.credit, 0) * 100) / 100;
 
 /** Facture de vente 1 200 TTC (1 000 HT + 200 TVA en attente), non réglée. */
@@ -383,5 +391,52 @@ describe("basculerTvaSurReglement — appelée seule", () => {
       dossierId: "D1", reference: "FA-1", sens: "client", montantRegle: 0, date: "2026-02-01",
     });
     expect(r).toEqual({ tva: 0, od: 0 });
+  });
+});
+
+// ─── Date d'exigibilité posée par le lettrage AUTOMATIQUE ───────────────────
+//
+// Le lettrage auto n'a pas d'utilisateur pour saisir une date de règlement. Il
+// la tirait donc du jour même, ce qui déplaçait la TVA d'un encaissement de mars
+// dans la déclaration du mois où la reprise avait tourné. `dateDuReglement` la
+// relit dans le groupe apparié, où la ligne de banque la porte déjà.
+describe("dateDuReglement", () => {
+  it("retient la date de la ligne de trésorerie, pas celle de la facture", () => {
+    expect(dateDuReglement([
+      { date_ecriture: "2026-03-05", journal_code: "VTE" },
+      { date_ecriture: "2026-03-28", journal_code: "BQ" },
+    ])).toBe("2026-03-28");
+  });
+
+  it("prend le DERNIER versement d'un règlement échelonné", () => {
+    // La pièce n'est soldée qu'au dernier encaissement : c'est ce jour-là que le
+    // solde devient exigible, pas au premier acompte.
+    expect(dateDuReglement([
+      { date_ecriture: "2026-01-10", journal_code: "VTE" },
+      { date_ecriture: "2026-02-15", journal_code: "CAI" },
+      { date_ecriture: "2026-04-02", journal_code: "BQ" },
+    ])).toBe("2026-04-02");
+  });
+
+  it("ignore une date de facture POSTÉRIEURE au règlement", () => {
+    // Sans le filtre sur le journal, un simple max sur le groupe rendrait la
+    // date de la facture — celle qu'on cherche justement à ne pas retenir.
+    expect(dateDuReglement([
+      { date_ecriture: "2026-06-30", journal_code: "VTE" },
+      { date_ecriture: "2026-06-12", journal_code: "BQ" },
+    ])).toBe("2026-06-12");
+  });
+
+  it("retombe sur la date la plus tardive quand aucune ligne n'est en BQ/CAI", () => {
+    // Compensation ou avoir passé en OD : toujours plus proche du réel que le
+    // jour de la reprise.
+    expect(dateDuReglement([
+      { date_ecriture: "2026-05-01", journal_code: "VTE" },
+      { date_ecriture: "2026-05-20", journal_code: "OD" },
+    ])).toBe("2026-05-20");
+  });
+
+  it("rend null sur un groupe sans date — l'appelant retombera sur le jour même", () => {
+    expect(dateDuReglement([{ date_ecriture: null, journal_code: "BQ" }])).toBeNull();
   });
 });

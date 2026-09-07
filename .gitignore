@@ -47,3 +47,9 @@ out/
 /allure-report/
 /e2e/.auth/
 .allure/
+
+# Sauvegardes de rollback produites par les scripts de reprise (scripts/*.mjs|ts).
+# Elles gardent toute leur valeur SUR LE DISQUE — c'est par elles qu'on annule
+# une régularisation ou une normalisation — mais elles n'ont rien à faire dans
+# l'historique : un backup par exécution, et elles noyaient `git status`.
+backup_*.json

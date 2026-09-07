@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
 import { generateFactureXml, ocrFacture, ajouterEmailClient, matcherDocumentAvecTransactions } from "@/server/factures.functions";
+import { genererPdfA3Facture } from "@/server/efacture.functions";
 import { PaiementEspecesDialog } from "@/components/PaiementEspecesDialog";
 import { DateReglementCell } from "@/components/DateReglementCell";
 import { PREFIXE_RECLASS_TVA, referencesPiece } from "@/services/lettrage";
@@ -15,7 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Plus, FileCode, Eye, CheckCircle, Upload, Loader2, Download, X, AlertCircle, CheckCircle2, UserPlus, Clock, Mail, FileText, Trash2, Undo2, Banknote } from "lucide-react";
+import { Plus, FileCode, FileCheck2, Eye, CheckCircle, Upload, Loader2, Download, X, AlertCircle, CheckCircle2, UserPlus, Clock, Mail, FileText, Trash2, Undo2, Banknote } from "lucide-react";
 import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/components/EcheancesInput";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
@@ -23,6 +24,7 @@ import { puHtToTtc } from "@/lib/tva";
 import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { FacturesFiltres } from "@/components/FacturesFiltres";
+import { BadgeStatutDgi, FactureElectroniquePanel } from "@/components/FactureElectroniquePanel";
 import { filtrerFactures, joursRetard, trancheRetard, type CriteresFiltre } from "@/lib/factures-filtres";
 import { suggestAccount, type SuggestionCompte } from "@/lib/categorization-engine";
 import {
@@ -39,7 +41,7 @@ interface Ligne { designation: string; quantite: number; prix_unitaire: number; 
 interface Client { id: string; nom: string; ice: string | null; email: string | null; compte_produit_defaut?: string | null }
 interface Facture {
   id: string; numero: string | null; date_facture: string; date_echeance: string | null;
-  client_id: string | null; statut: string; statut_paiement: string; statut_dgi: string | null;
+  client_id: string | null; statut: string; statut_paiement: string; statut_dgi: string | null; dgi_status?: string | null;
   montant_ht: number; montant_ttc: number; montant_tva: number;
   type: string; montant_paye: number; montant_restant: number; mode_reglement: string | null;
   xml_ubl: string | null; hash_sha256: string | null; dgi_uuid: string | null; dgi_response: any;
@@ -121,14 +123,18 @@ function ModePaiementCell({ mode }: { mode: ModePaiement | null }) {
   );
 }
 
-function DGIBadge({ statut, statut_dgi }: { statut: string; statut_dgi: string | null }) {
-  if (statut_dgi === "en_analyse" || statut === "envoyee")
-    return <Badge className="bg-yellow-100 text-yellow-800 text-xs flex items-center gap-1"><Clock className="h-3 w-3"/>En analyse</Badge>;
-  if (statut === "conforme" || statut_dgi === "conforme")
-    return <Badge className="bg-green-100 text-green-800 text-xs">✅ Conforme</Badge>;
-  if (statut === "rejetee" || statut_dgi === "rejetee")
-    return <Badge variant="destructive" className="text-xs">❌ Rejeté</Badge>;
-  return <Badge variant="secondary" className="text-xs">{statut}</Badge>;
+/**
+ * Statut DGI de la ligne. Le libellé et le ton viennent désormais d'une source
+ * unique (`presenterStatutDgi`), partagée avec le panneau « Facture
+ * Électronique » : deux barèmes de couleurs pour le même état finiraient par
+ * diverger, et l'utilisateur ne saurait plus lequel croire.
+ *
+ * `dgi_status` est l'état normalisé ; `statut_dgi` reste lu en repli pour les
+ * factures antérieures à la migration, et `statut` en dernier recours pour
+ * celles qui n'ont jamais eu de statut fiscal du tout.
+ */
+function DGIBadge({ statut, statut_dgi, dgi_status }: { statut: string; statut_dgi: string | null; dgi_status?: string | null }) {
+  return <BadgeStatutDgi statut={dgi_status ?? statut_dgi ?? statut} />;
 }
 
 /**
@@ -161,6 +167,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
   const matchFn  = useServerFn(matcherDocumentAvecTransactions);
   const annulerPaiementFn = useServerFn(annulerPaiementFacture);
   const memoriserFn = useServerFn(memoriserTiers);
+  const pdfA3Fn  = useServerFn(genererPdfA3Facture);
 
   const [factures, setFactures] = useState<Facture[]>([]);
   const [clients, setClients]   = useState<Client[]>([]);
@@ -570,6 +577,82 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     finally { setProcessing(null); }
   };
 
+  /**
+   * Report du statut DGI remonté par le panneau e-facture.
+   *
+   * Rend `prev` INCHANGÉ quand rien ne diffère : sans cette garde, chaque
+   * remontée fabriquait un nouveau tableau et un nouvel objet de détail, donc un
+   * rendu, donc une nouvelle lambda passée au panneau — de quoi entretenir une
+   * boucle avec un enfant qui se recharge sur l'identité de son rappel.
+   */
+  const majStatutDgi = useCallback((factureId: string, statut: string) => {
+    setFactures((prev) =>
+      prev.some((f) => f.id === factureId && f.dgi_status !== statut)
+        ? prev.map((f) => (f.id === factureId ? { ...f, dgi_status: statut } : f))
+        : prev,
+    );
+    setFactureDetail((prev) =>
+      prev && prev.id === factureId && prev.dgi_status !== statut ? { ...prev, dgi_status: statut } : prev,
+    );
+  }, []);
+
+  /**
+   * Une facture est SCELLÉE dès qu'elle porte son empreinte et son document
+   * UBL : c'est à partir de là que le PDF/A-3 officiel existe et fait foi. Le
+   * statut DGI ne suffit pas comme critère — une facture scellée mais pas encore
+   * transmise a elle aussi son PDF, et c'est bien celui-là qu'il faut montrer.
+   */
+  const estScellee = (f: Facture) =>
+    !!f.hash_sha256 && !!f.xml_ubl;
+
+  /**
+   * Ouverture du document de la facture.
+   *
+   * Priorité au PDF/A-3 scellé : montrer le PNG du scan OCR alors que le
+   * document officiel existe reviendrait à présenter le brouillon d'entrée à la
+   * place de la pièce qui a valeur probante — celle qui porte le QR de contrôle,
+   * l'empreinte, le récépissé, et le XML UBL en pièce jointe.
+   * Le scan reste le repli quand rien n'est scellé.
+   */
+  const handleVoirDocument = async (f: Facture) => {
+    if (!estScellee(f)) {
+      setDocView({
+        title: `Facture ${f.numero ?? ""}`.trim(),
+        url: f.fichier_original_url,
+        fileName: f.fichier_original_nom,
+        mimeType: f.fichier_original_type,
+      });
+      return;
+    }
+
+    setProcessing(f.id);
+    try {
+      const r = await pdfA3Fn({ data: { facture_id: f.id } });
+      setDocView({
+        title: `Facture ${f.numero ?? ""} — PDF/A-3`.trim(),
+        fileName: r.nom_fichier,
+        mimeType: "application/pdf",
+        base64: r.pdf_base64,
+      });
+      (r.avertissements ?? []).forEach((a: string) => toast.warning(a));
+    } catch (e: any) {
+      // Le PDF officiel n'a pas pu être produit : plutôt que de ne rien montrer,
+      // on retombe sur le scan en DISANT que ce n'est pas le document scellé.
+      toast.error(`PDF/A-3 indisponible : ${e.message}`);
+      if (f.fichier_original_url) {
+        toast.info("Affichage du scan d'origine, qui n'a pas valeur de facture scellée.");
+        setDocView({
+          title: `Facture ${f.numero ?? ""} — scan d'origine`.trim(),
+          url: f.fichier_original_url,
+          fileName: f.fichier_original_nom,
+          mimeType: f.fichier_original_type,
+        });
+      }
+    } finally {
+      setProcessing(null);
+    }
+  };
+
   const handleGenXml = async (f: Facture) => {
     const client=clients.find(c=>c.id===f.client_id);
     if(!client?.email){setEmailModal({clientId:f.client_id!,factureId:f.id});toast.warning("Email client manquant");return;}
@@ -577,8 +660,13 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     try{
       const res=await genXml({data:{facture_id:f.id}});
       setDgiResult(res);
-      if(res.conforme) toast.success("✅ Facture conforme DGI");
-      else toast.error("❌ Facture rejetée");
+      // Le verdict vient désormais de la plateforme DGI (ou du bac à sable) et
+      // porte son propre message : « rejetée » en dur mentait sur les cas où
+      // l'envoi est simplement REFUSÉ — facture déjà validée, plateforme
+      // injoignable —, ce qui n'est pas du tout la même chose qu'un rejet.
+      if(res.conforme) toast.success(res.message ?? "✅ Facture conforme DGI");
+      else toast.error(res.message ?? "❌ Facture rejetée");
+      (res.avertissements ?? []).forEach((a:string)=>toast.warning(a));
       load();
     }catch(e:any){toast.error(e.message);}
     finally{setProcessing(null);}
@@ -589,8 +677,9 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     try{
       const res=await genXml({data:{facture_id:fid}});
       setDgiResult(res);
-      if(res.conforme) toast.success("✅ Facture conforme DGI (sans email)");
-      else toast.error("❌ Facture rejetée");
+      if(res.conforme) toast.success(res.message ?? "✅ Facture conforme DGI (sans email)");
+      else toast.error(res.message ?? "❌ Facture rejetée");
+      (res.avertissements ?? []).forEach((a:string)=>toast.warning(a));
       load();
     }catch(e:any){toast.error(e.message);}
     finally{setProcessing(null);}
@@ -930,7 +1019,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                   <TableCell className="font-medium text-sm">{fmt(Number(f.montant_ttc))}</TableCell>
                   <TableCell className="font-mono text-sm text-green-600">{fmt(Number(f.montant_paye??0))}</TableCell>
                   <TableCell className="font-mono text-sm text-orange-600">{fmt(Number(f.montant_restant??f.montant_ttc))}</TableCell>
-                  <TableCell><DGIBadge statut={f.statut} statut_dgi={f.statut_dgi}/></TableCell>
+                  <TableCell><DGIBadge statut={f.statut} statut_dgi={f.statut_dgi} dgi_status={f.dgi_status}/></TableCell>
                   <TableCell><StatutPaiementBadge f={f}/></TableCell>
                   <TableCell><DateReglementCell facture={f} index={datesReglement}/></TableCell>
                   <TableCell><ModePaiementCell mode={modePaiementFacture(f, modes)}/></TableCell>
@@ -968,15 +1057,24 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                         onClick={()=>setFactureDetail(f)}>
                         <Eye className="h-3 w-3"/>
                       </Button>
-                      {/* TOUJOURS rendu, désactivé quand rien n'est archivé : un bouton
-                          conditionnel se contente de disparaître, et l'utilisateur ne
-                          peut pas distinguer « pas de scan » de « pas implémenté ». */}
-                      <Button size="sm" variant="ghost" disabled={!f.fichier_original_url}
-                        title={f.fichier_original_url
-                          ? "Voir / télécharger le document original"
-                          : "Aucun document original archivé pour cette facture"}
-                        onClick={()=>setDocView({ title:`Facture ${f.numero??""}`.trim(), url:f.fichier_original_url, fileName:f.fichier_original_nom, mimeType:f.fichier_original_type })}>
-                        <FileText className="h-3 w-3"/>
+                      {/* TOUJOURS rendu, désactivé quand il n'y a NI facture scellée
+                          NI scan : un bouton conditionnel se contente de disparaître,
+                          et l'utilisateur ne peut pas distinguer « rien à voir » de
+                          « pas implémenté ». Dès que la facture est scellée, c'est le
+                          PDF/A-3 officiel qui s'ouvre, pas le scan d'entrée. */}
+                      <Button size="sm" variant="ghost"
+                        disabled={(!estScellee(f)&&!f.fichier_original_url)||processing===f.id}
+                        title={estScellee(f)
+                          ? "Voir la facture officielle PDF/A-3 (QR DGI, empreinte, XML UBL embarqué)"
+                          : f.fichier_original_url
+                            ? "Voir / télécharger le document original — cette facture n'est pas encore scellée"
+                            : "Aucun document à afficher : facture ni scellée ni scannée"}
+                        onClick={()=>handleVoirDocument(f)}>
+                        {processing===f.id
+                          ?<Loader2 className="h-3 w-3 animate-spin"/>
+                          :estScellee(f)
+                            ?<FileCheck2 className="h-3 w-3 text-emerald-600"/>
+                            :<FileText className="h-3 w-3"/>}
                       </Button>
                       {/* Annuler le paiement : actif seulement si la facture est payée
                           (ou partiellement). Débloque ensuite la suppression. */}
@@ -1094,15 +1192,17 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
           </DialogHeader>
           {factureDetail && (
             <div className="space-y-4">
-              {/* Signalé seulement quand rien n'est archivé : sinon le bouton
-                  « document original » de la ligne ouvre déjà le scan. */}
-              {!factureDetail.fichier_original_url && (
+              {/* Ne se déclenche que si la facture n'a NI document officiel NI
+                  scan : dès qu'elle est scellée, le PDF/A-3 existe et le bouton
+                  de la ligne l'ouvre — dire « aucun document » serait faux. */}
+              {!estScellee(factureDetail) && !factureDetail.fichier_original_url && (
                 <div className="flex items-start gap-2 rounded-md bg-muted/60 p-3 text-xs text-muted-foreground">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-px"/>
                   <span>
                     Aucun document original n'est archivé pour cette facture — voici son
-                    contenu enregistré. Les factures créées ou scannées depuis la mise en
-                    place de l'archivage ouvrent directement l'original.
+                    contenu enregistré. Une fois la facture scellée, sa version officielle
+                    PDF/A-3 (QR de contrôle, empreinte, XML UBL embarqué) devient
+                    consultable depuis le bouton de la ligne.
                   </span>
                 </div>
               )}
@@ -1117,13 +1217,21 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                   ["Montant TTC", fmt(Number(factureDetail.montant_ttc))],
                   ["Payé", fmt(Number(factureDetail.montant_paye ?? 0))],
                   ["Restant dû", fmt(Number(factureDetail.montant_restant ?? factureDetail.montant_ttc))],
-                  ["Statut DGI", factureDetail.statut_dgi ?? factureDetail.statut],
                 ].map(([label, value]) => (
                   <div key={label as string}>
                     <p className="text-xs text-muted-foreground">{label}</p>
                     <p className="font-medium">{value}</p>
                   </div>
                 ))}
+                {/* Le statut DGI porte une couleur et une infobulle explicative :
+                    le rendre en texte brut comme les montants gommait justement
+                    ce qui le distingue — un état à surveiller, pas une donnée. */}
+                <div>
+                  <p className="text-xs text-muted-foreground">Statut DGI</p>
+                  <div className="mt-0.5">
+                    <BadgeStatutDgi statut={factureDetail.dgi_status ?? factureDetail.statut_dgi ?? factureDetail.statut} />
+                  </div>
+                </div>
               </div>
 
               {Array.isArray(factureDetail.lignes) && factureDetail.lignes.length > 0 && (
@@ -1159,13 +1267,15 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
                 </Table>
               )}
 
-              {factureDetail.xml_ubl && (
-                <Button size="sm" variant="outline" className="w-fit" onClick={()=>{
-                  const blob=new Blob([factureDetail.xml_ubl!],{type:"application/xml"});
-                  const a=document.createElement("a");a.href=URL.createObjectURL(blob);
-                  a.download=`${factureDetail.numero??factureDetail.id}.xml`;a.click();
-                }}><Download className="h-4 w-4 mr-1"/>Télécharger le XML UBL 2.1</Button>
-              )}
+              {/* Tout le cycle fiscal (UBL, transmission, récépissé, PDF/A-3,
+                  journal) vit dans ce panneau. Il remplace l'ancien bouton isolé
+                  de téléchargement du XML, qui n'exposait qu'une des étapes et
+                  laissait croire que le reste n'existait pas. */}
+              <FactureElectroniquePanel
+                factureId={factureDetail.id}
+                numero={factureDetail.numero}
+                onStatutChange={(statut) => majStatutDgi(factureDetail.id, statut)}
+              />
             </div>
           )}
         </DialogContent>

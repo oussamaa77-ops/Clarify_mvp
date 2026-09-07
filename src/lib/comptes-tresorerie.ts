@@ -56,6 +56,23 @@ export const compteBanque = (d?: ComptesTresorerieDossier | null): string =>
 /** Modes de règlement qui passent par la caisse. Tout le reste passe en banque. */
 export const MODES_ESPECES = ["especes", "espèces", "cash", "caisse"];
 
+/**
+ * Journal qui correspond à un COMPTE de trésorerie : CAI pour la caisse (516),
+ * BQ pour tout le reste.
+ *
+ * C'est la réciproque d'`imputationTresorerie`, qui part du mode de règlement.
+ * Ici on part du compte — le cas de la reprise, où l'on hérite d'une écriture
+ * dont on connaît le compte mais plus le mode.
+ *
+ * Une seule définition, parce que la règle était écrite en clair à deux endroits
+ * (l'OD de paiement DGI et la repasse du script). Deux copies d'une règle
+ * d'aiguillage finissent par diverger, et l'écart ne se voit qu'au rapprochement
+ * bancaire, des semaines plus tard.
+ */
+export function journalDeTresorerie(compte: string | null | undefined): "BQ" | "CAI" {
+  return String(compte ?? "").trim().startsWith(PREFIXE_CAISSE) ? "CAI" : "BQ";
+}
+
 export interface ImputationTresorerie {
   /** Compte à mouvementer : caisse pour les espèces, banque sinon. */
   compte: string;

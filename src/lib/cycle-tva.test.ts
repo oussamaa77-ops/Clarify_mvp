@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  actionsCycleTva, badgeCycleTva, estCreditTva, etapeCycleTva, soldeHistoriqueTva,
+  actionsCycleTva, badgeCycleTva, estCreditTva, etapeCycleTva, resteAPayerTva,
+  soldeHistoriqueTva,
 } from "./cycle-tva";
 
 const dette = { neant: false, dette: true };
@@ -45,6 +46,18 @@ describe("etapeCycleTva", () => {
     expect(etapeCycleTva({ liquidation: dette, declaree: true, resteAPayer: 0.01 })).toBe("a_payer");
   });
 
+  // Le prélèvement du 20 avril solde la déclaration de mars, mais ne figure pas
+  // dans le solde du 4456 arrêté au 31 mars. Sans les deux champs de cycle,
+  // l'écran réclamait indéfiniment un paiement déjà fait.
+  it("tient compte d'un règlement postérieur à la fin de la période", () => {
+    const regleEnAvril = {
+      liquidation: dette, declaree: true,
+      resteAPayer: 7500, resteAPayerPeriode: 0, solde4456: 0, regle: true,
+    };
+    expect(etapeCycleTva(regleEnAvril)).toBe("a_pointer");
+    expect(etapeCycleTva({ ...regleEnAvril, pointe: true })).toBe("liquidee");
+  });
+
   it("n'atteint « liquidée » qu'une fois le règlement pointé", () => {
     const paye = { liquidation: dette, declaree: true, resteAPayer: 0 };
     expect(etapeCycleTva(paye)).toBe("a_pointer");
@@ -73,6 +86,41 @@ describe("badgeCycleTva", () => {
     expect(b.label).toBe("Liquidée — crédit reporté");
     expect(b.variant).toBe("default");
     expect(b.classe).toContain("emerald");
+  });
+});
+
+describe("resteAPayerTva", () => {
+  it("retombe sur le solde de fin de période quand le cycle n'est pas renseigné", () => {
+    expect(resteAPayerTva({ liquidation: dette, declaree: true, resteAPayer: 7500 })).toBe(7500);
+  });
+
+  it("préfère le solde vivant du 4456 à celui arrêté en fin de période", () => {
+    expect(resteAPayerTva({
+      liquidation: dette, declaree: true,
+      resteAPayer: 7500, resteAPayerPeriode: 0, solde4456: 0,
+    })).toBe(0);
+  });
+
+  it("ne réclame rien quand un crédit antérieur a déjà éteint le compte", () => {
+    // La pièce doit encore 1 880, mais le 4456 est débiteur : rien n'est exigible.
+    expect(resteAPayerTva({
+      liquidation: dette, declaree: true,
+      resteAPayer: -902, resteAPayerPeriode: 1880, solde4456: -902,
+    })).toBe(0);
+  });
+
+  it("ne réclame pas l'arriéré d'une autre période sur celle-ci", () => {
+    expect(resteAPayerTva({
+      liquidation: dette, declaree: true,
+      resteAPayer: 4200, resteAPayerPeriode: 0, solde4456: 4200,
+    })).toBe(0);
+  });
+
+  it("laisse passer un règlement partiel", () => {
+    expect(resteAPayerTva({
+      liquidation: dette, declaree: true,
+      resteAPayer: 7500, resteAPayerPeriode: 5000, solde4456: 5000,
+    })).toBe(5000);
   });
 });
 
@@ -138,6 +186,16 @@ describe("actionsCycleTva", () => {
     const a = actionsCycleTva({ liquidation: dette, declaree: true, resteAPayer: 0, tracable: false });
     expect(a.pointer).toBe(false);
     expect(a.raisonPointageIndisponible).toMatch(/20260809130000/);
+  });
+
+  it("débloque le pointage dès que le règlement est détecté, fût-il postérieur", () => {
+    const a = actionsCycleTva({
+      liquidation: dette, declaree: true, tracable: true, regle: true,
+      resteAPayer: 7500, resteAPayerPeriode: 0, solde4456: 0,
+    });
+    expect(a.payer).toBe(false);
+    expect(a.pointer).toBe(true);
+    expect(a.raisonPointageIndisponible).toBeNull();
   });
 
   it("autorise le pointage sur une période déclarée et soldée", () => {

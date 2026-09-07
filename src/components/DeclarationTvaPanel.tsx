@@ -65,7 +65,8 @@ import {
   bornesPeriode, referenceDeclaration,
 } from "@/lib/liquidation-tva";
 import {
-  actionsCycleTva, badgeCycleTva, estCreditTva, etapeCycleTva, soldeHistoriqueTva,
+  actionsCycleTva, badgeCycleTva, estCreditTva, etapeCycleTva,
+  resteAPayerTva, soldeHistoriqueTva,
 } from "@/lib/cycle-tva";
 
 const BUCKET_QUITTANCES = "quittances-tva";
@@ -100,7 +101,18 @@ export interface EtatPeriode {
     dette: boolean; neant: boolean; periode: string;
   } | null;
   declaree: boolean;
+  /** Solde du 4456 arrêté à la fin de la période — grandeur du BOUCLAGE. */
   resteAPayer: number;
+  /** Solde du 4456 à ce jour, toutes dates confondues : plafond d'un paiement. */
+  solde4456?: number;
+  /** Reste dû sur la déclaration de la période, règlements postérieurs déduits. */
+  resteAPayerPeriode?: number;
+  /** Réellement exigible : min des deux précédents, jamais négatif. */
+  resteAPayable?: number;
+  /** Un prélèvement est rattaché à la déclaration, à quelque date que ce soit. */
+  regle?: boolean;
+  montantRegle?: number;
+  dateReglement?: string | null;
   bouclee: boolean;
   detailBouclage: string | null;
   /** Crédit de TVA reporté sur les périodes suivantes (positif), 0 sinon. */
@@ -122,8 +134,18 @@ export interface Quittance {
 }
 
 export function DeclarationTvaPanel({
-  dossierId, exercice, periodeInitiale,
-}: { dossierId: string; exercice: string; periodeInitiale?: string }) {
+  dossierId, exercice, periodeInitiale, onEcriture,
+}: {
+  dossierId: string; exercice: string; periodeInitiale?: string;
+  /**
+   * Appelé après CHAQUE écriture comptabilisée par le panneau.
+   *
+   * Le panneau recharge son propre état, mais il vient d'écrire dans le grand
+   * livre : la page qui l'héberge (résultat fiscal, IS, cartes du dossier) lit
+   * les mêmes écritures et resterait sur une version périmée sans ce signal.
+   */
+  onEcriture?: () => void;
+}) {
   const periodes = periodesDeclarables(exercice);
   const moisCourant = new Date().toISOString().slice(0, 7);
   const defaut = [periodeInitiale, moisCourant].find((p) => p && periodes.some((x) => x.valeur === p));
@@ -135,10 +157,7 @@ export function DeclarationTvaPanel({
 
   // Paiement DGI
   const [openPaiement, setOpenPaiement] = useState(false);
-  const [datePaiement, setDatePaiement] = useState(new Date().toISOString().slice(0, 10));
-  const [montantPaiement, setMontantPaiement] = useState("");
   const [plusieursComptes, setPlusieursComptes] = useState(false);
-  const [compteBanque, setCompteBanque] = useState("5141");
 
   // Quittance
   const [quittance, setQuittance] = useState<Quittance | null>(null);
@@ -149,7 +168,6 @@ export function DeclarationTvaPanel({
     try {
       const e = await etatPeriodeTva({ data: { dossierId, periode } }) as EtatPeriode;
       setEtat(e);
-      setMontantPaiement(e?.resteAPayer ? String(e.resteAPayer) : "");
     } catch (err: any) {
       toast.error("Lecture de la période impossible : " + (err?.message ?? err));
       setEtat(null);
@@ -172,6 +190,19 @@ export function DeclarationTvaPanel({
 
   useEffect(() => { charger(); chargerQuittance(); }, [charger, chargerQuittance]);
 
+  /**
+   * Rechargement après une opération qui a touché la base.
+   *
+   * Une seule porte pour les deux lectures — l'état de la période et la présence
+   * de la quittance — plus le signal à la page hôte. Recharger l'un sans l'autre
+   * laisse l'écran affirmer le contraire de ce que la base contient : c'est
+   * exactement ce qui faisait « disparaître » un prélèvement pourtant écrit.
+   */
+  const rafraichir = useCallback(async () => {
+    await Promise.all([charger(), chargerQuittance()]);
+    onEcriture?.();
+  }, [charger, chargerQuittance, onEcriture]);
+
   // Un seul compte de trésorerie : le sélecteur n'apporte rien et l'écran s'allège.
   useEffect(() => {
     (async () => {
@@ -192,19 +223,23 @@ export function DeclarationTvaPanel({
         `Liquidation ${r.periode} comptabilisée — ${r.lignesInserees} lignes, `
         + `${fmt(r.montant)} MAD de ${r.dette ? "TVA due" : "crédit reportable"}`,
       );
-      await charger();
+      await rafraichir();
     } catch (e: any) {
       toast.error("Liquidation impossible : " + (e?.message ?? e));
     } finally { setTravail(false); }
   };
 
-  const enregistrerPaiement = async () => {
-    const montant = Number(String(montantPaiement).replace(",", "."));
-    if (!(montant > 0)) { toast.error("Montant invalide."); return; }
+  const enregistrerPaiement = async (saisie: {
+    date: string; montant: number; compteBanque: string;
+  }) => {
+    if (!(saisie.montant > 0)) { toast.error("Montant invalide."); return; }
     setTravail(true);
     try {
       const r = await payerTvaDgi({
-        data: { dossierId, periode, date: datePaiement, montant, compteBanque },
+        data: {
+          dossierId, periode, date: saisie.date,
+          montant: saisie.montant, compteBanque: saisie.compteBanque,
+        },
       }) as any;
       if (!r.ok) { toast.error(r.raison ?? "Paiement refusé"); return; }
       if (!r.lignesInserees) { toast.info(r.raison ?? "Rien à payer."); return; }
@@ -214,7 +249,9 @@ export function DeclarationTvaPanel({
           : `Paiement de ${fmt(r.montant)} MAD enregistré — le compte 4456 est soldé`,
       );
       setOpenPaiement(false);
-      await charger();
+      // Relecture AVANT de rendre la main : l'étape 2 doit passer au vert dans la
+      // foulée, sans attendre un changement de période ou un rechargement de page.
+      await rafraichir();
     } catch (e: any) {
       toast.error("Paiement impossible : " + (e?.message ?? e));
     } finally { setTravail(false); }
@@ -249,8 +286,7 @@ export function DeclarationTvaPanel({
 
       setQuittance({ nom: file.name, chemin, traceEnBase });
       toast.success("Quittance SIMPL-TVA jointe à la période.");
-      await chargerQuittance();
-      await charger();
+      await rafraichir();
     } catch (e: any) {
       toast.error("Envoi impossible : " + (e?.message ?? e));
     } finally {
@@ -276,7 +312,7 @@ export function DeclarationTvaPanel({
       toast.success(valeur
         ? `Règlement pointé — ${r.lignesPointees} ligne${r.lignesPointees > 1 ? "s" : ""} de ${COMPTE_TVA_DUE} cochée${r.lignesPointees > 1 ? "s" : ""}.`
         : "Pointage retiré.");
-      await charger();
+      await rafraichir();
     } catch (e: any) {
       toast.error("Pointage impossible : " + (e?.message ?? e));
     } finally { setPointage(false); }
@@ -296,54 +332,137 @@ export function DeclarationTvaPanel({
         onPointer={basculerPointage}
       />
 
-      {/* ── Dialogue de paiement ── */}
-      <Dialog open={openPaiement} onOpenChange={setOpenPaiement}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Prélèvement DGI — {etat?.periode}</DialogTitle></DialogHeader>
-          <div className="space-y-3">
-            <p className="text-xs text-muted-foreground">
-              Génère l'écriture <strong>D {COMPTE_TVA_DUE} / C {compteBanque}</strong>, qui éteint la dette de TVA.
+      {/* Monté à l'ouverture seulement : la saisie repart ainsi des chiffres de la
+          période courante, jamais de ceux d'une période consultée avant. */}
+      {openPaiement && (
+        <ModalPrelevementDgi
+          periode={etat?.periode ?? periode}
+          tvaNette={tvaNettePeriode(etat)}
+          soldeCumule={etat?.solde4456 ?? etat?.resteAPayer ?? 0}
+          plafond={resteAPayerTva(etat ?? undefined)}
+          plusieursComptes={plusieursComptes}
+          travail={travail}
+          onFermer={() => setOpenPaiement(false)}
+          onValider={enregistrerPaiement}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * TVA nette DUE au titre de la période, en positif — 0 en crédit ou en néant.
+ *
+ * C'est le montant que la déclaration SIMPL-TVA porte, donc celui que la DGI
+ * prélève : c'est lui qui doit pré-remplir la saisie, et non le solde du 4456
+ * qui, lui, est un compte courant mêlant toutes les périodes.
+ */
+export const tvaNettePeriode = (etat: EtatPeriode | null): number => {
+  const liq = etat?.liquidation;
+  return liq && liq.dette && !liq.neant ? liq.montant : 0;
+};
+
+/**
+ * Saisie du prélèvement DGI.
+ *
+ * Elle porte son propre état de formulaire : hors ouverture, ces trois champs
+ * n'ont aucun sens, et les garder dans le panneau imposait de les remettre à
+ * jour à chaque changement de période — une source d'écarts silencieux entre ce
+ * qui est affiché et ce qui sera écrit.
+ *
+ * Deux montants cohabitent, et les confondre est la faute que cet écran doit
+ * empêcher : la TVA NETTE de la période (ce que la déclaration doit) pré-remplit
+ * le champ, tandis que le SOLDE du 4456 (compte courant avec l'État, toutes
+ * périodes confondues) n'est qu'un plafond. Pré-remplir avec le solde faisait
+ * proposer de payer l'arriéré d'un autre mois sous la référence de celui-ci.
+ */
+export function ModalPrelevementDgi({
+  periode, tvaNette, soldeCumule, plafond, plusieursComptes, travail, onFermer, onValider,
+}: {
+  periode: string;
+  tvaNette: number;
+  soldeCumule: number;
+  /** Montant maximal accepté : ce qui reste réellement exigible sur la période. */
+  plafond: number;
+  plusieursComptes: boolean;
+  travail: boolean;
+  onFermer: () => void;
+  onValider: (saisie: { date: string; montant: number; compteBanque: string }) => void;
+}) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const defaut = Math.min(tvaNette, plafond);
+  const [montant, setMontant] = useState(defaut > 0 ? String(defaut) : "");
+  const [compteBanque, setCompteBanque] = useState("5141");
+
+  const saisi = Number(String(montant).replace(",", "."));
+  const invalide = !(saisi > 0);
+  const auDela = !invalide && saisi - plafond > 0.005;
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onFermer(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Prélèvement DGI — {periode}</DialogTitle>
+          <DialogDescription className="text-xs">
+            Génère l'écriture <strong>D {COMPTE_TVA_DUE} / C {compteBanque}</strong>, qui éteint la dette de TVA.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div>
+            <Label className="text-xs" htmlFor="tva-date-paiement">Date du prélèvement</Label>
+            <Input
+              id="tva-date-paiement" type="date" value={date}
+              onChange={(e) => setDate(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Une date postérieure à la période est normale : la TVA se règle le mois suivant.
             </p>
-            <div>
-              <Label className="text-xs" htmlFor="tva-date-paiement">Date du prélèvement</Label>
-              <Input
-                id="tva-date-paiement" type="date" value={datePaiement}
-                onChange={(e) => setDatePaiement(e.target.value)}
-              />
-            </div>
-            <div>
-              <Label className="text-xs" htmlFor="tva-montant-paiement">Montant (MAD)</Label>
-              <Input
-                id="tva-montant-paiement" inputMode="decimal" value={montantPaiement}
-                onChange={(e) => setMontantPaiement(e.target.value)}
-              />
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Dû au compte {COMPTE_TVA_DUE} : {fmt(etat?.resteAPayer ?? 0)} MAD. Un montant inférieur est
-                accepté (échéancier) ; un montant supérieur est refusé, il rendrait le {COMPTE_TVA_DUE} débiteur.
+          </div>
+          <div>
+            <Label className="text-xs" htmlFor="tva-montant-paiement">Montant (MAD)</Label>
+            <Input
+              id="tva-montant-paiement" inputMode="decimal" value={montant}
+              aria-invalid={auDela || undefined}
+              onChange={(e) => setMontant(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground mt-1">
+              TVA de la période : <strong>{fmt(tvaNette)} MAD</strong>
+              {" | "}Solde cumulé {COMPTE_TVA_DUE} : <strong>{fmt(soldeCumule)} MAD</strong>
+            </p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Un montant inférieur est accepté (échéancier) ; la saisie est plafonnée
+              à {fmt(plafond)} MAD — au-delà, le {COMPTE_TVA_DUE} deviendrait débiteur.
+            </p>
+            {auDela && (
+              <p className="text-[11px] text-red-600 dark:text-red-400 mt-1">
+                {fmt(saisi)} MAD dépasse le solde exigible de {fmt(plafond)} MAD.
               </p>
-            </div>
-            {plusieursComptes && (
-              <div>
-                <Label className="text-xs">Compte de trésorerie crédité</Label>
-                <Select value={compteBanque} onValueChange={setCompteBanque}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="5141">5141 — Banque</SelectItem>
-                    <SelectItem value="51610000">51610000 — Caisse</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
             )}
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpenPaiement(false)}>Annuler</Button>
-            <Button onClick={enregistrerPaiement} disabled={travail}>
-              {travail && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}Enregistrer
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+          {plusieursComptes && (
+            <div>
+              <Label className="text-xs">Compte de trésorerie crédité</Label>
+              <Select value={compteBanque} onValueChange={setCompteBanque}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="5141">5141 — Banque</SelectItem>
+                  <SelectItem value="51610000">51610000 — Caisse</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onFermer}>Annuler</Button>
+          <Button
+            onClick={() => onValider({ date, montant: saisi, compteBanque })}
+            disabled={travail || invalide || auDela}
+          >
+            {travail && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}Enregistrer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -390,6 +509,8 @@ export function VueDeclarationTva({
   const actions = actionsCycleTva(etatCycle);
   const credit = estCreditTva(etatCycle);
   const soldeHistorique = soldeHistoriqueTva(etatCycle);
+  /** Ce qui reste exigible — un prélèvement postérieur à la période le solde. */
+  const resteAPayer = resteAPayerTva(etatCycle);
   /** Fin de cycle : règlement pointé (dette) ou période justifiée (crédit). */
   const validee = etape === "liquidee";
 
@@ -500,16 +621,22 @@ export function VueDeclarationTva({
               <Etape
                 numero={2}
                 titre="Paiement à la DGI"
-                fait={!credit && etat.declaree && etat.resteAPayer <= 0.005}
+                fait={!credit && etat.declaree && resteAPayer <= 0.005}
                 neutre={credit && etat.declaree}
                 inactif={!etat.declaree}
                 detail={!etat.declaree
                   ? "Disponible une fois la liquidation générée."
                   : credit
                     ? "Aucun paiement requis pour cette période (Crédit de TVA reportable)."
-                    : etat.resteAPayer > 0.005
-                      ? `Reste ${fmt(etat.resteAPayer)} MAD au compte ${COMPTE_TVA_DUE}.`
-                      : `Le compte ${COMPTE_TVA_DUE} est soldé : la TVA déclarée a bien été prélevée.`}
+                    : resteAPayer > 0.005
+                      ? `Reste ${fmt(resteAPayer)} MAD au compte ${COMPTE_TVA_DUE}.`
+                      : etat.regle
+                        // La date compte : c'est elle qui prouve qu'on a bien
+                        // détecté un règlement postérieur à la période.
+                        ? `Prélèvement de ${fmt(etat.montantRegle ?? 0)} MAD enregistré`
+                          + `${etat.dateReglement ? ` le ${etat.dateReglement}` : ""}`
+                          + ` — la déclaration ${referenceDeclaration(periode)} est réglée.`
+                        : `Rien à prélever : le solde du ${COMPTE_TVA_DUE} est éteint par un crédit antérieur.`}
                 secondaire={soldeHistorique > 0.005 && (
                   <>
                     Reste un solde historique de <strong>{fmt(soldeHistorique)} MAD</strong> sur les
@@ -600,7 +727,20 @@ export function VueDeclarationTva({
               ) : (
                 <div className="flex items-start gap-2 text-sm text-muted-foreground">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                  <span>{etat.detailBouclage ?? "Période non soldée."}</span>
+                  {/* Le bouclage s'arrête à la fin de la période : un prélèvement
+                      passé le mois suivant lui échappe par construction. Sans
+                      cette phrase, « TVA due non prélevée » contredirait l'étape
+                      2 juste au-dessus, qui, elle, a bien vu le règlement. */}
+                  <span>
+                    {etat.detailBouclage ?? "Période non soldée."}
+                    {etat.regle && resteAPayer <= 0.005 && etat.dateReglement && (
+                      <>
+                        {" "}Le prélèvement du <strong>{etat.dateReglement}</strong> est postérieur
+                        au {bornes?.fin} : ce contrôle, arrêté à la fin de la période, ne le voit pas.
+                        La déclaration, elle, est réglée.
+                      </>
+                    )}
+                  </span>
                 </div>
               )}
             </CardContent>

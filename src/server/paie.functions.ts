@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { normaliserComptesLignes } from "@/lib/numero-compte";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -198,7 +199,7 @@ export const validerBulletin = createServerFn({ method: "POST" })
     const nom = `${b.employes?.prenom} ${b.employes?.nom}`;
     const ref = `PAIE-${b.periode}`;
 
-    await supabase.from("ecritures_comptables").insert([
+    await supabase.from("ecritures_comptables").insert(normaliserComptesLignes([
       // Charge salariale brute
       { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "6171", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `Salaire ${nom} ${b.periode}`, debit: Number(b.net_a_payer) + Number(b.total_retenues), credit: 0, reference_piece: ref, valide: true },
       // CNSS + AMO salarial (retenu sur salaire)
@@ -210,7 +211,7 @@ export const validerBulletin = createServerFn({ method: "POST" })
       // Charges patronales CNSS/AMO
       { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "6174", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `Charges sociales patronales ${nom}`, debit: Number(b.cnss_patronal) + Number(b.amo_patronal) + Number(b.taxe_formation_pro), credit: 0, reference_piece: ref, valide: true },
       { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "4441", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `CNSS/AMO patronal ${nom}`, debit: 0, credit: Number(b.cnss_patronal) + Number(b.amo_patronal) + Number(b.taxe_formation_pro), reference_piece: ref, valide: true },
-    ]);
+    ]));
 
     await (supabase as any).from("bulletins_paie").update({ statut: "valide", ecriture_creee: true }).eq("id", data.bulletin_id);
 
