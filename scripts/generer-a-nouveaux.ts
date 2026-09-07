@@ -139,8 +139,15 @@ for (const d of dossiers ?? []) {
     continue;
   }
 
-  // Les à-nouveaux ANTÉRIEURS font partie des soldes à reprendre ; ceux de LA
-  // date qu'on recalcule doivent en sortir, sinon on les compterait deux fois.
+  // Le bornage appartient à `soldesCloture`, qui s'ANCRE sur le dernier
+  // à-nouveau antérieur : cette pièce résume tout ce qui la précède, donc les
+  // origines déjà reprises par elle en sortent. Sans cette ancre, réouvrir un
+  // exercice une SECONDE fois additionnait chaque solde à son propre report —
+  // le 4712 de SMERT annonçait 83 000 pour 41 500 réellement dus.
+  //
+  // Le filtre ci-dessous est redondant avec ce bornage (les lignes de `dejaLa`
+  // sont datées de `bornes.debut`, que `soldesCloture` exclut de toute façon).
+  // On le garde : il rend l'intention lisible sous `--remplacer`.
   const source = anterieures.filter((l) => !dejaLa.some((x) => x.id === l.id));
   const soldes = soldesCloture(source, bornes.debut);
   const plan = lignesANouveaux(soldes, {

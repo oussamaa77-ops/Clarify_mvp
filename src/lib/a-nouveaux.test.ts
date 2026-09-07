@@ -10,7 +10,8 @@ import { describe, it, expect } from "vitest";
 import {
   COMPTE_REPORT_CREDITEUR, COMPTE_REPORT_DEBITEUR, JOURNAL_AN,
   assertANouveaux, estCompteDeBilan, estCompteDeGestion,
-  lignesANouveaux, sansANouveaux, soldesCloture, type LigneSolde,
+  lignesANouveaux, sansANouveaux, soldesCloture,
+  dernierANouveau, lignesDeCloture, type LigneSolde,
 } from "@/lib/a-nouveaux";
 
 const l = (p: Partial<LigneSolde>): LigneSolde => ({
@@ -187,5 +188,126 @@ describe("double comptage", () => {
   it("sansANouveaux ne touche à aucun autre journal", () => {
     const rows = [{ journal_code: "ACH" }, { journal_code: "AN" }, { journal_code: "an" }, { journal_code: null }];
     expect(sansANouveaux(rows)).toHaveLength(2);
+  });
+});
+
+// ── Réouverture d'un exercice DÉJÀ rouvert : le double comptage ─────────────
+//
+// C'est le cas qui faisait mentir les chiffres. SMERT a reçu un à-nouveau
+// AN-2026 au 01/01/2026 qui reporte, entre autres, le 4712 créditeur de 41 500
+// né d'une seule ligne de banque le 31/07/2024. Lire « tout ce qui précède le
+// 01/01/2027 » additionne l'origine ET son report : 83 000, pour un compte qui
+// n'a jamais porté que 41 500.
+describe("réouverture d'un dossier portant déjà un à-nouveau", () => {
+  /** L'à-nouveau AN-2026 tel que le générateur l'a produit au 01/01/2026. */
+  const anouveau2026 = (): LigneSolde[] => {
+    const plan = lignesANouveaux(soldesCloture(anterieures, "2026-01-01"), OPTS);
+    return plan.lignes.map((x) => ({
+      journal_code: x.journal_code, compte_numero: x.compte_numero,
+      date_ecriture: x.date_ecriture, debit: x.debit, credit: x.credit,
+    }));
+  };
+
+  /** 2026 : un achat de 1 200 réglé, pour que l'exercice ait sa propre matière. */
+  const mouvements2026: LigneSolde[] = [
+    l({ date_ecriture: "2026-06-10", journal_code: "ACH", compte_numero: "6111", debit: 1200 }),
+    l({ date_ecriture: "2026-06-10", journal_code: "ACH", compte_numero: "44110006", credit: 1200 }),
+    l({ date_ecriture: "2026-06-20", journal_code: "BQ", compte_numero: "44110006", debit: 1200 }),
+    l({ date_ecriture: "2026-06-20", journal_code: "BQ", compte_numero: "5141", credit: 1200 }),
+  ];
+
+  const baseComplete = () => [...anterieures, ...anouveau2026(), ...mouvements2026];
+
+  it("dernierANouveau trouve l'ancre, et ignore celui qu'on recalcule", () => {
+    expect(dernierANouveau(baseComplete(), "2027-01-01")).toBe("2026-01-01");
+    // Au 01/01/2026, l'à-nouveau de cette date est celui qu'on refait : pas une ancre.
+    expect(dernierANouveau(baseComplete(), "2026-01-01")).toBeNull();
+    expect(dernierANouveau(anterieures, "2026-01-01")).toBeNull();
+  });
+
+  it("lignesDeCloture écarte les origines DÉJÀ reprises par l'ancre", () => {
+    const retenues = lignesDeCloture(baseComplete(), "2027-01-01");
+    // Le 31/07/2024 est antérieur à l'ancre : il a été repris, il sort.
+    expect(retenues.some((x) => x.date_ecriture === "2024-07-31")).toBe(false);
+    expect(retenues.some((x) => x.date_ecriture === "2025-12-16")).toBe(false);
+    // L'ancre elle-même est retenue, ainsi que les mouvements de 2026.
+    expect(retenues.some((x) => x.journal_code === JOURNAL_AN)).toBe(true);
+    expect(retenues.some((x) => x.date_ecriture === "2026-06-10")).toBe(true);
+  });
+
+  it("LE BUG : le 4712 vaut 41 500, jamais 83 000", () => {
+    const soldes = soldesCloture(baseComplete(), "2027-01-01");
+    expect(soldes.parCompte.get("4712")).toBe(-41500);
+    expect(soldes.parCompte.get("4712")).not.toBe(-83000);
+  });
+
+  it("aucun compte n'est doublé, et la partie double tient", () => {
+    const soldes = soldesCloture(baseComplete(), "2027-01-01");
+    // 5141 : reporté 35 500 par l'ancre, moins le règlement de 1 200 en 2026.
+    expect(soldes.parCompte.get("5141")).toBe(34300);
+    // 44110006 : reporté −24 600, puis −1 200 +1 200 = inchangé.
+    expect(soldes.parCompte.get("44110006")).toBe(-24600);
+    // Un grand livre borné correctement reste équilibré.
+    expect(soldes.ecart).toBe(0);
+  });
+
+  it("le RÉSULTAT ne compte que les exercices écoulés depuis l'ancre", () => {
+    const soldes = soldesCloture(baseComplete(), "2027-01-01");
+    // La perte de 26 500 est déjà convertie en 1169 par l'ancre : elle est
+    // reportée comme un SOLDE de bilan, pas recomptée comme du résultat.
+    expect(soldes.parCompte.get("1169")).toBe(26500);
+    // Seul l'achat de 2026 forme le résultat de l'exercice qu'on clôture.
+    expect(soldes.totalGestion).toBe(1200);
+  });
+
+  it("l'alerte d'attente donne le bon montant, plus le double", () => {
+    const plan = lignesANouveaux(soldesCloture(baseComplete(), "2027-01-01"),
+      { dossier_id: "D", date: "2027-01-01" });
+    expect(plan.suspens.total).toBe(41500);
+    expect(plan.suspens.comptes[0]).toMatchObject({ compte: "4712", solde: 41500, sens: "C" });
+    expect(plan.violations).toEqual([]);
+  });
+
+  it("l'à-nouveau 2027 reste équilibré et ne reporte le 4712 qu'une fois", () => {
+    const plan = lignesANouveaux(soldesCloture(baseComplete(), "2027-01-01"),
+      { dossier_id: "D", date: "2027-01-01" });
+    expect(plan.ecart).toBe(0);
+    const lignes4712 = plan.lignes.filter((x) => x.compte_numero === "4712");
+    expect(lignes4712).toHaveLength(1);
+    expect(lignes4712[0].credit).toBe(41500);
+  });
+
+  it("recalculer AN-2026 donne toujours le MÊME résultat qu'avant le correctif", () => {
+    // Garantie de non-régression : la pièce déjà posée en base reste valide.
+    const avant = lignesANouveaux(soldesCloture(anterieures, "2026-01-01"), OPTS);
+    const apres = lignesANouveaux(soldesCloture(baseComplete(), "2026-01-01"), OPTS);
+    expect(apres.lignes).toEqual(avant.lignes);
+    expect(apres.resultatReporte).toBe(avant.resultatReporte);
+  });
+});
+
+// ── Le cas que l'ancre protège, et qu'un simple filtre AN détruirait ────────
+describe("dossier repris dont l'ouverture n'existe QUE comme à-nouveau", () => {
+  // Aucune écriture d'origine : le bilan d'ouverture a été saisi en AN.
+  const repris: LigneSolde[] = [
+    l({ date_ecriture: "2026-01-01", journal_code: JOURNAL_AN, compte_numero: "5141", debit: 80000 }),
+    l({ date_ecriture: "2026-01-01", journal_code: JOURNAL_AN, compte_numero: "1161", credit: 80000 }),
+    l({ date_ecriture: "2026-09-04", journal_code: "ACH", compte_numero: "6111", debit: 5000 }),
+    l({ date_ecriture: "2026-09-04", journal_code: "ACH", compte_numero: "44110001", credit: 5000 }),
+  ];
+
+  it("ne perd RIEN : écarter le journal AN aurait effacé tout le bilan", () => {
+    const soldes = soldesCloture(repris, "2027-01-01");
+    expect(soldes.parCompte.get("5141")).toBe(80000);
+    expect(soldes.parCompte.get("1161")).toBe(-80000);
+    expect(soldes.ecart).toBe(0);
+  });
+
+  it("et le résultat de l'exercice écoulé est bien repris", () => {
+    const plan = lignesANouveaux(soldesCloture(repris, "2027-01-01"),
+      { dossier_id: "D", date: "2027-01-01" });
+    expect(plan.compteReport).toBe(COMPTE_REPORT_DEBITEUR);   // 5 000 de charges = perte
+    expect(plan.resultatReporte).toBe(5000);
+    expect(plan.ecart).toBe(0);
   });
 });

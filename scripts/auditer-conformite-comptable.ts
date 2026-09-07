@@ -390,6 +390,12 @@ function auditerPartieDouble(lignes: any[]): Anomalie[] {
 // coexiste avec les écritures d'origine qu'elle reprend. Le chiffre exact du
 // double compte est donné, parce que c'est lui qu'on retrouve dans un total
 // inexpliqué — et parce qu'un outil qui oublie le filtre ne le dira pas.
+//
+// Les deux lecteurs du projet sont désormais protégés : la page Comptabilité
+// applique `sansANouveaux` en vue « tous exercices », et `soldesCloture`
+// s'ancre sur le dernier à-nouveau. Ce contrôle reste utile pour ce qui
+// viendra APRÈS — une requête SQL à la main, un export, un futur écran — et
+// parce qu'il chiffre l'écart qu'on constaterait alors.
 function auditerDoubleCompteAn(brutes: any[]): Anomalie[] {
   const an = brutes.filter((l) => txt(l.journal_code).toUpperCase() === "AN");
   if (!an.length) return [];
@@ -409,7 +415,9 @@ function auditerDoubleCompteAn(brutes: any[]): Anomalie[] {
     message: `Une pièce d'à-nouveau au ${dateAn} coexiste avec les `
       + `${originesReprises.length} écriture(s) d'origine qu'elle reprend. Toute lecture `
       + `« tous exercices » qui n'écarte pas le journal AN double ces soldes — `
-      + `${fmt(doubleCompte)} MAD au total. Utiliser sansANouveaux() (src/lib/a-nouveaux.ts).`,
+      + `${fmt(doubleCompte)} MAD au total. Les lecteurs du projet sont protégés `
+      + `(sansANouveaux côté écran, ancrage de soldesCloture côté à-nouveau) : `
+      + `ceci vise une requête SQL à la main ou un futur consommateur.`,
     montant: doubleCompte,
     exemples: comptes.slice(0, 8).map((c) => {
       const origine = r2(brutes.filter((l) => txt(l.compte_numero) === c

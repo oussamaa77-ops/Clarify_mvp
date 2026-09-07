@@ -78,19 +78,78 @@ export interface SoldesCloture {
 }
 
 /**
- * Soldes à la clôture, calculés sur les écritures ANTÉRIEURES à `avant`.
+ * Date du DERNIER à-nouveau strictement antérieur à `avant`, ou `null`.
  *
- * `avant` est exclusif et vaut le premier jour du nouvel exercice : tout ce qui
- * le précède est repris, quel que soit le nombre d'exercices concernés. Sur un
- * dossier repris qui porte 2024 ET 2025 sans à-nouveau intermédiaire, c'est la
- * seule lecture qui ne perde rien.
+ * C'est l'ANCRE de la clôture : cette pièce résume à elle seule tout ce qui la
+ * précède. Un à-nouveau daté exactement de `avant` est ignoré — c'est celui
+ * qu'on est en train de recalculer.
+ */
+export function dernierANouveau(lignes: LigneSolde[], avant: string): string | null {
+  let ancre: string | null = null;
+  for (const l of lignes ?? []) {
+    if (txt(l.journal_code).toUpperCase() !== JOURNAL_AN) continue;
+    const d = txt(l.date_ecriture).slice(0, 10);
+    if (!d || d >= avant) continue;
+    if (!ancre || d > ancre) ancre = d;
+  }
+  return ancre;
+}
+
+/**
+ * Les lignes qui FORMENT la clôture au `avant` — et elles seules.
+ *
+ * ─── Le double comptage que cette fonction existe pour empêcher ─────────────
+ * Un solde reporté vit DEUX FOIS en base : sur sa ligne d'origine et sur son
+ * report. Prendre « tout ce qui précède » additionne donc les deux dès qu'un
+ * à-nouveau intermédiaire existe. Le dossier SMERT le montrait : le 4712 porte
+ * 41 500 (une seule ligne de banque, 2024-07-31), et une lecture cumulative en
+ * annonçait 83 000 — l'origine plus son report par la pièce AN-2026.
+ *
+ * ─── La règle ───────────────────────────────────────────────────────────────
+ * On s'ANCRE sur le dernier à-nouveau antérieur : il résume tout ce qui le
+ * précède, donc on retient cette pièce PLUS les écritures ordinaires qui la
+ * suivent. Les origines déjà reprises par l'ancre sortent.
+ *
+ * Sans ancre — dossier qui n'a jamais été rouvert — on retient tout ce qui
+ * précède `avant` : c'est la lecture historique, et la seule qui ne perde rien
+ * sur un dossier repris portant 2024 ET 2025 sans à-nouveau intermédiaire.
+ *
+ * ─── Pourquoi l'ancre ne peut PAS être remplacée par « écarter tous les AN » ─
+ * Un dossier repris en cours de vie n'a parfois AUCUNE écriture d'origine : son
+ * ouverture a été saisie comme à-nouveau. Écarter le journal AN y perdrait la
+ * totalité du bilan. L'ancre garde ce cas et corrige l'autre.
+ *
+ * ─── Et le RÉSULTAT, alors ? ────────────────────────────────────────────────
+ * L'ancre porte déjà le résultat des exercices antérieurs, converti en 1161 /
+ * 1169 — un compte de BILAN, donc reporté comme un solde. Les comptes de
+ * gestion retenus sont dès lors ceux de la seule période [ancre, avant) : le
+ * résultat calculé est celui des exercices écoulés depuis, jamais deux fois le
+ * même.
+ */
+export function lignesDeCloture(lignes: LigneSolde[], avant: string): LigneSolde[] {
+  const ancre = dernierANouveau(lignes, avant);
+  return (lignes ?? []).filter((l) => {
+    const d = txt(l.date_ecriture).slice(0, 10);
+    if (!d || d >= avant) return false;
+    if (!ancre) return true;
+    return txt(l.journal_code).toUpperCase() === JOURNAL_AN ? d === ancre : d >= ancre;
+  });
+}
+
+/**
+ * Soldes à la clôture, calculés sur les écritures qui la FORMENT.
+ *
+ * `avant` est exclusif et vaut le premier jour du nouvel exercice. Le périmètre
+ * exact est celui de `lignesDeCloture` : ancré sur le dernier à-nouveau s'il en
+ * existe un, cumulatif sinon. C'est ce qui rend l'appel sûr sur un dossier
+ * qu'on rouvre pour la deuxième fois.
  */
 export function soldesCloture(lignes: LigneSolde[], avant: string): SoldesCloture {
   const parCompte = new Map<string, number>();
   let ecart = 0;
-  for (const l of lignes ?? []) {
+  for (const l of lignesDeCloture(lignes, avant)) {
     const d = txt(l.date_ecriture).slice(0, 10);
-    if (!d || d >= avant) continue;
+    if (!d) continue;
     const c = txt(l.compte_numero);
     if (!c) continue;
     const mouvement = nb(l.debit) - nb(l.credit);
