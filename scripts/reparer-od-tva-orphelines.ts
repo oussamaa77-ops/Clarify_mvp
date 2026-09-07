@@ -54,6 +54,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { COMPTES_TVA, estCompteTva } from "../src/services/lettrage";
+import { normaliserComptesLignes } from "../src/lib/numero-compte";
 
 // ─── Environnement (.env à la racine) ────────────────────────────────────────
 const ICI = path.dirname(fileURLToPath(import.meta.url));
@@ -119,7 +120,11 @@ async function rollback(fichier: string) {
     console.log(`✅ ${(data ?? []).length} ligne(s) restaurée(s) retirée(s).`);
   } else {
     // On réinsère les lignes supprimées, à l'identique.
-    const { error } = await sb.from("ecritures_comptables").insert(backup.lignes);
+    // Une sauvegarde antérieure à la normalisation porte des comptes en forme
+    // COURTE : on les recanonise, sinon la restauration réintroduirait les
+    // longueurs mêlées. Le trigger en base le fait aussi — c'est la ceinture,
+    // ceci est la bretelle (cf. src/lib/numero-compte.ts).
+    const { error } = await sb.from("ecritures_comptables").insert(normaliserComptesLignes(backup.lignes));
     if (error) { console.error("❌", error.message); process.exit(1); }
     console.log(`✅ ${backup.lignes.length} ligne(s) restaurée(s).`);
   }
@@ -224,8 +229,10 @@ async function main() {
           lettrage_code: orpheline.lettrage_code,
           valide: true,
         };
+        // Ligne unique : `normaliserComptesLignes` travaille par lot, on
+        // l'emballe plutot que d'ouvrir un second chemin de normalisation.
         const { data: ins, error: eIns } = await sb.from("ecritures_comptables")
-          .insert(ligne).select("id");
+          .insert(normaliserComptesLignes([ligne])[0]).select("id");
         if (eIns) { console.error(`   ❌ restauration : ${eIns.message}`); continue; }
         // Le backup mémorise l'ID INSÉRÉ : le rollback n'a qu'à le supprimer.
         backup.lignes.push({ ...(ins?.[0] ?? {}), ...ligne } as any);

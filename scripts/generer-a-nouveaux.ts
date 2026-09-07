@@ -42,6 +42,7 @@ import {
   JOURNAL_AN, assertANouveaux, lignesANouveaux, soldesCloture,
 } from "../src/lib/a-nouveaux";
 import { bornesExercice, exerciceCourant } from "../src/lib/exercice-comptable";
+import { normaliserComptesLignes } from "../src/lib/numero-compte";
 
 const ICI = path.dirname(fileURLToPath(import.meta.url));
 const RACINE = path.resolve(ICI, "..");
@@ -91,7 +92,11 @@ if (ROLLBACK) {
     console.log(error ? `   ❌ ${error.message}` : `   ✅ ${b.ecrituresCreees.length} à-nouveau supprimé(s)`);
   }
   if (b.ecrituresSupprimees?.length) {
-    const { error } = await sb.from("ecritures_comptables").insert(b.ecrituresSupprimees);
+    // Une sauvegarde antérieure à la normalisation porte des comptes en forme
+    // COURTE : on les recanonise, sinon la restauration réintroduirait les
+    // longueurs mêlées. Le trigger en base le fait aussi — c'est la ceinture,
+    // ceci est la bretelle (cf. src/lib/numero-compte.ts).
+    const { error } = await sb.from("ecritures_comptables").insert(normaliserComptesLignes(b.ecrituresSupprimees));
     console.log(error ? `   ❌ restauration : ${error.message}` : `   ✅ ${b.ecrituresSupprimees.length} ligne(s) restaurée(s)`);
   }
   console.log("");

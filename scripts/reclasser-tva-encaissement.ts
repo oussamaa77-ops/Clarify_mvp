@@ -38,6 +38,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { COMPTES_TVA, referenceReclassement, referenceSansPrefixe } from "../src/services/lettrage";
+import { normaliserComptesLignes } from "../src/lib/numero-compte";
 
 // ─── Environnement (.env à la racine) ────────────────────────────────────────
 const ICI = path.dirname(fileURLToPath(import.meta.url));
@@ -212,7 +213,7 @@ async function principal() {
   }
 
   const { data: inserees, error } = await (sb as any)
-    .from("ecritures_comptables").insert(aInserer).select("id");
+    .from("ecritures_comptables").insert(normaliserComptesLignes(aInserer)).select("id");
   if (error) { console.error("\n❌ Insertion impossible :", error.message); process.exit(1); }
 
   // Sauvegarde ÉCRITE APRÈS l'insertion : elle porte les ids réellement créés,

@@ -71,6 +71,7 @@ import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { executerDelettrage } from "../src/server/lettrage-compta.functions";
 import {
+import { normaliserComptesLignes } from "../src/lib/numero-compte";
   JOURNAUX_TRESORERIE, cleEcritureTresorerie, clePiece, origineEcritureTresorerie,
 } from "../src/lib/integrite-tresorerie";
 
@@ -140,7 +141,11 @@ async function rollback(fichier: string) {
   const chemin = path.isAbsolute(fichier) ? fichier : path.join(RACINE, fichier);
   const backup = JSON.parse(fs.readFileSync(chemin, "utf8"));
   console.log(`\n↩️  ROLLBACK depuis ${path.basename(chemin)} — ${backup.lignes.length} ligne(s)\n`);
-  const { error } = await sb.from("ecritures_comptables").insert(backup.lignes);
+  // Une sauvegarde antérieure à la normalisation porte des comptes en forme
+  // COURTE : on les recanonise, sinon la restauration réintroduirait les
+  // longueurs mêlées. Le trigger en base le fait aussi — c'est la ceinture,
+  // ceci est la bretelle (cf. src/lib/numero-compte.ts).
+  const { error } = await sb.from("ecritures_comptables").insert(normaliserComptesLignes(backup.lignes));
   if (error) { console.error("❌", error.message); process.exit(1); }
   console.log(`✅ ${backup.lignes.length} ligne(s) restaurée(s).`);
   await equilibre("après rollback");

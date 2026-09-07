@@ -46,6 +46,7 @@ import { imputationTresorerie } from "../src/lib/comptes-tresorerie";
 import { assertEcrituresTresorerie, estJournalTresorerie } from "../src/lib/integrite-tresorerie";
 import { corrigerAnneeReglement } from "../src/lib/coherence-ventes";
 import { jourIso } from "../src/lib/exercice-comptable";
+import { normaliserComptesLignes } from "../src/lib/numero-compte";
 
 const ICI = path.dirname(fileURLToPath(import.meta.url));
 const RACINE = path.resolve(ICI, "..");
@@ -253,7 +254,7 @@ for (const d of dossiers ?? []) {
       }
 
       const { data: inserees, error } = await sb.from("ecritures_comptables")
-        .insert(ecritures).select("id");
+        .insert(normaliserComptesLignes(ecritures)).select("id");
       if (error) { console.log(`       ❌ ${error.message}`); continue; }
       for (const x of (inserees ?? []) as any[]) backup.ecrituresCreees.push(String(x.id));
       lignes.push(...(ecritures as any[]));

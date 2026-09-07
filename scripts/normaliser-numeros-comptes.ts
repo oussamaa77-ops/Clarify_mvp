@@ -36,8 +36,14 @@
  *   node --import tsx scripts/normaliser-numeros-comptes.ts --rollback=backup_....json
  *
  * DRY-RUN par défaut : sans `--apply`, aucune écriture. La sauvegarde est prise
- * AVANT toute mise à jour et porte l'ancienne valeur ligne à ligne — le rollback
- * la repose telle quelle.
+ * AVANT toute mise à jour et porte l'ancienne valeur ligne à ligne.
+ *
+ * ⚠️  Le rollback est NEUTRALISÉ depuis que la migration 20260907120000 est
+ * appliquée : son trigger recanonise `compte_numero` à chaque écriture, si bien
+ * que reposer la forme courte part sans erreur et SANS EFFET. Le script relit
+ * donc chaque ligne et le DIT, plutôt que d'annoncer un succès qui n'en est pas
+ * un. Pour dé-normaliser pour de bon, retirer le trigger d'abord — ce qui est
+ * rarement ce que l'on veut.
  */
 
 import fs from "node:fs";
@@ -103,14 +109,29 @@ async function paginer(table: string, colonnes: string, filtre?: (q: any) => any
 if (ROLLBACK) {
   const sauv = JSON.parse(fs.readFileSync(path.join(ROOT, ROLLBACK), "utf8"));
   console.log(`\n⏪ ROLLBACK depuis ${ROLLBACK} — ${sauv.modifications.length} ligne(s)\n`);
-  let ok = 0, ko = 0;
+  let ok = 0, ko = 0, neutralises = 0;
   for (const m of sauv.modifications) {
     const { error } = await (sb.from(m.table) as any)
       .update({ [m.colonne]: m.avant }).eq("id", m.id);
-    if (error) { ko++; console.error(`   ❌ ${m.table} ${m.id} : ${error.message}`); }
+    if (error) { ko++; console.error(`   ❌ ${m.table} ${m.id} : ${error.message}`); continue; }
+    // Relecture OBLIGATOIRE : depuis la migration 20260907120000, un trigger
+    // recanonise `ecritures_comptables.compte_numero` a chaque ecriture. La
+    // restauration part donc sans erreur ET sans effet. Annoncer « restauree »
+    // sur la foi du seul code d'erreur mentirait au moment precis ou l'on
+    // compte sur un rollback.
+    const { data: relu } = await (sb.from(m.table) as any)
+      .select(m.colonne).eq("id", m.id).single();
+    if (relu && String(relu[m.colonne]) !== m.avant) neutralises++;
     else ok++;
   }
   console.log(`\n   ${ok} restaurée(s), ${ko} en échec.\n`);
+  if (neutralises) {
+    console.log(`
+   ATTENTION : ${neutralises} restauration(s) NEUTRALISEE(S) par la base.`);
+    console.log(`       Le trigger trg_normaliser_compte_numero (migration 20260907120000)`);
+    console.log(`       recanonise a l'ecriture : la forme courte ne peut plus revenir.`);
+    console.log(`       Pour de-normaliser reellement, il faut d'abord retirer le trigger.`);
+  }
   process.exit(ko ? 1 : 0);
 }
 
