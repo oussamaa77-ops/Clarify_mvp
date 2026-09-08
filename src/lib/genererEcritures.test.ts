@@ -5,7 +5,14 @@ import {
   controlerLignesAchat, controlerTvaOrigine, controlerUniciteReference,
   estTresorerieHorsOd, estTvaExigible, genererEcrituresAchat, genererEcrituresVente,
   genererOdBasculeTva,
+  controlerSensReglement, controlerMouvementsTvaDue, controlerPreuveBascule,
+  estBasculeTva, RACINES_TIERS, RACINE_TVA_DUE, PREFIXES_PIECES_TVA_DUE,
+  LIBELLE_PAIEMENT_DGI_MIROIR,
 } from "@/lib/genererEcritures";
+import {
+  COMPTE_TVA_DUE, LIBELLE_PAIEMENT_DGI,
+  PREFIXE_DECLARATION_TVA, PREFIXE_REGULARISATION_TVA,
+} from "@/lib/liquidation-tva";
 import { bornesExercice } from "@/lib/exercice-comptable";
 import { compteLettrable } from "@/services/lettrage";
 
@@ -297,5 +304,306 @@ describe("assertEcrituresRegime", () => {
       { bornes: bornesExercice(2026) },
     );
     expect(v.violations.length).toBeGreaterThanOrEqual(3);   // TVA + cut-off + équilibre
+  });
+});
+
+// ─── VERROU 5 — le sens d'un règlement ───────────────────────────────────────
+//
+// Le cas SOMADIR : la caisse débitée en payant, le fournisseur crédité. La
+// pièce était ÉQUILIBRÉE, donc invisible pour tout contrôle de partie double —
+// c'est la raison d'être de ce verrou.
+describe("controlerSensReglement", () => {
+  const reglement = (compte: string, sens: "D" | "C", journal = "CAI") => [
+    { journal_code: journal, compte_numero: compte, date_ecriture: "2026-05-04",
+      debit: sens === "D" ? 20160 : 0, credit: sens === "C" ? 20160 : 0, reference_piece: "P1" },
+    { journal_code: journal, compte_numero: "51610000", date_ecriture: "2026-05-04",
+      debit: sens === "D" ? 0 : 20160, credit: sens === "D" ? 20160 : 0, reference_piece: "P1" },
+  ];
+
+  it("REFUSE un fournisseur crédité en journal de trésorerie — le bug SOMADIR", () => {
+    const v = controlerSensReglement(reglement("44110001", "C"));
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]).toMatch(/fournisseur CRÉDITÉ/);
+    expect(v.violations[0]).toContain("44110001");
+  });
+
+  it("accepte le décaissement juste : fournisseur DÉBITÉ", () => {
+    expect(controlerSensReglement(reglement("44110001", "D")).ok).toBe(true);
+  });
+
+  it("REFUSE un client débité en journal de trésorerie", () => {
+    const v = controlerSensReglement(reglement("34210002", "D"));
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]).toMatch(/client DÉBITÉ/);
+  });
+
+  it("accepte l'encaissement juste : client CRÉDITÉ", () => {
+    expect(controlerSensReglement(reglement("34210002", "C")).ok).toBe(true);
+  });
+
+  it("vaut pour la BANQUE comme pour la caisse", () => {
+    expect(controlerSensReglement(reglement("44110001", "C", "BQ")).ok).toBe(false);
+    expect(controlerSensReglement(reglement("44110001", "D", "BQ")).ok).toBe(true);
+  });
+
+  it("ne dit rien HORS journal de trésorerie : la facture crédite le fournisseur", () => {
+    // D 6141 / C 4411 en journal ACH est la dette qui naît : parfaitement normal.
+    expect(controlerSensReglement([
+      { journal_code: "ACH", compte_numero: "61410000", debit: 16800, credit: 0, reference_piece: "A1" },
+      { journal_code: "ACH", compte_numero: "44110001", debit: 0, credit: 16800, reference_piece: "A1" },
+    ]).ok).toBe(true);
+  });
+
+  it("laisse passer une trésorerie SANS compte de tiers", () => {
+    // Frais bancaires : C 5141 / D 6147. Aucun tiers, rien à vérifier.
+    expect(controlerSensReglement([
+      { journal_code: "BQ", compte_numero: "51410000", debit: 0, credit: 120, reference_piece: "F" },
+      { journal_code: "BQ", compte_numero: "61470000", debit: 120, credit: 0, reference_piece: "F" },
+    ]).ok).toBe(true);
+    // Virement interne banque → caisse : deux comptes de trésorerie, pas de tiers.
+    expect(controlerSensReglement([
+      { journal_code: "BQ", compte_numero: "51410000", debit: 0, credit: 5000, reference_piece: "V" },
+      { journal_code: "CAI", compte_numero: "51610000", debit: 5000, credit: 0, reference_piece: "V" },
+    ]).ok).toBe(true);
+  });
+
+  it("ignore l'attente bancaire 4711/4712, qui n'est pas un compte de tiers", () => {
+    expect(controlerSensReglement([
+      { journal_code: "BQ", compte_numero: "51410000", debit: 3000, credit: 0, reference_piece: "X" },
+      { journal_code: "BQ", compte_numero: "47120000", debit: 0, credit: 3000, reference_piece: "X" },
+    ]).ok).toBe(true);
+  });
+
+  it("détecte sur la forme canonique comme sur la forme courte", () => {
+    expect(controlerSensReglement(reglement("4411", "C")).ok).toBe(false);
+    expect(controlerSensReglement(reglement("44110000", "C")).ok).toBe(false);
+  });
+
+  it("les racines exposées sont celles du PCM marocain", () => {
+    expect(RACINES_TIERS).toEqual({ client: "3421", fournisseur: "4411" });
+  });
+});
+
+// ─── VERROU 6 — le 4456 ne se manie que par déclaration ──────────────────────
+describe("controlerMouvementsTvaDue", () => {
+  const ligne4456 = (ref: string | null, libelle = "x", sens: "D" | "C" = "C") => [{
+    journal_code: "OD", compte_numero: "44560000", date_ecriture: "2026-07-31",
+    libelle, debit: sens === "D" ? 1880 : 0, credit: sens === "C" ? 1880 : 0,
+    reference_piece: ref,
+  }];
+
+  it("accepte une DÉCLARATION", () => {
+    expect(controlerMouvementsTvaDue(ligne4456("DECL-TVA-2026-07", "TVA due")).ok).toBe(true);
+  });
+
+  it("accepte une RÉGULARISATION", () => {
+    expect(controlerMouvementsTvaDue(ligne4456("REGUL-TVA-2024-11")).ok).toBe(true);
+  });
+
+  it("accepte un PAIEMENT DGI, reconnu à son libellé", () => {
+    expect(controlerMouvementsTvaDue([{
+      journal_code: "BQ", compte_numero: "44560000", date_ecriture: "2026-08-12",
+      libelle: "Paiement TVA DGI - 2026-05", debit: 5262, credit: 0,
+      reference_piece: "DECL-TVA-2026-05",
+    }]).ok).toBe(true);
+  });
+
+  it("REFUSE un ajustement manuel — la porte par laquelle naît un solde inexplicable", () => {
+    const v = controlerMouvementsTvaDue(ligne4456("AJUST-2026"));
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]).toContain("44560000");
+    expect(v.violations[0]).toMatch(/acte fiscal/);
+  });
+
+  it("REFUSE une ligne 4456 sans référence", () => {
+    const v = controlerMouvementsTvaDue(ligne4456(null));
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]).toMatch(/sans référence/);
+  });
+
+  it("porte sur les MOUVEMENTS, pas sur le signe : les deux sens sont admis", () => {
+    // Créditeur = TVA due, le cas ORDINAIRE. Débiteur = crédit reportable.
+    // Interdire l'un des deux signalerait le normal.
+    expect(controlerMouvementsTvaDue(ligne4456("DECL-TVA-2026-07", "TVA due", "C")).ok).toBe(true);
+    expect(controlerMouvementsTvaDue(
+      ligne4456("DECL-TVA-2026-06", "Crédit de TVA reportable", "D")).ok).toBe(true);
+  });
+
+  it("ne se déclenche pas sur une ligne à 0,00", () => {
+    expect(controlerMouvementsTvaDue([{
+      journal_code: "OD", compte_numero: "44560000", debit: 0, credit: 0, reference_piece: null,
+    }]).ok).toBe(true);
+  });
+
+  it("ignore les comptes voisins : 4455 et 4458 ne sont pas le 4456", () => {
+    for (const c of ["44551000", "44580000"]) {
+      expect(controlerMouvementsTvaDue([{
+        journal_code: "OD", compte_numero: c, debit: 100, credit: 0, reference_piece: null,
+      }]).ok).toBe(true);
+    }
+  });
+
+  it("les constantes MIROIR ne divergent pas de liquidation-tva", () => {
+    // Le miroir existe pour préserver le sens des imports ; ce test est ce qui
+    // empêche qu'il dérive en silence et désarme le verrou.
+    expect(RACINE_TVA_DUE).toBe(COMPTE_TVA_DUE);
+    expect(PREFIXES_PIECES_TVA_DUE[0]).toBe(PREFIXE_DECLARATION_TVA);
+    expect(PREFIXES_PIECES_TVA_DUE[1]).toBe(PREFIXE_REGULARISATION_TVA);
+    expect(LIBELLE_PAIEMENT_DGI_MIROIR).toBe(LIBELLE_PAIEMENT_DGI);
+  });
+});
+
+// ─── VERROU 7 — pas de bascule sans règlement constaté ───────────────────────
+describe("estBasculeTva", () => {
+  const bascule = [
+    { journal_code: "OD", compte_numero: "44580000", debit: 578, credit: 0, reference_piece: "FA-1" },
+    { journal_code: "OD", compte_numero: "44551000", debit: 0, credit: 578, reference_piece: "FA-1" },
+  ];
+
+  it("reconnaît la bascule : attente ET exigible dans la même pièce", () => {
+    expect(estBasculeTva(bascule)).toBe(true);
+  });
+
+  it("ne confond pas avec une DÉCLARATION, qui ne touche pas l'attente", () => {
+    expect(estBasculeTva([
+      { journal_code: "OD", compte_numero: "44551000", debit: 578, credit: 0, reference_piece: "DECL-TVA-2024-05" },
+      { journal_code: "OD", compte_numero: "44560000", debit: 0, credit: 578, reference_piece: "DECL-TVA-2024-05" },
+    ])).toBe(false);
+  });
+
+  it("ne confond pas avec une FACTURE, qui ne touche pas l'exigible", () => {
+    expect(estBasculeTva([
+      { journal_code: "VTE", compte_numero: "34210002", debit: 3468, credit: 0, reference_piece: "FA-1" },
+      { journal_code: "VTE", compte_numero: "44580000", debit: 0, credit: 578, reference_piece: "FA-1" },
+    ])).toBe(false);
+  });
+});
+
+describe("controlerPreuveBascule", () => {
+  const bascule = (ref: string | null, date = "2026-05-06", lettrage?: string) => [
+    { journal_code: "OD", compte_numero: "44580000", date_ecriture: date,
+      debit: 578, credit: 0, reference_piece: ref, lettrage_code: lettrage ?? null },
+    { journal_code: "OD", compte_numero: "44551000", date_ecriture: date,
+      debit: 0, credit: 578, reference_piece: ref, lettrage_code: lettrage ?? null },
+  ];
+  const encaissement = (ref: string | null, date: string, extra: any = {}) => ({
+    journal_code: "CAI", compte_numero: "34210002", date_ecriture: date,
+    debit: 0, credit: 3468, reference_piece: ref, ...extra,
+  });
+
+  it("REFUSE une bascule qu'aucune trésorerie n'appuie", () => {
+    const v = controlerPreuveBascule(bascule("FA-1"), []);
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]).toMatch(/sans règlement constaté/);
+    expect(v.violations[0]).toContain("FA-1");
+  });
+
+  it("accepte la preuve par RÉFÉRENCE", () => {
+    expect(controlerPreuveBascule(bascule("FA-1"),
+      [encaissement("FA-1", "2026-05-06")]).ok).toBe(true);
+  });
+
+  it("accepte la preuve par CODE DE LETTRAGE, même sans référence sur la banque", () => {
+    // Le cas SOMADIR FA-2024-0892 : la ligne CAI ne porte aucune référence, seul
+    // le code AA la relie à la vente.
+    expect(controlerPreuveBascule(bascule("FA-1", "2026-05-06", "AA"),
+      [encaissement(null, "2026-05-06", { lettrage_code: "AA" })]).ok).toBe(true);
+  });
+
+  it("accepte la preuve par facture_id", () => {
+    expect(controlerPreuveBascule(
+      bascule("FA-1", "2026-05-06").map((l) => ({ ...l, facture_id: "f-42" })),
+      [encaissement(null, "2026-05-06", { facture_id: "f-42" })]).ok).toBe(true);
+  });
+
+  it("REFUSE une trésorerie POSTÉRIEURE : elle ne prouve pas, elle contredit", () => {
+    const v = controlerPreuveBascule(bascule("FA-1", "2026-05-06"),
+      [encaissement("FA-1", "2026-07-01")]);
+    expect(v.ok).toBe(false);
+  });
+
+  it("accepte une trésorerie ANTÉRIEURE — l'argent peut précéder l'écriture", () => {
+    expect(controlerPreuveBascule(bascule("FA-1", "2026-05-06"),
+      [encaissement("FA-1", "2026-05-02")]).ok).toBe(true);
+  });
+
+  it("REFUSE une preuve qui n'est pas de la TRÉSORERIE", () => {
+    // Une ligne de vente portant la même référence ne prouve aucun mouvement.
+    expect(controlerPreuveBascule(bascule("FA-1"), [
+      { journal_code: "VTE", compte_numero: "34210002", date_ecriture: "2026-05-06",
+        debit: 3468, credit: 0, reference_piece: "FA-1" },
+    ]).ok).toBe(false);
+  });
+
+  it("REFUSE une trésorerie à 0,00 — un mouvement nul n'est pas un mouvement", () => {
+    expect(controlerPreuveBascule(bascule("FA-1"), [
+      { journal_code: "CAI", compte_numero: "34210002", date_ecriture: "2026-05-06",
+        debit: 0, credit: 0, reference_piece: "FA-1" },
+    ]).ok).toBe(false);
+  });
+
+  it("reste MUET sur ce qui n'est pas une bascule", () => {
+    const declaration = [
+      { journal_code: "OD", compte_numero: "44551000", date_ecriture: "2026-07-31",
+        debit: 1880, credit: 0, reference_piece: "DECL-TVA-2026-07" },
+      { journal_code: "OD", compte_numero: "44560000", date_ecriture: "2026-07-31",
+        debit: 0, credit: 1880, reference_piece: "DECL-TVA-2026-07" },
+    ];
+    expect(controlerPreuveBascule(declaration, []).ok).toBe(true);
+  });
+
+  it("accepte la référence de RECLASSEMENT, que referencesPiece ajoute", () => {
+    // Une facture antérieure au régime a sa TVA mise en attente par une OD
+    // RECLASS-TVA-<ref> : la trésorerie peut porter l'une ou l'autre.
+    expect(controlerPreuveBascule(bascule("FAC-307"),
+      [encaissement("RECLASS-TVA-FAC-307", "2026-05-06")]).ok).toBe(true);
+  });
+});
+
+// ─── Le verdict d'ensemble embarque bien les nouveaux verrous ────────────────
+describe("controlerEcrituresRegime — les sept verrous", () => {
+  it("remonte le sens de règlement inversé", () => {
+    const v = controlerEcrituresRegime([
+      { journal_code: "CAI", compte_numero: "51610000", date_ecriture: "2026-05-04",
+        debit: 20160, credit: 0, reference_piece: null },
+      { journal_code: "CAI", compte_numero: "44110000", date_ecriture: "2026-05-04",
+        debit: 0, credit: 20160, reference_piece: null },
+    ]);
+    expect(v.ok).toBe(false);
+    expect(v.violations.some((x) => /fournisseur CRÉDITÉ/.test(x))).toBe(true);
+  });
+
+  it("remonte un mouvement 4456 non autorisé", () => {
+    const v = controlerEcrituresRegime([
+      { journal_code: "OD", compte_numero: "44560000", date_ecriture: "2026-07-31",
+        libelle: "ajustement", debit: 100, credit: 0, reference_piece: "AJUST" },
+      { journal_code: "OD", compte_numero: "61410000", date_ecriture: "2026-07-31",
+        libelle: "ajustement", debit: 0, credit: 100, reference_piece: "AJUST" },
+    ]);
+    expect(v.ok).toBe(false);
+    expect(v.violations.some((x) => /44560000/.test(x))).toBe(true);
+  });
+
+  it("n'arme le verrou 7 que si l'appelant fournit la trésorerie", () => {
+    const bascule = [
+      { journal_code: "OD", compte_numero: "44580000", date_ecriture: "2026-05-06",
+        debit: 578, credit: 0, reference_piece: "FA-1" },
+      { journal_code: "OD", compte_numero: "44551000", date_ecriture: "2026-05-06",
+        debit: 0, credit: 578, reference_piece: "FA-1" },
+    ];
+    // Sans trésorerie : la fonction pure ne peut rien prouver, elle se tait.
+    expect(controlerEcrituresRegime(bascule).ok).toBe(true);
+    // Avec une trésorerie VIDE : la lecture a eu lieu, la preuve manque.
+    expect(controlerEcrituresRegime(bascule, { tresorerie: [] }).ok).toBe(false);
+  });
+
+  it("laisse passer un cycle complet et régulier", () => {
+    const v = controlerEcrituresRegime([
+      { journal_code: "CAI", compte_numero: "44110001", date_ecriture: "2026-05-04",
+        debit: 20160, credit: 0, reference_piece: "ACH-1" },
+      { journal_code: "CAI", compte_numero: "51610000", date_ecriture: "2026-05-04",
+        debit: 0, credit: 20160, reference_piece: "ACH-1" },
+    ]);
+    expect(v.violations).toEqual([]);
   });
 });

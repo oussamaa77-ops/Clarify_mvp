@@ -34,6 +34,13 @@
  *  7. DOUBLE COMPTE D'À-NOUVEAU — une pièce AN qui coexiste avec les écritures
  *     d'origine qu'elle reprend : tout total « tous exercices » qui n'écarte pas
  *     le journal AN est faux du montant reporté.
+ *  8. SENS DES RÈGLEMENTS — un compte fournisseur crédité (ou client débité) en
+ *     journal de trésorerie. L'écriture reste ÉQUILIBRÉE, donc invisible pour
+ *     tout contrôle de partie double.
+ *  9. MOUVEMENTS DU 4456 — hors déclaration, régularisation ou paiement DGI, le
+ *     solde du compte de liquidation n'est plus explicable par un acte fiscal.
+ * 10. BASCULES SANS RÈGLEMENT — une TVA rendue exigible sans qu'aucune écriture
+ *     de trésorerie ne l'appuie.
  *
  * Les contrôles 2, 3 et 4 ne sont pas réimplémentés : ils appellent
  * `controlerTvaOrigine`, `controlerJournalOd` et `auditComptesSuspens`, c'est-à-dire
@@ -61,7 +68,8 @@ import { createClient } from "@supabase/supabase-js";
 import { normaliserNumeroCompte, LARGEUR_COMPTE } from "../src/lib/numero-compte";
 import {
   controlerTvaOrigine, controlerJournalOd, estTvaExigible, estTresorerieHorsOd,
-  JOURNAUX_FACTURATION,
+  controlerSensReglement, controlerMouvementsTvaDue, controlerPreuveBascule,
+  estBasculeTva, estJournalReglement, JOURNAUX_FACTURATION,
 } from "../src/lib/genererEcritures";
 import { auditComptesSuspens, type LigneBalance } from "../src/lib/balance-comptable";
 import { sansANouveaux } from "../src/lib/a-nouveaux";
@@ -109,6 +117,7 @@ const nb = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x 
 const txt = (v: unknown) => String(v ?? "").trim();
 const r2 = (x: number) => Math.round(x * 100) / 100;
 const fmt = (x: number) => x.toLocaleString("fr-MA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const jour = (l: any) => txt(l.date_ecriture).slice(0, 10);
 const say = (...a: unknown[]) => { if (!JSON_OUT && !QUIET) console.log(...a); };
 
 /** Gravité d'un écart. Un `bloquant` fait sortir en 1 ; un `signal` informe. */
@@ -136,7 +145,11 @@ async function toutesLesEcritures(dossierId: string): Promise<any[]> {
   let tout: any[] = [], de = 0;
   for (;;) {
     const { data, error } = await sb.from("ecritures_comptables")
-      .select("id,compte_numero,journal_code,date_ecriture,debit,credit,reference_piece,libelle")
+      // `lettrage_code` et `facture_id` NE SONT PAS optionnels ici : ce sont deux
+      // des trois preuves qu'accepte `controlerPreuveBascule`. Les omettre
+      // rendrait toute bascule lettrée « sans règlement » — la lib serait juste,
+      // et l'audit mentirait (cf. mémoire select-reduit-affame-le-generateur).
+      .select("id,compte_numero,journal_code,date_ecriture,debit,credit,reference_piece,libelle,lettrage_code,facture_id")
       .eq("dossier_id", dossierId).range(de, de + 999);
     if (error) throw new Error(`ecritures_comptables : ${error.message}`);
     tout = tout.concat(data ?? []);
@@ -223,6 +236,29 @@ function auditerRegime(lignes: any[]): Anomalie[] {
       montant: r2(fautives.reduce((s, l) => s + Math.abs(nb(l.debit) - nb(l.credit)), 0)),
       exemples: fautives.slice(0, 6).map((l) =>
         `${txt(l.date_ecriture).slice(0, 10)} ${txt(l.journal_code)} ${txt(l.compte_numero)} ${txt(l.reference_piece)}`),
+    });
+  }
+
+  // Verrou 5 — le sens d'un règlement. Une écriture inversée reste ÉQUILIBRÉE,
+  // donc aucun contrôle de partie double ne la voit : c'est ce contrôle, et lui
+  // seul, qui la révèle sur l'existant.
+  const sens = controlerSensReglement(lignes);
+  if (!sens.ok) {
+    out.push({
+      code: "REGLEMENT_SENS_INVERSE",
+      gravite: "bloquant",
+      message: sens.violations.join(" "),
+    });
+  }
+
+  // Verrou 6 — le 4456 ne se manie que par déclaration, régularisation ou
+  // paiement DGI. Hors de là, son solde n'est plus explicable.
+  const tvaDue = controlerMouvementsTvaDue(lignes);
+  if (!tvaDue.ok) {
+    out.push({
+      code: "TVA_DUE_MOUVEMENT_LIBRE",
+      gravite: "bloquant",
+      message: tvaDue.violations.join(" "),
     });
   }
 
@@ -380,6 +416,45 @@ function auditerPartieDouble(lignes: any[]): Anomalie[] {
   }];
 }
 
+// ─── 6 bis. Bascules de TVA sans règlement constaté ─────────────────────────
+//
+// Le verrou 7 empêche d'en créer de nouvelles ; ce contrôle trouve celles qui
+// existaient déjà. On regroupe par pièce — référence + date — parce que c'est
+// l'unité qu'une bascule occupe, et on soumet chaque groupe au MÊME contrôle
+// que l'insertion.
+function auditerBasculesSansPreuve(lignes: any[]): Anomalie[] {
+  const tresorerie = lignes.filter((l) => estJournalReglement(l.journal_code));
+  const parPiece = new Map<string, any[]>();
+  for (const l of lignes) {
+    if (txt(l.journal_code).toUpperCase() !== "OD") continue;
+    const cle = `${txt(l.reference_piece)}|${jour(l)}`;
+    if (!parPiece.has(cle)) parPiece.set(cle, []);
+    parPiece.get(cle)!.push(l);
+  }
+
+  const orphelines: string[] = [];
+  let montant = 0;
+  for (const [cle, piece] of parPiece) {
+    if (!estBasculeTva(piece)) continue;
+    if (controlerPreuveBascule(piece, tresorerie).ok) continue;
+    const [ref, date] = cle.split("|");
+    const tva = r2(piece.reduce((s, l) => s + Math.max(nb(l.debit), nb(l.credit)), 0) / 2);
+    montant += tva;
+    orphelines.push(`${date} « ${ref || "sans référence"} » — ${fmt(tva)} MAD`);
+  }
+  if (!orphelines.length) return [];
+
+  return [{
+    code: "BASCULE_SANS_REGLEMENT",
+    gravite: "bloquant",
+    message: `${orphelines.length} bascule(s) de TVA qu'aucune écriture de trésorerie n'appuie. `
+      + `Sous le régime des encaissements le fait générateur est le mouvement d'argent : `
+      + `sans lui, la TVA a été rendue exigible (ou déductible) alors qu'aucun euro n'avait bougé.`,
+    montant: r2(montant),
+    exemples: orphelines.slice(0, 8),
+  }];
+}
+
 // ─── 7. À-nouveau et double compte ──────────────────────────────────────────
 // Un solde reporté existe DEUX FOIS en base : sur sa ligne d'origine et sur son
 // report (journal AN). Bornés à un exercice, les deux ne se rencontrent jamais ;
@@ -461,6 +536,7 @@ async function main(): Promise<number> {
       ...auditerSuspens(lignes),
       ...auditerTvaAnticipee(lignes),
       ...auditerPartieDouble(lignes),
+      ...auditerBasculesSansPreuve(lignes),
       ...auditerDoubleCompteAn(brutes),
     ];
 

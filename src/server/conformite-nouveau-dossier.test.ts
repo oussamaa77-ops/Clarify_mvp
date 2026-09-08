@@ -327,6 +327,107 @@ describe("insererPiece — la frontière d'écriture", () => {
   });
 });
 
+// ─── Le verrou 7 s'arme-t-il VRAIMENT à la frontière ? ──────────────────────
+//
+// Un verrou qui ne se déclenche jamais est pire que pas de verrou : il inspire
+// une confiance qu'il ne mérite pas. `insererPiece` doit donc LIRE le grand
+// livre et refuser une bascule que rien n'appuie — ce que seul un faux Supabase
+// sachant répondre à un `select` peut prouver.
+describe("insererPiece — verrou 7, bascule sans règlement constaté", () => {
+  /** Faux Supabase qui sait rendre des lignes de trésorerie ET encaisser un insert. */
+  const sbAvecGrandLivre = (tresorerie: any[]) => {
+    const rows: any[] = [];
+    return {
+      rows,
+      from() {
+        let op: "select" | "insert" = "select";
+        let payload: any[] = [];
+        const q: any = {
+          select() { op = "select"; return q; },
+          insert(p: any) { op = "insert"; payload = Array.isArray(p) ? p : [p]; return q; },
+          eq() { return q; },
+          in() { return q; },
+          then(res: any, rej: any) {
+            if (op === "insert") { rows.push(...payload); return Promise.resolve({ error: null }).then(res, rej); }
+            return Promise.resolve({ data: tresorerie, error: null }).then(res, rej);
+          },
+        };
+        return q;
+      },
+    };
+  };
+
+  const basculeVente = (date = "2026-05-06") => [
+    { journal_code: "OD", compte_numero: "4458", date_ecriture: date,
+      libelle: "TVA exigible", debit: 578, credit: 0, reference_piece: "FA-2024-0892" },
+    { journal_code: "OD", compte_numero: "44551", date_ecriture: date,
+      libelle: "TVA exigible", debit: 0, credit: 578, reference_piece: "FA-2024-0892" },
+  ];
+
+  it("REFUSE la bascule quand le grand livre ne porte aucun règlement", async () => {
+    const sb = sbAvecGrandLivre([]);
+    const { error } = await insererPiece(sb, D, basculeVente());
+    expect(error).toMatch(/sans règlement constaté/);
+    expect(sb.rows).toHaveLength(0);
+  });
+
+  it("l'accepte dès qu'une trésorerie porte la même référence", async () => {
+    const sb = sbAvecGrandLivre([{
+      journal_code: "CAI", compte_numero: "34210002", date_ecriture: "2026-05-06",
+      debit: 0, credit: 3468, reference_piece: "FA-2024-0892",
+    }]);
+    const { error } = await insererPiece(sb, D, basculeVente());
+    expect(error).toBeNull();
+    expect(sb.rows).toHaveLength(2);
+    // …et la normalisation reste appliquée au passage.
+    expect(sb.rows.map((r) => r.compte_numero)).toEqual(["44580000", "44551000"]);
+  });
+
+  it("l'accepte sur preuve par LETTRAGE, la banque n'ayant aucune référence", async () => {
+    const sb = sbAvecGrandLivre([{
+      journal_code: "CAI", compte_numero: "34210002", date_ecriture: "2026-05-06",
+      debit: 0, credit: 3468, reference_piece: null, lettrage_code: "AA",
+    }]);
+    // Le code de lettrage vit dans les OPTIONS : c'est la greffe faite par
+    // insererPiece qui le rend visible au contrôle.
+    const { error } = await insererPiece(sb, D, basculeVente(), { lettrageCode: "AA" });
+    expect(error).toBeNull();
+    expect(sb.rows).toHaveLength(2);
+  });
+
+  it("REFUSE une trésorerie POSTÉRIEURE à la bascule", async () => {
+    const sb = sbAvecGrandLivre([{
+      journal_code: "CAI", compte_numero: "34210002", date_ecriture: "2026-07-01",
+      debit: 0, credit: 3468, reference_piece: "FA-2024-0892",
+    }]);
+    const { error } = await insererPiece(sb, D, basculeVente("2026-05-06"));
+    expect(error).toMatch(/sans règlement constaté/);
+  });
+
+  it("ne s'arme pas sur une pièce qui N'EST PAS une bascule", async () => {
+    // Une déclaration ne touche pas l'attente : aucun règlement à exiger.
+    const sb = sbAvecGrandLivre([]);
+    const { error } = await insererPiece(sb, D, [
+      { journal_code: "OD", compte_numero: "44551", date_ecriture: "2026-07-31",
+        libelle: "Déclaration TVA", debit: 1880, credit: 0, reference_piece: "DECL-TVA-2026-07" },
+      { journal_code: "OD", compte_numero: "4456", date_ecriture: "2026-07-31",
+        libelle: "TVA due", debit: 0, credit: 1880, reference_piece: "DECL-TVA-2026-07" },
+    ]);
+    expect(error).toBeNull();
+    expect(sb.rows).toHaveLength(2);
+  });
+
+  it("un client sans `select` laisse le verrou DÉSARMÉ, jamais bloquant", async () => {
+    // Choix délibéré : une lecture impossible ne prouve rien et n'infirme rien.
+    // Refuser par défaut arrêterait le régime des encaissements sur un incident.
+    const rows: any[] = [];
+    const sbMuet: any = { from: () => ({ insert: async (r: any[]) => { rows.push(...r); return { error: null }; } }) };
+    const { error } = await insererPiece(sbMuet, D, basculeVente());
+    expect(error).toBeNull();
+    expect(rows).toHaveLength(2);
+  });
+});
+
 // ─── Le garde-fou d'architecture ────────────────────────────────────────────
 //
 // La régression la plus probable n'est pas « la règle est fausse » — elle est

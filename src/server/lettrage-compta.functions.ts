@@ -19,7 +19,10 @@ import {
 } from "@/services/lettrage";
 import { synchroniserApresLettrage } from "./factures-gl.functions";
 import { controlerPiece } from "@/lib/liquidation-tva";
-import { controlerEcrituresRegime, estJournalReglement, genererOdBasculeTva } from "@/lib/genererEcritures";
+import {
+  controlerEcrituresRegime, estBasculeTva, estJournalReglement, genererOdBasculeTva,
+  JOURNAUX_REGLEMENT, type LigneTresoreriePreuve,
+} from "@/lib/genererEcritures";
 import { memeCompte, normaliserNumeroCompte } from "@/lib/numero-compte";
 
 /**
@@ -43,11 +46,40 @@ export async function insererPiece(
     facture_id?: string | null; paiement_id?: string | null }[],
   opts: { lettrageCode?: string | null; origine?: string } = {},
 ): Promise<{ error: string | null }> {
+  // ── VERROU 7 : une bascule de TVA exige un règlement CONSTATÉ ─────────────
+  // Le contrôle a besoin du grand livre, qu'une fonction pure ne peut pas
+  // connaître : c'est ICI, seul passage obligé vers la base, qu'on le lit.
+  //
+  // Une requête en ÉCHEC ne prouve rien et n'infirme rien. On n'arme donc le
+  // verrou que sur une lecture réussie — sinon une panne de lecture refuserait
+  // des bascules parfaitement régulières, et le régime des encaissements
+  // s'arrêterait sur un incident réseau.
+  let tresorerie: LigneTresoreriePreuve[] | undefined;
+  if (estBasculeTva(lignes)) {
+    try {
+      const { data, error } = await sb.from("ecritures_comptables")
+        .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
+        .eq("dossier_id", dossierId)
+        .in("journal_code", [...JOURNAUX_REGLEMENT]);
+      if (!error) tresorerie = (data ?? []) as LigneTresoreriePreuve[];
+    } catch {
+      // Client sans `select` (bouchons de test) : verrou non armé, à dessein.
+    }
+  }
+
+  // Le code de lettrage vit dans les options, pas sur les lignes : sans cette
+  // greffe, une bascule prouvée par son LETTRAGE serait refusée faute de savoir
+  // quel code elle porte.
+  const pourControle = opts.lettrageCode
+    ? lignes.map((l) => ({ ...l, lettrage_code: opts.lettrageCode }))
+    : lignes;
+
   // Dernier verrou avant la base : pas de trésorerie en OD, pas de TVA exigible
-  // en VTE/ACH, partie double soldée. Rendu comme une erreur et non jeté — cette
-  // fonction est appelée depuis des chemins qui ne doivent jamais faire échouer
-  // le règlement qu'ils suivent (cf. `comptabiliserReglement`).
-  const verdict = controlerEcrituresRegime(lignes);
+  // en VTE/ACH, sens des règlements, mouvements du 4456, partie double soldée.
+  // Rendu comme une erreur et non jeté — cette fonction est appelée depuis des
+  // chemins qui ne doivent jamais faire échouer le règlement qu'ils suivent
+  // (cf. `comptabiliserReglement`).
+  const verdict = controlerEcrituresRegime(pourControle, { tresorerie });
   if (!verdict.ok) return { error: verdict.violations.join(" ") };
 
   const base = lignes.map((l) => ({

@@ -43,7 +43,7 @@
 // ============================================================================
 
 import {
-  COMPTES_TVA, construireBasculeTva, tvaProportionnelle,
+  COMPTES_TVA, construireBasculeTva, referencesPiece, tvaProportionnelle,
   type LigneOD, type SensTiers,
 } from "@/services/lettrage";
 import { compteTiersAuxiliaire } from "@/lib/comptes-auxiliaires";
@@ -310,6 +310,193 @@ export function controlerUniciteReference(
 
 // ─── Le verdict d'ensemble ───────────────────────────────────────────────────
 
+// ─── VERROU 5 — le SENS d'un règlement ───────────────────────────────────────
+//
+// Un règlement fait bouger l'argent dans un sens et le compte de tiers dans
+// l'autre. Payer un fournisseur ÉTEINT une dette : D 4411x / C 5141. Encaisser
+// un client ÉTEINT une créance : D 5141 / C 3421x.
+//
+// L'écriture inverse — un compte fournisseur CRÉDITÉ dans un journal de
+// trésorerie — dit littéralement « le fournisseur nous a versé de l'argent et
+// notre dette envers lui a augmenté ». Elle n'est pas déséquilibrée, elle est
+// FAUSSE : c'est pourquoi aucun contrôle de partie double ne l'attrape.
+// Constatée sur SOMADIR, où le règlement ATLAS PACKAGING débitait la caisse et
+// créditait le fournisseur : le tiers affichait 40 320,00 de dette pour une
+// facture de 20 160,00, et la balance bouclait à zéro.
+//
+// La détection porte sur la NATURE du compte, seul discriminant disponible : un
+// fournisseur est un compte de passif, un client un compte d'actif. Elle est
+// donc aveugle au cas légitime du REMBOURSEMENT — un fournisseur qui restitue
+// un trop-payé produit exactement la même forme. Aucun chemin du projet n'en
+// produit aujourd'hui ; le jour où il en faudra un, la règle devra recevoir une
+// dérogation explicite plutôt que d'être affaiblie pour tout le monde.
+
+/** Racines des comptes de tiers, par nature de solde. */
+export const RACINES_TIERS = {
+  /** Clients : compte d'ACTIF, éteint par un CRÉDIT à l'encaissement. */
+  client: "3421",
+  /** Fournisseurs : compte de PASSIF, éteint par un DÉBIT au décaissement. */
+  fournisseur: "4411",
+} as const;
+
+export function controlerSensReglement(lignes: LigneEcriture[]): ControleRegime {
+  const violations: string[] = [];
+  const tresorerie = (lignes ?? []).filter((l) => estJournalReglement(l.journal_code));
+  if (!tresorerie.length) return conforme;
+
+  const fournisseursCredites = tresorerie.filter(
+    (l) => commencePar(l.compte_numero, [RACINES_TIERS.fournisseur]) && r2(l.credit) > 0.005);
+  if (fournisseursCredites.length) {
+    const comptes = [...new Set(fournisseursCredites.map((l) => txt(l.compte_numero)))].join(", ");
+    violations.push(
+      `Sens du règlement inversé : compte fournisseur CRÉDITÉ dans un journal de `
+      + `trésorerie (${comptes}). Un décaissement éteint la dette, donc il la DÉBITE `
+      + `— l'argent, lui, est au crédit du compte de trésorerie. En l'état l'écriture `
+      + `augmente la dette au lieu de la solder, et la partie double n'y voit rien.`);
+  }
+
+  const clientsDebites = tresorerie.filter(
+    (l) => commencePar(l.compte_numero, [RACINES_TIERS.client]) && r2(l.debit) > 0.005);
+  if (clientsDebites.length) {
+    const comptes = [...new Set(clientsDebites.map((l) => txt(l.compte_numero)))].join(", ");
+    violations.push(
+      `Sens du règlement inversé : compte client DÉBITÉ dans un journal de trésorerie `
+      + `(${comptes}). Un encaissement éteint la créance, donc il la CRÉDITE. En l'état `
+      + `l'écriture augmente la créance alors que l'argent est déjà rentré.`);
+  }
+
+  return violations.length ? { ok: false, violations } : conforme;
+}
+
+// ─── VERROU 6 — le 4456 ne se manie que par déclaration ──────────────────────
+//
+// `4456` (« État — TVA due ») est le compte de LIQUIDATION : il ne porte que le
+// résultat d'un acte fiscal. Trois gestes y ont droit, et trois seulement — une
+// déclaration, une reprise de déclaration, un paiement à la DGI.
+//
+// Ce verrou porte sur les MOUVEMENTS et non sur le signe du solde, parce que le
+// solde n'a rien d'anormal dans un sens ni dans l'autre : créditeur, on doit de
+// la TVA (le cas ordinaire) ; débiteur, on porte un crédit reportable. Interdire
+// l'un des deux signalerait le cas normal. Ce qui est vérifiable, en revanche,
+// c'est qu'aucune écriture ne s'invite sur ce compte hors des trois gestes : un
+// ajustement manuel y crée un solde que plus aucune déclaration n'explique, et
+// c'est par là que naissent les crédits de TVA auxquels un dossier n'a pas droit.
+
+/** Racine du compte de liquidation de TVA. Miroir de `COMPTE_TVA_DUE`. */
+export const RACINE_TVA_DUE = "4456";
+
+/**
+ * Références des pièces autorisées à mouvementer le 4456.
+ *
+ * Miroirs de `PREFIXE_DECLARATION_TVA` / `PREFIXE_REGULARISATION_TVA`, dupliqués
+ * pour préserver le SENS DES IMPORTS : `liquidation-tva` dépend de ce module, et
+ * l'inverse créerait un cycle. Un test verrouille leur identité, si bien qu'une
+ * divergence casse la suite au lieu de désarmer le verrou en silence.
+ */
+export const PREFIXES_PIECES_TVA_DUE = ["DECL-TVA-", "REGUL-TVA-"] as const;
+
+/** Libellé du prélèvement de la DGI. Miroir de `LIBELLE_PAIEMENT_DGI`. */
+export const LIBELLE_PAIEMENT_DGI_MIROIR = "Paiement TVA DGI";
+
+export function controlerMouvementsTvaDue(lignes: LigneEcriture[]): ControleRegime {
+  const fautives = (lignes ?? []).filter((l) => {
+    if (!commencePar(l.compte_numero, [RACINE_TVA_DUE]) || !mouvementee(l)) return false;
+    const ref = txt(l.reference_piece);
+    if (PREFIXES_PIECES_TVA_DUE.some((prefixe) => ref.startsWith(prefixe))) return false;
+    // Le paiement à la DGI se reconnaît à son LIBELLÉ : il porte la référence de
+    // la période déclarée, pas un préfixe qui lui soit propre.
+    return !txt(l.libelle).startsWith(LIBELLE_PAIEMENT_DGI_MIROIR);
+  });
+  if (!fautives.length) return conforme;
+
+  const detail = [...new Set(fautives.map(
+    (l) => `${journal(l)} ${txt(l.compte_numero)} « ${txt(l.reference_piece) || "sans référence"} »`,
+  ))].join(", ");
+  return {
+    ok: false,
+    violations: [
+      `Mouvement non autorisé sur le compte de liquidation ${RACINE_TVA_DUE} (${detail}). `
+      + `Seules une déclaration (${PREFIXES_PIECES_TVA_DUE[0]}), une régularisation `
+      + `(${PREFIXES_PIECES_TVA_DUE[1]}) ou un paiement DGI y ont droit : hors de là, le `
+      + `solde du compte n'est plus explicable par aucun acte fiscal.`,
+    ],
+  };
+}
+
+// ─── VERROU 7 — pas de bascule de TVA sans règlement constaté ────────────────
+//
+// La bascule est le geste qui rend la TVA exigible (ou déductible). Son fait
+// générateur est le MOUVEMENT D'ARGENT : elle n'a de sens que s'il existe, à sa
+// date ou avant, une écriture de trésorerie rattachée à la même pièce.
+//
+// Le contrôle du journal (`journalReglement` dans `genererOdBasculeTva`) ne
+// suffisait pas : il vérifie que l'appelant PRÉTEND passer par BQ ou CAI, pas
+// qu'une ligne de banque existe. C'est ainsi que des bascules ont été posées sur
+// des rapprochements fictifs — antérieurs à la facture, ou sans relevé.
+//
+// La preuve admise est celle du projet : une écriture BQ/CAI reliée à la pièce
+// par sa RÉFÉRENCE, par son CODE DE LETTRAGE, ou par `facture_id`. Une ligne de
+// `paiements` ne suffit pas — elle dit l'intention, pas le mouvement.
+
+/** Ligne de trésorerie servant de preuve à une bascule. */
+export interface LigneTresoreriePreuve extends LigneEcriture {
+  lettrage_code?: string | null;
+  facture_id?: string | null;
+}
+
+/**
+ * Cette pièce est-elle une BASCULE de TVA ?
+ *
+ * Signature : elle touche à la fois un compte d'ATTENTE (4458 / 3458) et un
+ * compte EXIGIBLE (4455x / 3455x). C'est ce qui la distingue d'une déclaration,
+ * qui relie l'exigible au 4456 sans jamais toucher l'attente.
+ */
+export function estBasculeTva(lignes: LigneEcriture[]): boolean {
+  const mouvantes = (lignes ?? []).filter(mouvementee);
+  const attente = mouvantes.some((l) => commencePar(l.compte_numero,
+    [COMPTE_TVA_ATTENTE.vente, COMPTE_TVA_ATTENTE.achat]));
+  return attente && mouvantes.some((l) => estTvaExigible(l.compte_numero));
+}
+
+export function controlerPreuveBascule(
+  lignes: LigneEcriture[], tresorerie: LigneTresoreriePreuve[],
+): ControleRegime {
+  if (!estBasculeTva(lignes)) return conforme;
+
+  const refs = new Set(referencesPiece(...lignes.map((l) => l.reference_piece)));
+  const lettrages = new Set((lignes as LigneTresoreriePreuve[])
+    .map((l) => txt(l.lettrage_code)).filter(Boolean));
+  const factures = new Set((lignes as LigneTresoreriePreuve[])
+    .map((l) => txt(l.facture_id)).filter(Boolean));
+
+  // La bascule est datée du règlement : une trésorerie POSTÉRIEURE ne la prouve
+  // pas, elle la contredit.
+  const dates = lignes.map((l) => txt(l.date_ecriture).slice(0, 10)).filter(Boolean).sort();
+  const auPlusTard = dates[dates.length - 1] ?? "";
+
+  const preuve = (tresorerie ?? []).some((t) => {
+    if (!estJournalReglement(t.journal_code) || !mouvementee(t)) return false;
+    const d = txt(t.date_ecriture).slice(0, 10);
+    if (auPlusTard && d && d > auPlusTard) return false;
+    return refs.has(txt(t.reference_piece))
+      || (txt(t.lettrage_code) !== "" && lettrages.has(txt(t.lettrage_code)))
+      || (txt(t.facture_id) !== "" && factures.has(txt(t.facture_id)));
+  });
+  if (preuve) return conforme;
+
+  const ref = [...refs][0] ?? "sans référence";
+  return {
+    ok: false,
+    violations: [
+      `Bascule de TVA sans règlement constaté (pièce « ${ref} »${auPlusTard ? `, ${auPlusTard}` : ""}). `
+      + `Sous le régime des encaissements le fait générateur est le mouvement d'argent : `
+      + `il faut une écriture ${JOURNAUX_REGLEMENT.join(" ou ")} rattachée à cette pièce — par `
+      + `sa référence, son code de lettrage ou son facture_id — et datée au plus tard du `
+      + `même jour. Sans elle, la TVA devient exigible alors qu'aucun euro n'a bougé.`,
+    ],
+  };
+}
+
 export interface OptionsControleRegime extends OptionsCutoff {
   /**
    * Écritures DÉJÀ en base pour ce dossier, pour le contrôle d'unicité. Seules
@@ -322,6 +509,17 @@ export interface OptionsControleRegime extends OptionsCutoff {
    * repris, pas s'arrêter à la première.
    */
   uniciteNonBloquante?: boolean;
+  /**
+   * Lignes de TRÉSORERIE du dossier, pour prouver le règlement derrière une
+   * bascule de TVA (verrou 7).
+   *
+   * Absentes, le contrôle ne s'exécute PAS : une fonction pure ne peut pas
+   * inventer le grand livre, et refuser par défaut casserait tous les appelants
+   * qui ne le passent pas. C'est `insererPiece` — le passage obligé vers la
+   * base — qui les fournit systématiquement : le verrou est donc facultatif
+   * dans la lib et effectif à la frontière.
+   */
+  tresorerie?: LigneTresoreriePreuve[];
 }
 
 export interface VerdictRegime extends ControleRegime {
@@ -339,6 +537,10 @@ export function controlerEcrituresRegime(
     ...controlerTvaOrigine(lignes).violations,
     ...controlerJournalOd(lignes).violations,
     ...controlerCutoffExercice(lignes, opts.bornes).violations,
+    ...controlerSensReglement(lignes).violations,
+    ...controlerMouvementsTvaDue(lignes).violations,
+    // Verrou 7 seulement si l'appelant a fourni le grand livre de trésorerie.
+    ...(opts.tresorerie ? controlerPreuveBascule(lignes, opts.tresorerie).violations : []),
     ...(opts.uniciteNonBloquante ? [] : unicite.violations),
   ];
   const alertes = opts.uniciteNonBloquante ? [...unicite.violations] : [];

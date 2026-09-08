@@ -17,6 +17,11 @@
  * Le collectif portait le règlement, l'auxiliaire portait la dette, et les deux
  * ne se rencontraient jamais.
  *
+ * La pièce ne portait par ailleurs AUCUNE référence, ce qui la rendait
+ * impossible à lettrer et privait la bascule de TVA de C2 de sa preuve de
+ * règlement (verrou 7, `controlerPreuveBascule`). Les deux lignes reçoivent
+ * donc la référence de la pièce d'achat.
+ *
  * ─── C2 · La TVA déductible ATLAS n'a jamais été basculée ────────────────────
  * Sous le régime des encaissements, la déduction naît du DÉCAISSEMENT. Le
  * 34580000 a bien été débité à la facture (2024-11-15) mais aucune OD ne l'a
@@ -174,7 +179,13 @@ interface Correction {
 
 const corrections: Correction[] = [];
 
-// ─── C1 · Règlement ATLAS PACKAGING : sens inversé + collectif au lieu de l'auxiliaire ──
+// La référence de la pièce d'ACHAT — celle qui rattache le règlement et la
+// bascule à leur facture. Dérivée du grand livre, jamais codée en dur.
+const REF_ACHAT_ATLAS = txt(avant.find((l) => txt(l.journal_code).toUpperCase() === "ACH"
+  && txt(l.compte_numero) === normaliserNumeroCompte("3458")
+  && Math.abs(nb(l.debit) - 3360) < 0.005)?.reference_piece) || null;
+
+// ─── C1 · Règlement ATLAS PACKAGING : sens inversé, collectif, et non rattaché ──
 {
   const DATE = "2026-05-04";
   const MONTANT = 20160;
@@ -182,31 +193,42 @@ const corrections: Correction[] = [];
   const collectif = normaliserNumeroCompte("4411");
   const auxiliaire = "44110001";
 
-  const fautives = avant.filter((l) => jour(l) === DATE
+  // On ramasse la pièce dans N'IMPORTE lequel de ses états — d'origine (caisse
+  // débitée / collectif crédité) ou déjà redressée mais sans référence. Sans
+  // cela, une reprise partielle laisserait des lignes en double.
+  const concernees = avant.filter((l) => jour(l) === DATE
     && txt(l.journal_code).toUpperCase() === "CAI"
     && Math.abs(nb(l.debit) + nb(l.credit) - MONTANT) < 0.005
-    && (txt(l.compte_numero) === caisse || txt(l.compte_numero) === collectif));
+    && [caisse, collectif, auxiliaire].includes(txt(l.compte_numero)));
 
-  const dejaBonne = avant.some((l) => jour(l) === DATE
-    && txt(l.journal_code).toUpperCase() === "CAI"
-    && txt(l.compte_numero) === auxiliaire && nb(l.debit) === MONTANT);
+  // « Fait » exige les TROIS conditions : bon compte, bon sens, ET rattachement.
+  // Un règlement non rattaché à sa facture ne peut être ni lettré, ni servir de
+  // preuve à la bascule de TVA (verrou 7).
+  const dejaBonne = concernees.length === 2
+    && concernees.some((l) => txt(l.compte_numero) === auxiliaire
+      && Math.abs(nb(l.debit) - MONTANT) < 0.005
+      && txt(l.reference_piece) === txt(REF_ACHAT_ATLAS));
 
-  const libelle = txt(fautives[0]?.libelle) || "Paiement fac fournisseur";
+  const libelle = txt(concernees[0]?.libelle) || "Paiement fac fournisseur";
   corrections.push({
     code: "C1",
-    titre: "Règlement ATLAS PACKAGING — sens inversé et compte collectif",
-    dejaFaite: dejaBonne || fautives.length !== 2,
+    titre: "Règlement ATLAS PACKAGING — sens, compte de tiers et rattachement",
+    dejaFaite: dejaBonne || concernees.length !== 2,
     raisonDejaFaite: dejaBonne
-      ? `le règlement est déjà au débit de ${auxiliaire}`
-      : fautives.length !== 2 ? `${fautives.length} ligne(s) trouvée(s) au lieu de 2 — refus d'agir à l'aveugle` : undefined,
-    grief: `caisse débitée en payant, dette créditée, et imputation sur le collectif ${collectif} `
-      + `alors que l'achat était sur ${auxiliaire} : le fournisseur affichait ${fmt(MONTANT * 2)} de dette.`,
-    supprimer: fautives,
+      ? `le règlement est au débit de ${auxiliaire} et rattaché à sa facture`
+      : concernees.length !== 2
+        ? `${concernees.length} ligne(s) trouvée(s) au lieu de 2 — refus d'agir à l'aveugle`
+        : undefined,
+    grief: `caisse débitée en payant, dette créditée, imputation sur le collectif ${collectif} `
+      + `alors que l'achat était sur ${auxiliaire} (le fournisseur affichait ${fmt(MONTANT * 2)} de `
+      + `dette), et aucune référence de pièce — donc aucun lettrage possible et aucune preuve `
+      + `de règlement derrière la bascule de TVA.`,
+    supprimer: concernees,
     creer: [
       { journal_code: "CAI", compte_numero: auxiliaire, date_ecriture: DATE,
-        libelle, debit: MONTANT, credit: 0, reference_piece: fautives[0]?.reference_piece ?? null },
+        libelle, debit: MONTANT, credit: 0, reference_piece: REF_ACHAT_ATLAS },
       { journal_code: "CAI", compte_numero: caisse, date_ecriture: DATE,
-        libelle, debit: 0, credit: MONTANT, reference_piece: fautives[0]?.reference_piece ?? null },
+        libelle, debit: 0, credit: MONTANT, reference_piece: REF_ACHAT_ATLAS },
     ],
   });
 }
@@ -221,11 +243,10 @@ const corrections: Correction[] = [];
   const aRetirer = avant.filter((l) =>
     txt(l.reference_piece) === "DECL-TVA-2024-11" || txt(l.reference_piece) === "REGUL-TVA-2024-11");
 
-  // La référence de la pièce d'achat : c'est elle qui rattache la bascule à sa
-  // facture, et sans quoi `tvaEnAttenteDeLaPiece` ne la retrouverait jamais.
-  const ligneAchat = avant.find((l) => txt(l.journal_code).toUpperCase() === "ACH"
-    && txt(l.compte_numero) === attente && Math.abs(nb(l.debit) - MONTANT) < 0.005);
-  const refAchat = txt(ligneAchat?.reference_piece) || null;
+  // La référence de la pièce d'achat rattache la bascule à sa facture ; sans
+  // elle, ni `tvaEnAttenteDeLaPiece` ne la retrouve, ni le verrou 7 ne peut la
+  // prouver. Dérivée une seule fois, au-dessus (REF_ACHAT_ATLAS).
+  const refAchat = REF_ACHAT_ATLAS;
 
   const dejaBasculee = avant.some((l) => jour(l) === DATE_BASCULE
     && txt(l.journal_code).toUpperCase() === "OD"
