@@ -79,14 +79,14 @@ export async function executerSyncFacturesGL(
   try {
     const [{ data: ecr, error: eEcr }, { data: fc }, { data: ff }, { data: pai }] = await Promise.all([
       sb.from("ecritures_comptables").select(COLS_GL).eq("dossier_id", data.dossierId),
-      sb.from("factures").select("id,numero,montant_ttc,montant_paye,montant_restant,statut_paiement")
+      sb.from("factures").select("id,numero,date_facture,montant_ttc,montant_paye,montant_restant,statut_paiement")
         .eq("dossier_id", data.dossierId),
-      sb.from("factures_fournisseurs").select("id,numero,montant_ttc,montant_paye,montant_restant,statut_paiement")
+      sb.from("factures_fournisseurs").select("id,numero,date_facture,montant_ttc,montant_paye,montant_restant,statut_paiement")
         .eq("dossier_id", data.dossierId),
       // Pièces de règlement formelles — la SECONDE preuve d'un encaissement.
       // Sans elles, une facture réglée mais jamais lettrée serait ramenée à
       // « non payée » et son règlement perdu (cf. projeterSituationFacture).
-      sb.from("paiements").select("facture_id,facture_fournisseur_id,montant,date_paiement")
+      sb.from("paiements").select("facture_id,facture_fournisseur_id,montant,date_paiement,transaction_id,encaissement_id,reference")
         .eq("dossier_id", data.dossierId),
     ]);
     if (eEcr) return { ...vide, ok: false, raison: eEcr.message };
@@ -99,7 +99,14 @@ export async function executerSyncFacturesGL(
       const cle = String(p.facture_id ?? p.facture_fournisseur_id ?? "");
       if (!cle) continue;
       const l = piecesParFacture.get(cle) ?? [];
-      l.push({ montant: Number(p.montant ?? 0), date: p.date_paiement ?? null });
+      l.push({
+        montant: Number(p.montant ?? 0), date: p.date_paiement ?? null,
+        // Identité de la pièce : sans elle, deux insertions de la même ligne de
+        // relevé sont indiscernables et comptent double (cf. `clePaiement`).
+        transaction_id: p.transaction_id ?? null,
+        encaissement_id: p.encaissement_id ?? null,
+        reference: p.reference ?? null,
+      });
       piecesParFacture.set(cle, l);
     }
     const lots: { table: "factures" | "factures_fournisseurs"; sens: "client" | "fournisseur"; rows: any[] }[] = [
@@ -121,7 +128,13 @@ export async function executerSyncFacturesGL(
         });
         // Le grand livre dit ce qui est LETTRÉ ; les pièces disent ce qui a été
         // ENCAISSÉ. On retient la plus forte des deux preuves.
-        const apres = projeterSituationFacture(gl, piecesParFacture.get(String(f.id)) ?? [], ttc);
+        // La `cible` porte la date d'émission : c'est elle qui permet d'écarter
+        // une pièce ANTÉRIEURE à la facture, laquelle emportait sinon la
+        // décision face à un grand livre correct (cas SMERT WATER).
+        const apres = projeterSituationFacture(
+          gl, piecesParFacture.get(String(f.id)) ?? [], ttc,
+          { id: f.id, numero: f.numero, date_facture: f.date_facture },
+        );
         // Une facture ABSENTE du grand livre n'est pas « non payée » : elle n'est
         // simplement pas comptabilisée. La réécrire effacerait un règlement saisi
         // avant sa comptabilisation — on la laisse donc telle quelle.

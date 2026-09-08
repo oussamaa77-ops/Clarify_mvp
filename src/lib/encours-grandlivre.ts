@@ -29,6 +29,7 @@
 
 import { statutPaiement } from "@/lib/paiements";
 import { estJournalTresorerie } from "@/lib/integrite-tresorerie";
+import { paiementsRecevables } from "@/lib/reglements";
 
 /** Racines PCM. Les auxiliaires en dérivent par préfixe : 34210002 ⊂ 3421. */
 export const COMPTE_CLIENTS = "3421";
@@ -168,6 +169,78 @@ export function encoursTiersGrandLivre(
   return { total: round2(total), avances: round2(avances), postes };
 }
 
+// ─── Indicateurs de tête, tirés de la COMPTABILITÉ ───────────────────────────
+//
+// Les trois chiffres du bandeau — CA HT facturé, encaissements clients, encours —
+// se lisaient jusqu'ici dans les colonnes de `factures` : Σ montant_ht, Σ
+// montant_paye, Σ montant_restant. Trois agrégats d'une projection, présentés
+// comme des données comptables.
+//
+// Le défaut n'est pas théorique. Sur SMERT WATER, « Encaissements clients »
+// annonçait 102 972 MAD — le TTC de trois factures dont deux n'ont jamais été
+// encaissées — quand la comptabilité n'en portait que 21 000. Aucun de ces
+// chiffres n'était justifiable devant un contrôle : ils ne venaient d'aucun
+// journal.
+//
+// On les tire donc du grand livre, où chacun a une définition unique :
+//   • CA HT facturé        = Σ des crédits nets de la classe 7 ;
+//   • Encaissements clients = Σ des CRÉDITS du 342x en journal de TRÉSORERIE ;
+//   • Encours clients       = Σ des soldes débiteurs non lettrés du 342x.
+//
+// Le TTC des factures n'entre dans aucun des trois : il porte la TVA, qui n'est
+// pas du produit, et il ignore ce qui a été réellement reçu.
+
+export interface AgregatGrandLivre {
+  /** Le montant, en MAD. */
+  montant: number;
+  /** Nombre de lignes du grand livre qui le composent — la trace du calcul. */
+  lignes: number;
+  /** `false` quand aucune ligne ne relève de l'agrégat : rien à afficher. */
+  comptabilise: boolean;
+}
+
+/**
+ * CA HT de l'exercice = crédits nets de la classe 7.
+ *
+ * NET des débits : un avoir débite le compte de produit, et le compter pour zéro
+ * gonflerait le chiffre d'affaires du montant annulé. C'est la même convention
+ * que `rapprocherCaProduits`, dont ce calcul est la moitié comptable.
+ */
+export function caHtGrandLivre(lignes: LigneGrandLivre[]): AgregatGrandLivre {
+  const produits = (lignes ?? []).filter((l) => txt(l.compte_numero).startsWith("7"));
+  return {
+    montant: round2(produits.reduce((s, l) => s + nb(l.credit) - nb(l.debit), 0)),
+    lignes: produits.length,
+    comptabilise: produits.length > 0,
+  };
+}
+
+/**
+ * Encaissements clients = ce que les journaux de trésorerie ont crédité au 342x.
+ *
+ * Le CRÉDIT du compte client est la contrepartie du débit de banque ou de caisse :
+ * c'est l'écriture, et elle seule, qui dit que l'argent est entré. Net des débits
+ * pour qu'un impayé rejeté (qui rouvre la créance) vienne bien en déduction.
+ *
+ * Une écriture de VENTE au crédit du 342x — un avoir, par exemple — n'est pas un
+ * encaissement : d'où le filtre sur le journal, jamais sur le seul compte.
+ */
+export function encaissementsTiersGrandLivre(
+  lignes: LigneGrandLivre[], racine: string = COMPTE_CLIENTS,
+): AgregatGrandLivre {
+  const sens = racine === COMPTE_FOURNISSEURS ? -1 : 1;
+  const mouvements = (lignes ?? []).filter((l) =>
+    relevantDe(l.compte_numero, racine) && estJournalTresorerie(l.journal_code));
+  return {
+    // Client : crédit − débit (l'encaissement solde la créance).
+    // Fournisseur : débit − crédit (le décaissement solde la dette).
+    montant: round2(mouvements.reduce(
+      (s, l) => s + sens * (nb(l.credit) - nb(l.debit)), 0)),
+    lignes: mouvements.length,
+    comptabilise: mouvements.length > 0,
+  };
+}
+
 // ─── Situation d'une facture, dérivée du grand livre ─────────────────────────
 
 export interface SituationFacture {
@@ -266,6 +339,22 @@ export function situationFactureGrandLivre(
 export interface PieceReglement {
   montant: number;
   date?: string | null;
+  /**
+   * Identité de la pièce d'origine et référence de saisie. Facultatives, mais
+   * c'est par elles que le doublon se détecte : sans elles, deux insertions de
+   * la même ligne de relevé restent indiscernables (cf. `clePaiement`).
+   */
+  transaction_id?: string | null;
+  encaissement_id?: string | null;
+  reference?: string | null;
+}
+
+/** Ce que la projection doit savoir de la facture pour juger ses pièces. */
+export interface CibleProjection {
+  id?: string | null;
+  numero?: string | null;
+  /** Émission — sans elle, l'antériorité ne peut pas être constatée. */
+  date_facture?: string | null;
 }
 
 /**
@@ -284,15 +373,37 @@ export interface PieceReglement {
  * un `paiements`, mais aucune écriture de trésorerie n'avait jamais été générée,
  * donc rien à lettrer. Ramener leur statut à « non payée » aurait détruit la
  * seule trace du règlement, ce qui est bien pire que la divergence corrigée.
+ *
+ * ⚠️ Le maximum ne s'applique qu'aux pièces RECEVABLES (cf. src/lib/reglements.ts).
+ * Sans ce filtre, il faisait exactement le contraire de ce qu'on attend de lui :
+ * une pièce IMPOSSIBLE — un virement antérieur à l'émission de la facture, un
+ * doublon — l'emportait sur un grand livre correct, et aucune resynchronisation
+ * ne pouvait plus la déloger, puisque le maximum la reprenait à chaque passage.
+ * C'est ce qui a tenu 81 972 MAD de créances SMERT WATER affichées « encaissées »
+ * pendant que le compte 3421 restait ouvert d'autant. La prudence porte sur ce
+ * qu'on ne détruit pas, jamais sur ce qu'on accepte de compter.
+ *
+ * `cible` est facultative pour ne pas casser les appelants qui n'ont pas la date
+ * d'émission sous la main ; sans elle, l'antériorité ne peut pas être constatée,
+ * mais les doublons et les montants nuls le restent.
  */
 export function projeterSituationFacture(
   grandLivre: SituationFacture, pieces: PieceReglement[], montant_ttc: number,
+  cible: CibleProjection = {},
 ): SituationFacture {
   const ttc = round2(nb(montant_ttc));
-  const payePieces = round2(pieces.reduce((s, p) => s + nb(p.montant), 0));
+  const recevables = paiementsRecevables(
+    { id: cible.id, numero: cible.numero, date_facture: cible.date_facture, montant_ttc: ttc },
+    (pieces ?? []).map((p) => ({
+      montant: nb(p.montant), date_paiement: p.date ?? null,
+      transaction_id: p.transaction_id ?? null, encaissement_id: p.encaissement_id ?? null,
+      reference: p.reference ?? null,
+    })),
+  );
+  const payePieces = round2(recevables.reduce((s, p) => s + nb(p.montant), 0));
   if (payePieces <= grandLivre.montant_paye + 0.005) return grandLivre;
 
-  const dates = pieces.map((p) => txt(p.date).slice(0, 10)).filter(Boolean).sort();
+  const dates = recevables.map((p) => txt(p.date_paiement).slice(0, 10)).filter(Boolean).sort();
   const paye = Math.max(0, Math.min(payePieces, ttc));
   return {
     ...grandLivre,
@@ -312,4 +423,68 @@ export function situationDivergente(
   return Math.abs(round2(nb(stocke.montant_paye) - calcule.montant_paye)) > 0.005
     || Math.abs(round2(nb(stocke.montant_restant) - calcule.montant_restant)) > 0.005
     || txt(stocke.statut_paiement) !== calcule.statut_paiement;
+}
+
+// ─── Cohérence du LETTRAGE ───────────────────────────────────────────────────
+//
+// Un code de lettrage rapproche une créance et son règlement : la somme de ses
+// lignes doit donc être NULLE. Quand elle ne l'est pas, le code ne rapproche
+// plus rien — il masque.
+//
+// C'est le pire des défauts silencieux, parce que le lettrage est ce qui fait
+// SORTIR une ligne de l'encours (`encoursTiersGrandLivre` ignore toute ligne
+// lettrée). Un code déséquilibré retire donc de l'encours une créance qui n'a
+// pas été réglée, sans qu'aucun contrôle de partie double ne bronche : le grand
+// livre reste équilibré dans son ensemble, seul le SOUS-ENSEMBLE lettré ne l'est
+// pas.
+//
+// Deux façons d'y arriver, toutes deux constatées :
+//   • un règlement PARTIEL lettré comme s'il soldait la facture ;
+//   • une écriture supprimée d'un côté du code et pas de l'autre — le geste
+//     exact qu'un délettrage incomplet produit.
+
+export interface LettrageIncoherent {
+  code: string;
+  /** Σ débits − Σ crédits des lignes portant ce code. Non nul = incohérent. */
+  ecart: number;
+  /** Nombre de lignes concernées. */
+  lignes: number;
+  /** Comptes touchés, pour situer le déséquilibre. */
+  comptes: string[];
+  message: string;
+}
+
+/**
+ * Codes de lettrage dont les lignes ne se soldent pas.
+ *
+ * Le contrôle porte sur TOUTES les lignes d'un code, tous comptes confondus :
+ * un lettrage se juge globalement, puisqu'il relie deux comptes différents
+ * (le tiers et la trésorerie).
+ */
+export function controlerEquilibreLettrage(
+  lignes: LigneGrandLivre[], seuil = 0.005,
+): LettrageIncoherent[] {
+  const parCode = new Map<string, LigneGrandLivre[]>();
+  for (const l of lignes ?? []) {
+    const code = txt(l.lettrage_code);
+    if (!code) continue;
+    const groupe = parCode.get(code) ?? [];
+    groupe.push(l);
+    parCode.set(code, groupe);
+  }
+
+  const anomalies: LettrageIncoherent[] = [];
+  for (const [code, groupe] of parCode) {
+    const ecart = round2(groupe.reduce((s, l) => s + nb(l.debit) - nb(l.credit), 0));
+    if (Math.abs(ecart) <= seuil) continue;
+    const comptes = [...new Set(groupe.map((l) => txt(l.compte_numero)))].sort();
+    anomalies.push({
+      code, ecart, lignes: groupe.length, comptes,
+      message: `Lettrage « ${code} » déséquilibré de ${ecart.toFixed(2)} MAD sur `
+        + `${groupe.length} ligne(s) (${comptes.join(", ")}). Un code lettré fait SORTIR `
+        + "ses lignes de l'encours : déséquilibré, il en retire une créance qui n'a pas "
+        + "été réglée, et la partie double du grand livre ne le voit pas.",
+    });
+  }
+  return anomalies.sort((a, b) => Math.abs(b.ecart) - Math.abs(a.ecart));
 }

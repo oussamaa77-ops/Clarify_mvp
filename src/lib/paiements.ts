@@ -71,9 +71,46 @@ export interface PaiementEnregistre {
 }
 
 /**
- * Enregistre un règlement. Idempotent : rejoue le même encaissement / la même ligne de
- * relevé ne crée pas de doublon (on purge d'abord le paiement de cette pièce). Le trigger
- * SQL recalcule montant_paye/montant_restant/statut de la facture.
+ * Un règlement refusé par les verrous de la base.
+ *
+ * Distingué d'une panne technique par une classe à part : le repli sur l'écriture
+ * directe des colonnes ne doit JAMAIS s'appliquer ici. Il réinstallerait
+ * exactement ce que le verrou vient d'écarter — un règlement antérieur à sa
+ * facture, un doublon, un dépassement — mais cette fois sans laisser de ligne
+ * dans `paiements`, donc sans aucune trace à auditer.
+ */
+export class ReglementRefuse extends Error {
+  constructor(message: string) { super(message); this.name = "ReglementRefuse"; }
+}
+
+/**
+ * L'erreur dit-elle « cette fonction n'existe pas » plutôt que « ce règlement est
+ * invalide » ?
+ *
+ * Le repli n'est légitime que dans le premier cas — migration pas encore
+ * appliquée. PostgREST rend `PGRST202` pour une RPC introuvable ; les refus
+ * métier remontent en `check_violation` (23514) avec le message du RAISE.
+ */
+function rpcAbsente(e: any): boolean {
+  const code = String(e?.code ?? "");
+  const msg = String(e?.message ?? "").toLowerCase();
+  if (code === "PGRST202" || code === "42883") return true;
+  return /could not find the function|does not exist|schema cache/.test(msg);
+}
+
+/**
+ * Enregistre un règlement — par la RPC ATOMIQUE quand elle existe.
+ *
+ * `enregistrer_reglement` fait la validation, l'insertion et le recalcul de la
+ * facture dans UNE transaction, et rend l'état final. La séquence précédente
+ * (delete, puis insert, puis relecture de la facture par l'appelant) n'était
+ * atomique à aucun moment : une coupure entre deux appels laissait durablement
+ * une facture payée sans paiement, ou l'inverse.
+ *
+ * Trois issues, et trois comportements distincts :
+ *   • RPC absente (migration pas encore appliquée) → ancien chemin, à l'identique ;
+ *   • règlement REFUSÉ par les verrous → on propage, sans aucun repli ;
+ *   • succès → idempotent, la même pièce rejouée rend l'état existant.
  */
 export async function enregistrerPaiement(sb: any, p: PaiementRef): Promise<PaiementEnregistre> {
   const fk = fkPaiement(p.table);
@@ -81,6 +118,31 @@ export async function enregistrerPaiement(sb: any, p: PaiementRef): Promise<Paie
   // le règlement qu'on vient de saisir, pas la ligne SQL qui l'a stocké.
   const piece = String(p.transactionId ?? p.encaissementId ?? p.reference
     ?? `${p.origine}:${p.factureId}:${p.date}`);
+
+  // `rpc` rend `{ error }` pour un refus SQL et ne LÈVE que sur panne de
+  // transport. Les deux se traitent différemment : un refus est une décision
+  // métier qu'on propage, une panne laisse sa chance à l'ancien chemin, qui
+  // échouera de la même façon s'il n'y a vraiment plus de réseau.
+  let refus: string | null = null;
+  try {
+    const { error } = await sb.rpc("enregistrer_reglement", {
+      p_dossier: p.dossierId,
+      p_facture: p.factureId,
+      p_kind: p.table === "factures" ? "client" : "fournisseur",
+      p_montant: r2(p.montant),
+      p_date: p.date,
+      p_origine: p.origine,
+      p_transaction: p.transactionId ?? null,
+      p_encaissement: p.encaissementId ?? null,
+      p_reference: p.reference ?? null,
+    });
+    if (!error) return { piece, via: "paiements" };
+    if (!rpcAbsente(error)) refus = String(error.message ?? error);
+  } catch {
+    // Transport : on retombe sur l'ancien chemin.
+  }
+  if (refus) throw new ReglementRefuse(refus);
+
   try {
     // Idempotence : par pièce (transaction / encaissement) ou, à défaut, par (facture, référence).
     if (p.transactionId) await sb.from("paiements").delete().eq("transaction_id", p.transactionId);

@@ -328,12 +328,86 @@ export function auditComptesSuspens(
   };
 }
 
+// ── Le résultat DÉFINITIF, et ce que l'attente lui retire ────────────────────
+
+export interface ResultatDefinitif {
+  /** Le résultat tel que la balance le donne aujourd'hui. */
+  provisoire: ResultatNet;
+  /** Σ des soldes 47* non apurés, en valeur absolue. */
+  enAttente: number;
+  /**
+   * Le résultat est-il DÉFINITIF ? `false` dès qu'un compte d'attente porte un
+   * solde : la charge ou le produit correspondant n'est pas encore imputé.
+   */
+  definitif: boolean;
+  /**
+   * Fourchette dans laquelle le résultat définitif tombera, une fois l'attente
+   * imputée. Bornes = provisoire ∓ l'attente, car on ignore de quel côté du
+   * compte de résultat elle ira — c'est justement ce qu'on ne sait pas.
+   */
+  borneBasse: number;
+  borneHaute: number;
+  /** Ce qu'il faut dire à l'écran ou en pied d'état. `null` si rien à signaler. */
+  reserve: string | null;
+}
+
+/**
+ * Le résultat, assorti de la RÉSERVE que les comptes d'attente lui imposent.
+ *
+ * ─── Pourquoi ne rien imputer d'office ──────────────────────────────────────
+ * Un solde de la classe 47 est de l'argent dont on ne sait pas encore la nature.
+ * Sur SMERT WATER, le 47120000 porte 41 500 MAD depuis le 31/07/2024 : un
+ * « ENCAISSEMENT EFFET N 7402907 TIRE SUR ATW », authentique — il figure sur un
+ * relevé — mais qui ne correspond au montant d'AUCUNE facture du dossier. Le
+ * ranger d'autorité en produit gonflerait le résultat de 41 500 MAD, en charge il
+ * le creuserait d'autant, et le lettrer sur une créance au prétexte qu'elle est
+ * du même ordre de grandeur fabriquerait un encaissement qui n'a pas eu lieu.
+ *
+ * Aucune de ces trois erreurs n'est meilleure que la quatrième option, la seule
+ * honnête : NE PAS L'IMPUTER, dire que le résultat n'est pas définitif, et donner
+ * la fourchette. Un chiffre assorti de sa réserve est utilisable ; un chiffre
+ * faux ne l'est pas.
+ *
+ * La fourchette est symétrique parce que l'ignorance l'est : tant que la pièce
+ * n'est pas retrouvée, l'encaissement peut aussi bien être un produit oublié
+ * qu'un remboursement de dette — le premier ajoute au résultat, le second n'y
+ * touche pas, et un avoir client le retrancherait.
+ */
+export function resultatDefinitif(balance: LigneBalance[]): ResultatDefinitif {
+  const provisoire = resultatNetBalance(balance);
+  const suspens = auditComptesSuspens(balance);
+  const enAttente = round2(suspens.total);
+
+  if (suspens.apure) {
+    return {
+      provisoire, enAttente: 0, definitif: true,
+      borneBasse: provisoire.resultat, borneHaute: provisoire.resultat, reserve: null,
+    };
+  }
+
+  const comptes = suspens.comptes.map((c) => c.compte).join(", ");
+  return {
+    provisoire, enAttente, definitif: false,
+    borneBasse: round2(provisoire.resultat - enAttente),
+    borneHaute: round2(provisoire.resultat + enAttente),
+    reserve:
+      `Résultat NON DÉFINITIF : ${enAttente.toFixed(2)} MAD restent en attente `
+      + `d'imputation (${comptes}). Tant que la pièce justificative n'est pas `
+      + `identifiée, le résultat se situe entre ${round2(provisoire.resultat - enAttente).toFixed(2)} `
+      + `et ${round2(provisoire.resultat + enAttente).toFixed(2)} MAD. `
+      + "Ce solde n'est imputé d'office nulle part : le ranger au hasard en produit "
+      + "ou en charge fausserait le résultat du même montant qu'il est censé corriger.",
+  };
+}
+
 export interface SyntheseBalance {
   sousTotaux: SousTotalClasse[];
   total: TotalGeneralBalance;
   resultat: ResultatNet;
   /** Contrôle d'audit des comptes d'attente (47*) — vide quand tout est apuré. */
   suspens: AuditSuspens;
+  /** Le résultat assorti de sa réserve d'attente (cf. `resultatDefinitif`). */
+  definitif: ResultatDefinitif;
 }
 
 /** Les blocs de pied de balance, calculés d'un seul appel. */
@@ -343,5 +417,6 @@ export function synthetiserBalance(balance: LigneBalance[]): SyntheseBalance {
     total: totalGeneralBalance(balance),
     resultat: resultatNetBalance(balance),
     suspens: auditComptesSuspens(balance),
+    definitif: resultatDefinitif(balance),
   };
 }

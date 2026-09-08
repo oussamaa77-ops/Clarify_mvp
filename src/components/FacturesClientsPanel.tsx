@@ -35,6 +35,11 @@ import {
   dateReglementFacture, formaterDateReglement, indexerDatesReglement,
   infobulleDateReglement, type DateReglement,
 } from "@/lib/date-reglement";
+import {
+  COMPTE_CLIENTS, caHtGrandLivre, encaissementsTiersGrandLivre, encoursTiersGrandLivre,
+  type LigneGrandLivre,
+} from "@/lib/encours-grandlivre";
+import { sansANouveaux } from "@/lib/a-nouveaux";
 import { toast } from "sonner";
 
 interface Ligne { designation: string; quantite: number; prix_unitaire: number; taux_tva: number }
@@ -170,6 +175,10 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
   const pdfA3Fn  = useServerFn(genererPdfA3Facture);
 
   const [factures, setFactures] = useState<Facture[]>([]);
+  // Grand livre des comptes de TIERS et de PRODUITS : la source des trois KPI
+  // du bandeau. Sans lui, ils ne seraient que des agrégats des colonnes de
+  // `factures` — c'est-à-dire d'une projection, pas de la comptabilité.
+  const [grandLivre, setGrandLivre] = useState<LigneGrandLivre[]>([]);
   const [clients, setClients]   = useState<Client[]>([]);
   // Filtres du tableau (recherche, statut, client, période).
   const [criteres, setCriteres] = useState<CriteresFiltre>({
@@ -227,7 +236,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     // Les deux dernières requêtes portent les PIÈCES de règlement (ligne de relevé
     // lettrée, encaissement saisi) : c'est d'elles que se déduit le mode de
     // paiement réellement constaté — cf. src/lib/mode-paiement.ts.
-    const [{data:f},{data:c},{data:tx},{data:enc},{data:pai},{data:dos}] = await Promise.all([
+    const [{data:f},{data:c},{data:tx},{data:enc},{data:pai},{data:dos},{data:gl}] = await Promise.all([
       supabase.from("factures").select("*").eq("dossier_id",dossierId).order("date_facture",{ascending:false}),
       supabase.from("clients").select("id,nom,ice,email,compte_produit_defaut")
         .eq("dossier_id",dossierId).is("deleted_at",null).order("nom"),
@@ -243,10 +252,18 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
         .select("facture_id,date_paiement,montant").eq("dossier_id",dossierId).not("facture_id","is",null),
       // Secteur d'activité du dossier — alimente le fallback sectoriel du moteur.
       supabase.from("dossiers").select("secteur_activite").eq("id",dossierId).single(),
+      // Comptes CLIENTS (342x) et de PRODUITS (classe 7). `lettrage_code` est
+      // indispensable : c'est lui qui distingue un poste ouvert d'une créance soldée.
+      supabase.from("ecritures_comptables")
+        .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
+        .eq("dossier_id",dossierId).or("compte_numero.like.342%,compte_numero.like.7%"),
     ]);
     setFactures((f??[]) as unknown as Facture[]);
     setClients(c??[]);
     setSecteurActivite(dos?.secteur_activite ?? null);
+    // Les à-nouveaux reportent des soldes que les lignes d'origine portent déjà :
+    // les garder dans une lecture CUMULÉE compterait deux fois le même encours.
+    setGrandLivre(sansANouveaux((gl ?? []) as LigneGrandLivre[]));
     setModes(indexerModesPaiement("client",{ transactions: tx ?? [], encaissements: enc ?? [] }));
     // `paiements` peut manquer tant que la migration n'est pas appliquée : le
     // `?? []` suffit, `dateReglementFacture` retombe alors sur factures.date_paiement.
@@ -707,14 +724,33 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     [factures, criteres, clients],
   );
 
-  // KPIs
+  // ── KPIs : la COMPTABILITÉ d'abord, les colonnes en repli ──────────────────
+  // Les trois chiffres se lisaient dans `factures` : Σ montant_ht, Σ montant_paye,
+  // Σ montant_restant. Trois agrégats d'une projection, présentés comme des
+  // données comptables — et faux dès que la projection retarde sur le grand livre.
+  // Sur SMERT WATER, « CA HT encaissé » annonçait le HT de trois factures dont
+  // DEUX n'ont jamais été encaissées.
+  //
+  // Le repli sur les colonnes n'est pas un compromis : sur un dossier non encore
+  // comptabilisé, elles sont la seule donnée existante, et afficher 0 y serait
+  // plus faux que de les montrer.
   const conformes  = factures.filter(f=>f.statut==="conforme");
-  // CA HT = factures standard conformes (les acomptes vont en 4191, pas en CA)
-  const caHT       = conformes.filter(f=>f.type!=="acompte").reduce((s,f)=>s+Number(f.montant_ht),0);
-  // CA encaissé = factures standard partielles ou payées
-  const caEncaisse = conformes.filter(f=>f.type!=="acompte"&&f.statut_paiement!=="non_payee").reduce((s,f)=>s+Number(f.montant_paye??0),0);
-  // Encours = montant_restant de toutes les factures non soldées (acomptes + standard)
-  const encours    = conformes.filter(f=>f.statut_paiement!=="payee").reduce((s,f)=>s+Number(f.montant_restant??f.montant_ttc),0);
+  const caGL       = caHtGrandLivre(grandLivre);
+  const caHT       = caGL.comptabilise
+    ? caGL.montant
+    : conformes.filter(f=>f.type!=="acompte").reduce((s,f)=>s+Number(f.montant_ht),0);
+  // Encaissements = CRÉDITS du 342x en journal de trésorerie, c'est-à-dire la
+  // contrepartie du débit de banque ou de caisse : l'argent réellement entré.
+  const encaisseGL = encaissementsTiersGrandLivre(grandLivre, COMPTE_CLIENTS);
+  const caEncaisse = encaisseGL.comptabilise
+    ? encaisseGL.montant
+    : conformes.filter(f=>f.type!=="acompte"&&f.statut_paiement!=="non_payee").reduce((s,f)=>s+Number(f.montant_paye??0),0);
+  // Encours = postes DÉBITEURS non lettrés du 342x, sans jamais compenser
+  // l'avance d'un client par la dette d'un autre.
+  const encoursGL  = encoursTiersGrandLivre(grandLivre, COMPTE_CLIENTS);
+  const encours    = grandLivre.some(l=>String(l.compte_numero??"").startsWith(COMPTE_CLIENTS))
+    ? encoursGL.total
+    : conformes.filter(f=>f.statut_paiement!=="payee").reduce((s,f)=>s+Number(f.montant_restant??f.montant_ttc),0);
   const enAnalyse  = factures.filter(f=>f.statut==="envoyee"||f.statut_dgi==="en_analyse").length;
   // Échéances dépassées avec un reste à encaisser — le chiffre qui déclenche la relance.
   const enRetard   = factures.filter(f =>
@@ -959,7 +995,7 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
       <div className="grid grid-cols-3 xl:grid-cols-6 gap-3">
         {[
           {label:"CA HT facturé",value:fmt(caHT),color:"text-green-600"},
-          {label:"CA HT encaissé",value:fmt(caEncaisse),color:"text-emerald-600"},
+          {label:"Encaissements clients",value:fmt(caEncaisse),color:"text-emerald-600"},
           {label:"Encours clients",value:fmt(encours),color:"text-blue-600"},
           {label:"Échéances dépassées",value:String(enRetard),color:enRetard>0?"text-red-600":"text-muted-foreground"},
           {label:"En analyse DGI",value:String(enAnalyse),color:"text-yellow-600"},

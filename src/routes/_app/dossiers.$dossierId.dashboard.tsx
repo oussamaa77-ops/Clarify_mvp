@@ -19,7 +19,8 @@ import { identifierBanque, identifierBanqueParNom, maskRib } from "@/lib/bank-id
 import { BankLogo } from "@/components/BankLogo";
 import { logAudit } from "@/lib/audit";
 import {
-  COMPTE_CLIENTS, encoursTiersGrandLivre, soldeBancaireAffiche, type LigneGrandLivre,
+  COMPTE_CLIENTS, caHtGrandLivre, encaissementsTiersGrandLivre, encoursTiersGrandLivre,
+  soldeBancaireAffiche, type LigneGrandLivre,
 } from "@/lib/encours-grandlivre";
 import {
   bornesExercice, dansExercice, exerciceCourant, exercicesDisponibles,
@@ -179,20 +180,42 @@ function DashboardPage() {
   const facturesExercice = factures.filter(f => dansExercice(f.date_facture, bornes));
   const conformes = facturesExercice.filter(f => f.statut === "conforme");
 
-  // CA HT = factures standard conformes uniquement (acompte → 4191, pas CA)
-  const caHT = conformes
+  // ── CA HT : les CRÉDITS DE CLASSE 7, pas la somme des colonnes ─────────────
+  // Σ `montant_ht` est un agrégat de la projection commerciale ; les crédits nets
+  // de la classe 7 sont le chiffre d'affaires comptable, celui de la liasse. Ils
+  // ne coïncident que si toute facture conforme est comptabilisée — et c'est
+  // précisément ce que le rapprochement (a) de `coherence-ventes.ts` contrôle.
+  //
+  // Repli sur les factures tant qu'aucune écriture de produit n'existe : un
+  // dossier non comptabilisé afficherait sinon 0 de CA en ayant facturé.
+  const caFactures = conformes
     .filter(f => f.type !== "acompte")
     .reduce((s, f) => s + Number(f.montant_ht), 0);
+  const caGL = caHtGrandLivre(ecrExploitation as LigneGrandLivre[]);
+  const caHT = caGL.comptabilise ? caGL.montant : caFactures;
 
-  // CA TTC facturé (hors acomptes)
+  // CA TTC facturé (hors acomptes) — reste une donnée de FACTURATION, pas de
+  // comptabilité : aucun compte ne porte le TTC, qui mêle produit et TVA.
   const caTTC = conformes
     .filter(f => f.type !== "acompte")
     .reduce((s, f) => s + Number(f.montant_ttc), 0);
 
-  // CA encaissé = factures standard payées ou partielles (pas les acomptes)
-  const caEncaisse = conformes
-    .filter(f => f.type !== "acompte" && f.statut_paiement !== "non_payee")
-    .reduce((s, f) => s + Number(f.montant_paye ?? 0), 0);
+  // ── Encaissements clients : ce que les journaux de trésorerie ont crédité ──
+  // Auparavant : Σ des `montant_paye` des factures non « non_payee ». Ce chiffre
+  // ne venait d'aucun journal — sur SMERT WATER il annonçait 102 972 MAD, soit
+  // le TTC de trois factures dont DEUX n'ont jamais été encaissées, quand la
+  // comptabilité n'en portait que 21 000.
+  //
+  // On lit maintenant le CRÉDIT du 342x en journal BQ/CAI : la contrepartie du
+  // débit de banque ou de caisse, c'est-à-dire l'argent réellement entré.
+  // FLUX, donc borné à l'exercice, comme le CA auquel on le compare.
+  const encaissementsGL = encaissementsTiersGrandLivre(
+    ecrTiers.filter(l => dansExercice(l.date_ecriture, bornes)), COMPTE_CLIENTS);
+  const caEncaisse = encaissementsGL.comptabilise
+    ? encaissementsGL.montant
+    : conformes
+        .filter(f => f.type !== "acompte" && f.statut_paiement !== "non_payee")
+        .reduce((s, f) => s + Number(f.montant_paye ?? 0), 0);
 
   // ── Encours clients : les postes OUVERTS du compte 3421 au grand livre ──────
   // Auparavant : Σ des `montant_restant` des factures non soldées. Ce chiffre ne
@@ -354,8 +377,17 @@ function DashboardPage() {
   });
 
   const kpis = [
-    { icon: TrendingUp, label: "CA HT facturé (conformes DGI)", value: fmt(caHT), sub: `TTC: ${fmt(caTTC)}`, color: "text-green-600" },
-    { icon: Wallet, label: "CA encaissé (payé + partiel)", value: fmt(caEncaisse), color: "text-emerald-600" },
+    { icon: TrendingUp, label: "CA HT facturé (conformes DGI)", value: fmt(caHT),
+      sub: caGL.comptabilise
+        ? `Crédits de classe 7 · TTC facturé : ${fmt(caTTC)}`
+          + (Math.abs(caGL.montant - caFactures) > 0.005 ? ` · ${fmt(Math.abs(caGL.montant - caFactures))} non comptabilisés` : "")
+        : `Non comptabilisé · TTC: ${fmt(caTTC)}`,
+      color: "text-green-600" },
+    { icon: Wallet, label: "Encaissements clients", value: fmt(caEncaisse),
+      sub: encaissementsGL.comptabilise
+        ? `Crédits du ${COMPTE_CLIENTS} en journal de trésorerie`
+        : "Aucune écriture de trésorerie — montants portés par les factures",
+      color: "text-emerald-600" },
     {
       icon: FileText, label: "Encours clients (restant à encaisser)", value: fmt(encours),
       // On dit d'où vient le chiffre : « 3421 non lettré » est vérifiable au
