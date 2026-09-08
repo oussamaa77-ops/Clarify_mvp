@@ -64,6 +64,7 @@ import {
   rapprocherCaProduits, rapprocherEncoursClients,
 } from "../src/lib/coherence-ventes";
 import { sansANouveaux } from "../src/lib/a-nouveaux";
+import { reservesDuDossier } from "./reserves-audit";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -464,6 +465,40 @@ async function main(): Promise<number> {
         for (const g of x.griefs) console.log(`        • ${g}`);
       }
     }
+  }
+
+  // ── RÉSERVES MÉTIER ────────────────────────────────────────────────────
+  // Les arbitrages en attente : la comptabilité est cohérente, mais elle repose
+  // sur une hypothèse à confirmer. Affichées à CHAQUE exécution — une réserve
+  // signalée une seule fois dans un compte rendu disparaît avec le compte rendu.
+  //
+  // Elles ne changent AUCUN verdict et n'affectent PAS le code de sortie : les
+  // 7 règles portent sur des impossibilités comptables, et elles sont
+  // respectées. Les mêler rendrait l'audit impossible à passer au vert, donc
+  // inutilisable comme garde-fou automatisé.
+  const reserves = resultats.flatMap(({ dossier }) =>
+    reservesDuDossier(dossier.nom_societe).map((r) => ({ dossier, r })));
+  if (reserves.length) {
+    console.log(`
+${"═".repeat(barre.length)}`);
+    console.log(`  ⚑ RÉSERVES MÉTIER — ${reserves.length} arbitrage(s) en attente`);
+    console.log("═".repeat(barre.length));
+    for (const { dossier, r } of reserves) {
+      console.log(`
+  ▸ ${txt(dossier.nom_societe)} — ${r.piece}`);
+      console.log(`    ouverte le ${r.ouverteLe}`);
+      console.log("    CONSTAT");
+      for (const c of r.constat) console.log(`      · ${c}`);
+      console.log(`    ENJEU`);
+      console.log(`      ${r.enjeu}`);
+      console.log("    ARBITRAGE ATTENDU");
+      for (const o of r.options) console.log(`      → ${o}`);
+      if (r.rollback) console.log(`    ROLLBACK
+      ${r.rollback}`);
+    }
+    console.log(`
+  Ces réserves ne font pas échouer l'audit. Elles disparaîtront de ce`);
+    console.log(`  rapport quand leur entrée sera retirée de scripts/reserves-audit.ts.`);
   }
 
   if (DETAIL) {
