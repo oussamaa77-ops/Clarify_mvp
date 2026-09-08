@@ -55,8 +55,8 @@ import {
 } from "../src/lib/encours-grandlivre";
 import { controlerCoherenceMontants } from "../src/lib/tva";
 import {
-  clePiece, grouperEnEcritures, ecartPartieDouble, origineEcritureTresorerie,
-  type LigneTresorerie,
+  clePiece, cleEcritureTresorerie, estJournalTresorerie, grouperEnEcritures,
+  ecartPartieDouble, origineEcritureTresorerie, type LigneTresorerie,
 } from "../src/lib/integrite-tresorerie";
 import {
   controlerMouvementsTvaDue, controlerPreuveBascule, controlerSensReglement,
@@ -215,14 +215,81 @@ async function controlerDossier(d: any): Promise<Station[]> {
       ...((enc ?? []) as any[]).map((e) => clePiece(e.date_encaissement, nb(e.montant))),
     ],
   };
+  // ── Les mouvements dont la pièce n'est PAS bancaire ───────────────────────
+  //
+  // `piecesManuelles` se construit exclusivement depuis `paiements` et
+  // `encaissements` — deux tables rattachées à des FACTURES. Un apport en compte
+  // courant d'associé, un prélèvement, une libération de capital ne peuvent donc
+  // JAMAIS y figurer : le contrôle les dénonçait tous comme trésorerie fictive,
+  // quel que soit leur bien-fondé. C'est une lacune de catégorie, pas un verdict.
+  //
+  // Ces mouvements se reconnaissent à leur CONTREPARTIE dans la même écriture :
+  // un compte d'associé ou de capital. Leur pièce justificative existe, mais
+  // c'est un reçu de caisse ou un acte, pas une ligne de relevé.
+  //
+  // Ils restent AFFICHÉS, en information : « pas de pièce bancaire » est vrai et
+  // doit se voir. Ce qui change, c'est qu'on cesse de les compter comme des
+  // écritures fantômes — un contrôle qui crie sur un apport régulier finit par
+  // n'être plus lu, et c'est alors la vraie trésorerie fictive qui passe.
+  const RACINES_APPORT = ["3461", "4461", "4465", "111"];
+  const estApport = (compte: unknown) =>
+    RACINES_APPORT.some((r) => txt(compte).startsWith(r));
+
+  const parEcriture = new Map<string, LigneTresorerie[]>();
+  for (const l of lignes as LigneTresorerie[]) {
+    if (!estJournalTresorerie(l.journal_code)) continue;
+    const cle = cleEcritureTresorerie(l);
+    parEcriture.set(cle, [...(parEcriture.get(cle) ?? []), l]);
+  }
+
   for (const l of lignes as LigneTresorerie[]) {
     const v = origineEcritureTresorerie(l, contexte);
-    if (!v.ok) {
-      s3.griefs.push(
-        `${jour(l.date_ecriture)} ${txt(l.journal_code)} ${txt(l.compte_numero)} `
-        + `${fmt(Math.max(nb(l.debit), nb(l.credit)))} — ${v.raison}`);
+    if (v.ok) continue;
+    const groupe = parEcriture.get(cleEcritureTresorerie(l)) ?? [l];
+    const ligneApport = groupe.find((x) => estApport(x.compte_numero));
+    const detail = `${jour(l.date_ecriture)} ${txt(l.journal_code)} ${txt(l.compte_numero)} `
+      + `${fmt(Math.max(nb(l.debit), nb(l.credit)))}`;
+    if (ligneApport) {
+      s3.info.push(
+        `${detail} — mouvement d'APPORT / PRÉLÈVEMENT (contrepartie ${txt(ligneApport.compte_numero)}), `
+        + "sans pièce bancaire : c'est normal, sa justification est un reçu de caisse ou un acte. "
+        + "À conserver au dossier — aucune ligne de relevé ne l'attestera jamais.");
+    } else {
+      s3.griefs.push(`${detail} — ${v.raison}`);
     }
   }
+  // ── La CAISSE ne peut pas être créditrice ─────────────────────────────────
+  //
+  // On ne décaisse pas des espèces qu'on n'a pas. Un solde créditeur au 516 est
+  // la preuve ARITHMÉTIQUE qu'une entrée de fonds a eu lieu sans être
+  // comptabilisée — c'est l'un des rares cas où l'absence d'une écriture se
+  // démontre par le calcul seul.
+  //
+  // La BANQUE est exclue à dessein : un 514 créditeur est un découvert, c'est-à-
+  // dire une situation régulière. Les traiter pareil signalerait le cas normal.
+  //
+  // Le contrôle est CHRONOLOGIQUE, pas sur le solde final : une caisse qui plonge
+  // en cours d'année et se rétablit avant la clôture a bel et bien été
+  // impossible, et le solde de clôture n'en garde aucune trace.
+  const mouvementsCaisse = (lignes as LigneTresorerie[])
+    .filter((l) => txt(l.compte_numero).startsWith("516"))
+    .sort((a, b) => jour(a.date_ecriture).localeCompare(jour(b.date_ecriture)));
+
+  let cumulCaisse = 0;
+  let pire = { solde: 0, date: "" };
+  for (const l of mouvementsCaisse) {
+    cumulCaisse = r2(cumulCaisse + nb(l.debit) - nb(l.credit));
+    if (cumulCaisse < pire.solde) pire = { solde: cumulCaisse, date: jour(l.date_ecriture) };
+  }
+  if (pire.solde < -0.005) {
+    s3.griefs.push(
+      `Caisse CRÉDITRICE : le solde descend à ${fmt(pire.solde)} MAD au ${pire.date} `
+      + `(solde de clôture ${fmt(cumulCaisse)}). On ne décaisse pas des espèces qu'on n'a pas — `
+      + `il manque une entrée de fonds d'au moins ${fmt(-pire.solde)} MAD. `
+      + "À régulariser par `scripts/alimenter-caisse.ts` (apport en compte courant d'associé), "
+      + "ou en retrouvant l'encaissement qui n'a jamais été saisi.");
+  }
+
   // Liens bancaires impossibles : une ligne de relevé rattachée à une facture
   // qu'elle PRÉCÈDE. C'est ce que la vue v_liens_bancaires_impossibles expose.
   const parFacture = new Map(factures.map((f) => [txt(f.id), f]));
