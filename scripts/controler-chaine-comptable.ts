@@ -271,15 +271,24 @@ async function controlerDossier(d: any): Promise<Station[]> {
   // Le contrôle est CHRONOLOGIQUE, pas sur le solde final : une caisse qui plonge
   // en cours d'année et se rétablit avant la clôture a bel et bien été
   // impossible, et le solde de clôture n'en garde aucune trace.
+  // Le cumul est pris en FIN DE JOURNÉE, jamais ligne à ligne : une caisse se
+  // compte le soir, et l'ordre des écritures dans un même jour n'a pas de sens
+  // comptable. S'y fier ferait dépendre le verdict de l'ordre de retour de la
+  // base — un apport et le décaissement qu'il finance, saisis le même jour,
+  // seraient déclarés impossibles une fois sur deux.
   const mouvementsCaisse = (lignes as LigneTresorerie[])
-    .filter((l) => txt(l.compte_numero).startsWith("516"))
-    .sort((a, b) => jour(a.date_ecriture).localeCompare(jour(b.date_ecriture)));
+    .filter((l) => txt(l.compte_numero).startsWith("516"));
 
+  const caisseParJour = new Map<string, number>();
+  for (const l of mouvementsCaisse) {
+    const j = jour(l.date_ecriture);
+    caisseParJour.set(j, (caisseParJour.get(j) ?? 0) + nb(l.debit) - nb(l.credit));
+  }
   let cumulCaisse = 0;
   let pire = { solde: 0, date: "" };
-  for (const l of mouvementsCaisse) {
-    cumulCaisse = r2(cumulCaisse + nb(l.debit) - nb(l.credit));
-    if (cumulCaisse < pire.solde) pire = { solde: cumulCaisse, date: jour(l.date_ecriture) };
+  for (const j of [...caisseParJour.keys()].sort()) {
+    cumulCaisse = r2(cumulCaisse + (caisseParJour.get(j) ?? 0));
+    if (cumulCaisse < pire.solde) pire = { solde: cumulCaisse, date: j };
   }
   if (pire.solde < -0.005) {
     s3.griefs.push(

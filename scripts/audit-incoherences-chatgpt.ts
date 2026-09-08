@@ -230,15 +230,24 @@ async function auditerDossier(d: any): Promise<Record<string, Verdict>> {
   // ── R2 : CAISSE ≥ 0 CHRONOLOGIQUEMENT ────────────────────────────────────
   // Sur le solde de CLÔTURE seul, une caisse qui plonge en cours d'année et se
   // rétablit ne laisse aucune trace. Elle a pourtant été impossible.
-  const mvtCaisse = lignes
-    .filter((l) => relevantDe(l.compte_numero, "516"))
-    .sort((a, b) => jour(a.date_ecriture).localeCompare(jour(b.date_ecriture)));
+  //
+  // Le cumul est pris en FIN DE JOURNÉE, jamais ligne à ligne. Une caisse se
+  // compte le soir : l'ordre des écritures à l'intérieur d'un même jour n'a
+  // aucun sens comptable. S'y fier ferait dépendre le verdict de l'ordre de
+  // retour de la base — un apport et le décaissement qu'il finance, saisis le
+  // même jour, seraient déclarés impossibles une fois sur deux.
+  const mvtCaisse = lignes.filter((l) => relevantDe(l.compte_numero, "516"));
   if (!mvtCaisse.length) v.R2 = VIDE();
   else {
-    let cumul = 0, pire = { solde: 0, date: "" };
+    const parJour = new Map<string, number>();
     for (const l of mvtCaisse) {
-      cumul = r2(cumul + nb(l.debit) - nb(l.credit));
-      if (cumul < pire.solde) pire = { solde: cumul, date: jour(l.date_ecriture) };
+      const j = jour(l.date_ecriture);
+      parJour.set(j, (parJour.get(j) ?? 0) + nb(l.debit) - nb(l.credit));
+    }
+    let cumul = 0, pire = { solde: 0, date: "" };
+    for (const j of [...parJour.keys()].sort()) {
+      cumul = r2(cumul + (parJour.get(j) ?? 0));
+      if (cumul < pire.solde) pire = { solde: cumul, date: j };
     }
     const mesure = `min ${fmt(pire.solde)} · clôture ${fmt(cumul)}`;
     v.R2 = pire.solde < -EPS

@@ -71,6 +71,7 @@ const APPLY = flag("apply") !== undefined;
 const ROLLBACK = flag("rollback");
 const DATE = flag("date") || null;
 const LIBELLE = flag("libelle") || null;
+const COMPTE = flag("compte") || null;
 
 /**
  * Caisse et contrepartie, en forme canonique sur 8 chiffres.
@@ -81,7 +82,7 @@ const LIBELLE = flag("libelle") || null;
  * export Sage refusé.
  */
 const COMPTE_CAISSE = normaliserNumeroCompte("5161");
-const COMPTE_ASSOCIE = normaliserNumeroCompte("4461");
+const COMPTE_ASSOCIE_DEFAUT = normaliserNumeroCompte("4461");
 const JOURNAL_CAISSE = "CAI";
 const PREFIXE_PIECE = "APPORT-CAISSE-";
 
@@ -138,6 +139,32 @@ async function corriger(): Promise<number> {
     !CIBLE || txt(d.nom_societe).toLowerCase().includes(CIBLE.toLowerCase()));
   if (!cibles.length) { console.error(`Aucun dossier ne correspond à « ${CIBLE} ».`); return 2; }
 
+  // ── Contrepartie : paramétrable, mais VALIDÉE contre le plan comptable ────
+  //
+  // Un numéro absent du référentiel PCM produit une ligne de balance sans
+  // intitulé, une ventilation muette et un export Sage refusé. Le script accepte
+  // donc `--compte`, mais refuse ce que le plan ne connaît pas — et le dit, en
+  // proposant la racine la plus proche plutôt qu'en échouant sèchement.
+  const compteAssocie = normaliserNumeroCompte(COMPTE || COMPTE_ASSOCIE_DEFAUT);
+  {
+    const racine = compteAssocie.replace(/0+$/, "");
+    const { data: plan } = await sb.from("pcm_reference").select("numero,intitule")
+      .or(`numero.eq.${compteAssocie},numero.eq.${racine}`);
+    if (!(plan ?? []).length) {
+      const { data: voisins } = await sb.from("pcm_reference").select("numero,intitule")
+        .like("numero", `${racine.slice(0, 3)}%`).order("numero").limit(6);
+      console.error(
+        `\n✗ Le compte ${compteAssocie} n'existe pas au référentiel PCM du projet.`
+        + "\n  L'écrire produirait une ligne de balance sans intitulé et un export Sage refusé."
+        + (voisins?.length
+          ? `\n\n  Comptes disponibles sur cette racine :\n`
+            + voisins.map((c: any) => `    ${String(c.numero).padEnd(10)} ${c.intitule}`).join("\n")
+          : ""));
+      return 2;
+    }
+    console.log(`   Contrepartie : ${compteAssocie} — ${(plan ?? [])[0]?.intitule ?? ""}`);
+  }
+
   let aCorriger = 0;
 
   for (const d of cibles) {
@@ -156,22 +183,62 @@ async function corriger(): Promise<number> {
         + `D=${fmt(nb(l.debit))} C=${fmt(nb(l.credit))}  ${txt(l.libelle).slice(0, 46)}`);
     }
 
-    if (solde >= -0.005) { console.log("   ✓ Caisse non créditrice — rien à faire."); continue; }
+    // ── Le déficit à couvrir est le CREUX, pas le solde de clôture ───────────
+    //
+    // Première version de ce script : `montant = -solde`, le solde final. Faux
+    // dès qu'un encaissement postérieur vient combler une partie du trou. Sur
+    // SOMADIR, la caisse plonge à −20 160,00 le 04/05 puis remonte à −5 412,00
+    // par deux encaissements de mai et juillet. Injecter 5 412 aurait laissé
+    // −14 748,00 au 04/05 : la caisse serait restée impossible, et le contrôle
+    // aurait continué d'échouer après une correction réputée faite.
+    //
+    // Le montant juste est donc le creux MAXIMAL, et la date celle où il se
+    // produit. C'est aussi le montant MINIMAL qui rende la caisse possible à
+    // tout instant : un dirham de moins et elle repasse sous zéro, un dirham de
+    // plus et on affirme une encaisse que rien ne démontre.
+    //
+    // Les soldes sont pris en FIN DE JOURNÉE. Une caisse se compte le soir ;
+    // l'ordre des écritures à l'intérieur d'un même jour n'a pas de sens
+    // comptable, et s'y fier ferait dépendre le verdict de l'ordre de retour
+    // de la base.
+    const parJour = new Map<string, number>();
+    for (const l of lignesCaisse) {
+      const j = jour(l.date_ecriture);
+      parJour.set(j, (parJour.get(j) ?? 0) + nb(l.debit) - nb(l.credit));
+    }
+    let cumul = 0;
+    let creux = { solde: 0, date: "" };
+    for (const j of [...parJour.keys()].sort()) {
+      cumul = r2(cumul + (parJour.get(j) ?? 0));
+      if (cumul < creux.solde) creux = { solde: cumul, date: j };
+    }
 
-    // L'apport couvre EXACTEMENT le déficit, jamais davantage : un apport plus
-    // large créerait une encaisse dont rien ne prouve l'existence.
-    const montant = r2(-solde);
-    // Date : par défaut le jour du premier mouvement qui rend la caisse
-    // créditrice — l'assertion MINIMALE, celle que le solde démontre. Une date
-    // antérieure reste admissible et se passe en `--date`.
-    const premierDecaissement = lignesCaisse.find((l) => nb(l.credit) > 0.005);
-    const dateApport = DATE || jour(premierDecaissement?.date_ecriture) || jour(lignesCaisse[0].date_ecriture);
+    if (creux.solde >= -0.005) {
+      console.log("   ✓ Caisse jamais créditrice — rien à faire.");
+      continue;
+    }
+    console.log(`   Creux maximal : ${fmt(creux.solde)} MAD au ${creux.date}.`);
+
+    const montant = r2(-creux.solde);
+    // Date : le jour du creux. L'apport doit être en place AVANT le décaissement
+    // qu'il finance ; le dater plus tard laisserait la caisse négative entre-temps.
+    const dateApport = DATE || creux.date;
+    if (dateApport > creux.date) {
+      console.error(`   ✗ Date ${dateApport} POSTÉRIEURE au creux du ${creux.date} : `
+        + "l'apport ne couvrirait pas le décaissement qu'il est censé financer.");
+      return 2;
+    }
     const reference = `${PREFIXE_PIECE}${dateApport}`;
 
     // Le libellé nomme le règlement que l'apport a permis, quand on peut
     // l'identifier : un apport sans motif est un apport qu'on ne saura pas
     // justifier dans six mois.
-    const motif = txt(premierDecaissement?.libelle).replace(/^Décaissement espèces\s*/i, "");
+    // Le libellé nomme le décaissement que l'apport a financé, quand on peut
+    // l'identifier : un apport sans motif est un apport qu'on ne saura pas
+    // justifier dans six mois.
+    const decaissementDuCreux = lignesCaisse.find(
+      (l) => jour(l.date_ecriture) === creux.date && nb(l.credit) > 0.005);
+    const motif = txt(decaissementDuCreux?.libelle).replace(/^(Décaissement espèces|Paiement)\s*/i, "");
     const libelle = LIBELLE || (motif
       ? `Alimentation caisse pour règlement ${motif}`
       : "Alimentation caisse — apport en compte courant d'associé");
@@ -179,15 +246,15 @@ async function corriger(): Promise<number> {
     const lignes = [
       { journal_code: JOURNAL_CAISSE, compte_numero: COMPTE_CAISSE, date_ecriture: dateApport,
         libelle, debit: montant, credit: 0, reference_piece: reference },
-      { journal_code: JOURNAL_CAISSE, compte_numero: COMPTE_ASSOCIE, date_ecriture: dateApport,
+      { journal_code: JOURNAL_CAISSE, compte_numero: compteAssocie, date_ecriture: dateApport,
         libelle, debit: 0, credit: montant, reference_piece: reference },
     ];
 
     console.log(`\n   → APPORT PROPOSÉ  (pièce ${reference})`);
     console.log(`     ${dateApport} ${JOURNAL_CAISSE}  D ${COMPTE_CAISSE} ${fmt(montant)}`);
-    console.log(`     ${dateApport} ${JOURNAL_CAISSE}  C ${COMPTE_ASSOCIE} ${fmt(montant)}`);
+    console.log(`     ${dateApport} ${JOURNAL_CAISSE}  C ${compteAssocie} ${fmt(montant)}`);
     console.log(`     « ${libelle} »`);
-    console.log(`     Caisse après apport : ${fmt(r2(solde + montant))} MAD`);
+    console.log(`     Caisse après apport : creux ${fmt(r2(creux.solde + montant))} · clôture ${fmt(r2(solde + montant))} MAD`);
     aCorriger++;
 
     // Pièce déjà posée : on ne la repose pas. Sans cette garde, deux exécutions
