@@ -20,6 +20,12 @@
     "test:e2e:ui": "playwright test --ui",
     "test:perf": "playwright test && npm run allure:report",
     "test:e2e:clean": "node --import tsx e2e/seed.ts --clean",
+    "seed:golden": "node --import tsx scripts/seed-golden-dossier.ts",
+    "seed:golden:clean": "node --import tsx scripts/seed-golden-dossier.ts --clean",
+    "test:chaos": "vitest run --config vitest.golden.config.ts tests/accounting-chaos.test.ts",
+    "test:concurrency": "vitest run --config vitest.golden.config.ts tests/concurrency-locks.test.ts",
+    "audit:banc": "node --import tsx scripts/audit-incoherences-chatgpt.ts",
+    "audit:full": "node --import tsx scripts/audit-full.ts",
     "allure:generate": "allure generate allure-results --clean -o allure-report",
     "allure:report": "allure generate allure-results --clean -o allure-report && allure open allure-report"
   },

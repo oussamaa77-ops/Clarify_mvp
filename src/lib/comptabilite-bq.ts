@@ -12,56 +12,78 @@
 import {
   COMPTE_CAISSE_DEFAUT, compteCaisse, type ComptesTresorerieDossier,
 } from "@/lib/comptes-tresorerie";
+import { PCM, validatePcmAccount } from "@/lib/pcm-referentiel";
+
+/**
+ * Comptes dont l'imputation reste À VALIDER par l'expert-comptable : conservés
+ * tels quels (données historiques), mais nommés pour ne pas passer pour acquis.
+ *   61241 carburant — le code emploie 5 comptes pour la même dépense (61241,
+ *         61223, 6122, 61251, 61411) ; 6124 n'est pas un compte d'achats.
+ *   6347  frais bancaires — `pcm_reference` l'intitule « frais d'escompte » ;
+ *         les services bancaires sont en 6147. La déclaration EDI en dépend.
+ *   6146  droits de douane — 6146 est « Cotisations et dons ».
+ */
+export const COMPTE_CARBURANT_A_VALIDER = "61241";
+export const COMPTE_FRAIS_BANCAIRES_A_VALIDER = "6347";
+export const COMPTE_DOUANE_A_VALIDER = "6146";
 
 // PCM_MAP selon CGI Art.106 — TVA déductible ou non au Maroc
 export const PCM_MAP: Record<string, { code: string; tva: number }> = {
-  encaissement_client:  { code: "3421",  tva: 0 },   // Encaissement → pas de TVA
-  paiement_fournisseur: { code: "4411",  tva: 20 },  // Achats fournisseur → TVA 20% déductible
-  salaires:             { code: "6171",  tva: 0 },   // Salaires → hors champ TVA
-  cnss_amo:             { code: "4441",  tva: 0 },   // CNSS/AMO → solde la dette sociale 4441 (la charge 6174 est au journal des salaires)
-  tva_dgi:              { code: "4456",  tva: 0 },   // Impôts → solde la dette fiscale, pas de TVA sur TVA
-  loyers:               { code: "6131",  tva: 0 },   // Local nu = exonéré; local meublé → modifier manuellement
-  eau_electricite:      { code: "6125",  tva: 14 },  // Électricité 14%, eau 7% → déductible
-  telecom:              { code: "6145",  tva: 20 },  // IAM/Inwi/Orange → 6145 Frais postaux et télécom, TVA 20% déductible
-  gasoil:               { code: "61241", tva: 0 },   // Gasoil véhicules → NON déductible (CGI Art.106)
-  assurance:            { code: "6161",  tva: 0 },   // Assurance → exonérée TVA
-  entretien:            { code: "6141",  tva: 20 },  // Réparations → TVA 20% déductible
-  frais_bancaires:      { code: "6347",  tva: 10 },  // Commissions bancaires → TVA 10% déductible
-  taxe_professionnelle: { code: "6313",  tva: 0 },   // Taxes → pas de TVA
+  encaissement_client:  { code: PCM.CLIENTS,  tva: 0 },   // Encaissement → pas de TVA
+  paiement_fournisseur: { code: PCM.FOURNISSEURS,  tva: 20 },  // Achats fournisseur → TVA 20% déductible
+  salaires:             { code: PCM.REMUNERATIONS_PERSONNEL,  tva: 0 },   // Salaires → hors champ TVA
+  cnss_amo:             { code: PCM.CNSS,  tva: 0 },   // CNSS/AMO → solde la dette sociale 4441 (la charge 6174 est au journal des salaires)
+  tva_dgi:              { code: PCM.TVA_DUE,  tva: 0 },   // Impôts → solde la dette fiscale, pas de TVA sur TVA
+  loyers:               { code: PCM.LOCATIONS,  tva: 0 },   // Local nu = exonéré; local meublé → modifier manuellement
+  eau_electricite:      { code: PCM.ACHATS_NON_STOCKES,  tva: 14 },  // Électricité 14%, eau 7% → déductible
+  telecom:              { code: PCM.FRAIS_POSTAUX_TELECOMMUNICATIONS,  tva: 20 },  // 6145 Frais postaux et télécom, TVA 20% déductible
+  gasoil:               { code: COMPTE_CARBURANT_A_VALIDER, tva: 0 },   // Gasoil véhicules → NON déductible (CGI Art.106)
+  // 6134 « Primes d'assurances ». C'était 6161, qui est « Impôts et taxes directs ».
+  assurance:            { code: PCM.PRIMES_ASSURANCES,  tva: 0 },   // Assurance → exonérée TVA
+  // 6133 « Entretien et réparations ». C'était 6141 « Études, recherches et documentation ».
+  entretien:            { code: PCM.ENTRETIEN_REPARATIONS,  tva: 20 },  // Réparations → TVA 20% déductible
+  frais_bancaires:      { code: COMPTE_FRAIS_BANCAIRES_A_VALIDER,  tva: 10 },  // Commissions bancaires → TVA 10% déductible
+  // 6161 « Impôts et taxes directs ». C'était 6313, un compte de charges d'INTÉRÊTS.
+  taxe_professionnelle: { code: PCM.IMPOTS_TAXES_DIRECTS,  tva: 0 },   // Taxes → pas de TVA
   // Retrait → CAISSE, rubrique 516 du PCM. C'était 5143, qui est la Trésorerie
   // Générale : les espèces sorties du GAB n'alimentaient donc pas le compte que
   // mouvementent les règlements en espèces, et le solde de caisse était faux des
   // deux côtés. Cf. src/lib/comptes-tresorerie.ts.
   retrait_especes:      { code: COMPTE_CAISSE_DEFAUT, tva: 0 },
-  virement_interne:     { code: "5115",  tva: 0 },   // Mouvement de fonds entre comptes → compte de liaison, pas de TVA
-  interets_crediteurs:  { code: "7611",  tva: 0 },   // Intérêts → hors champ TVA
-  frais_representation: { code: "6147",  tva: 0 },   // Restaurant/réception → NON déductible (CGI Art.106)
-  frais_douane:         { code: "6146",  tva: 0 },   // Droits douane → pas de TVA récupérable
-  transport:            { code: "6142",  tva: 14 },  // Transport marchandises → 6142 Transports, TVA 14% déductible
-  autre:                { code: "6141",  tva: 0 },   // Divers → par défaut sans TVA
+  virement_interne:     { code: PCM.VIREMENTS_DE_FONDS,  tva: 0 },   // Mouvement de fonds entre comptes → compte de liaison, pas de TVA
+  // 7381 « Intérêts et produits assimilés ». C'était 7611 : la rubrique 76 n'existe pas au CGNC.
+  interets_crediteurs:  { code: PCM.INTERETS_PRODUITS_ASSIMILES,  tva: 0 },   // Intérêts → hors champ TVA
+  // 6143 « Déplacements, missions et réceptions ». C'était 6147, « Services bancaires ».
+  frais_representation: { code: PCM.DEPLACEMENTS_MISSIONS_RECEPTIONS,  tva: 0 },   // Restaurant/réception → NON déductible (CGI Art.106)
+  frais_douane:         { code: COMPTE_DOUANE_A_VALIDER,  tva: 0 },   // Droits douane → pas de TVA récupérable
+  transport:            { code: PCM.TRANSPORTS,  tva: 14 },  // Transport marchandises → 6142 Transports, TVA 14% déductible
+  autre:                { code: PCM.CHARGE_DEFAUT,  tva: 0 },   // Divers → par défaut sans TVA
 };
 
 // ─── Dérive une catégorie PCM depuis le libellé bancaire (fallback sans IA) ──
 // Mouvements de fonds internes : VIR AG EMIS, VERS/VERSEMENT (cf. analyse-regles-pcm.md règle 4)
 export const RX_VIREMENT_INTERNE = /VIR\.?\s*AG\.?\s*EMIS|VIREMENT\s+INTERNE|^VERS(EMENT)?\b/;
 
+/** La catégorie et SON compte, lu dans PCM_MAP : une seule table, jamais deux. */
+const cat = (categorie: string) => ({ categorie, code: PCM_MAP[categorie].code, tva: PCM_MAP[categorie].tva });
+
 export function deriveCategorie(libelle: string, type: "credit" | "debit"): { categorie: string; code: string; tva: number } {
   const u = (libelle || "").toUpperCase();
-  if (RX_VIREMENT_INTERNE.test(u))                        return { categorie: "virement_interne",     code: "5115",  tva: 0 };
-  if (type === "credit") return { categorie: "encaissement_client", code: "3421", tva: 0 };
-  if (/\bCNSS\b|AMO\b/.test(u))                          return { categorie: "cnss_amo",             code: "4441",  tva: 0 };
-  if (/\bTVA\b|\bDGI\b|\bIR\b|\bIS\b|IMPOT/.test(u))    return { categorie: "tva_dgi",              code: "4456",  tva: 0 };
-  if (/SALAIRE|PAIE|REMUNERATION/.test(u))                return { categorie: "salaires",             code: "6171",  tva: 0 };
-  if (/\bIAM\b|ORANGE|INWI|TELECOM|INTERNET/.test(u))    return { categorie: "telecom",              code: "6145",  tva: 20 };
-  if (/LOYER|LOCATION/.test(u))                           return { categorie: "loyers",               code: "6131",  tva: 0 };
-  if (/\bEAU\b|ONEE|ELECTRICITE/.test(u))                return { categorie: "eau_electricite",      code: "6125",  tva: 14 };
-  if (/GASOIL|CARBURANT|STATION/.test(u))                 return { categorie: "gasoil",              code: "61241", tva: 0 };
-  if (/ASSURANCE/.test(u))                                return { categorie: "assurance",            code: "6161",  tva: 0 };
-  if (/COMMISSION|FRAIS|AGIOS|TENUE|TIMBRE/.test(u))     return { categorie: "frais_bancaires",      code: "6347",  tva: 10 };
-  if (/RETRAIT|GAB/.test(u))                              return { categorie: "retrait_especes",      code: COMPTE_CAISSE_DEFAUT, tva: 0 };
-  if (/DOUANE|IMPORT/.test(u))                            return { categorie: "frais_douane",         code: "6146",  tva: 0 };
-  if (/TRANSPORT|DEPLACEMENT/.test(u))                    return { categorie: "transport",            code: "6142",  tva: 14 };
-  return { categorie: "paiement_fournisseur", code: "4411", tva: 20 };
+  if (RX_VIREMENT_INTERNE.test(u))                        return cat("virement_interne");
+  if (type === "credit") return cat("encaissement_client");
+  if (/\bCNSS\b|AMO\b/.test(u))                          return cat("cnss_amo");
+  if (/\bTVA\b|\bDGI\b|\bIR\b|\bIS\b|IMPOT/.test(u))    return cat("tva_dgi");
+  if (/SALAIRE|PAIE|REMUNERATION/.test(u))                return cat("salaires");
+  if (/\bIAM\b|ORANGE|INWI|TELECOM|INTERNET/.test(u))    return cat("telecom");
+  if (/LOYER|LOCATION/.test(u))                           return cat("loyers");
+  if (/\bEAU\b|ONEE|ELECTRICITE/.test(u))                return cat("eau_electricite");
+  if (/GASOIL|CARBURANT|STATION/.test(u))                 return cat("gasoil");
+  if (/ASSURANCE/.test(u))                                return cat("assurance");
+  if (/COMMISSION|FRAIS|AGIOS|TENUE|TIMBRE/.test(u))     return cat("frais_bancaires");
+  if (/RETRAIT|GAB/.test(u))                              return cat("retrait_especes");
+  if (/DOUANE|IMPORT/.test(u))                            return cat("frais_douane");
+  if (/TRANSPORT|DEPLACEMENT/.test(u))                    return cat("transport");
+  return cat("paiement_fournisseur");
 }
 
 // ─── Lignes d'écriture Journal de Banque (BQ) — règles PCM (cf. analyse-regles-pcm.md) ──
@@ -112,34 +134,39 @@ export function genererLignesBQ(p: {
 
   if (justif) {
     // Règle 3 — charge avec justificatif : HT + TVA déductible si eligible_edi, sinon TTC intégral
-    const compte = justif.compte_pcm || (PCM_MAP[cat]?.code ?? "6141");
+    const compte = justif.compte_pcm || (PCM_MAP[cat]?.code ?? PCM.CHARGE_DEFAUT);
+    // Un compte saisi ou proposé par l'IA n'entre au grand livre que s'il est
+    // recevable : refuser vaut mieux que deviner un compte de remplacement.
+    const verdict = validatePcmAccount(compte);
+    if (!verdict.ok) throw new Error(`Justificatif « ${lib} » : ${verdict.erreurs.join(" ")}`);
     const taux = Number(justif.taux_tva) || 0;
     if (!isCr && justif.eligible_edi === true && taux > 0) {
       const ht = Math.round(m / (1 + taux / 100) * 100) / 100;
       const tva = Math.round((m - ht) * 100) / 100;
       cp(compte, ht);
-      cp("34552", tva, { libelle: `TVA ${lib.slice(0, 50)}`, categorie: "tva_deductible" });
+      cp(PCM.TVA_RECUPERABLE_CHARGES, tva, { libelle: `TVA ${lib.slice(0, 50)}`, categorie: "tva_deductible" });
     } else {
       cp(compte, m);
     }
   } else if (p.factureLiee) {
     // Règles 2 et 7 — solder le compte de tiers pour le TTC, jamais de TVA en banque
     catEff = isCr ? "encaissement_client" : "paiement_fournisseur";
-    cp(isCr ? "3421" : "4411", m);
+    cp(isCr ? PCM.CLIENTS : PCM.FOURNISSEURS, m);
   } else if (cat === "cnss_amo" || /\bCNSS\b|\bAMO\b/.test(u)) {
     catEff = "cnss_amo";
-    cp("4441", m);
+    cp(PCM.CNSS, m);
   } else if (cat === "tva_dgi") {
-    cp("4456", m);
+    cp(PCM.TVA_DUE, m);
   } else if (cat === "retrait_especes" || /RETRAIT|\bGAB\b/.test(u)) {
     catEff = "retrait_especes";
     // Contrepartie d'un retrait : la CAISSE est débitée de ce que la banque perd.
     cp(compteCaisse(p.dossier), m);
   } else if (cat === "virement_interne" || RX_VIREMENT_INTERNE.test(u)) {
     catEff = "virement_interne";
-    cp("5115", m);
+    cp(PCM.VIREMENTS_DE_FONDS, m);
   } else if (isCr && cat === "interets_crediteurs") {
-    cp("7611", m);
+    // 7381 — c'était 7611, rubrique absente du CGNC (même correction que PCM_MAP).
+    cp(PCM.INTERETS_PRODUITS_ASSIMILES, m);
   } else {
     // Règle 1 (modèle Odoo / Bank Suspense) — transaction orpheline (aucune pièce
     // liée et hors catégories déterministes ci-dessus) : on la parque sur le compte
@@ -147,11 +174,11 @@ export function genererLignesBQ(p: {
     // le compte définitif sera substitué automatiquement (trigger SQL) dès qu'un
     // justificatif/facture sera associé, même après clôture.
     catEff = "en_attente";
-    cp(isCr ? "4712" : "4711", m);
+    cp(isCr ? PCM.ATTENTE_BANQUE_CREDIT : PCM.ATTENTE_BANQUE_DEBIT, m);
   }
 
   return [
     ...contreparties,
-    { compte: "5141", libelle: lib, debit: isCr ? m : 0, credit: isCr ? 0 : m, categorie: catEff },
+    { compte: PCM.BANQUE, libelle: lib, debit: isCr ? m : 0, credit: isCr ? 0 : m, categorie: catEff },
   ];
 }

@@ -16,6 +16,8 @@ import { useServerFn } from "@tanstack/react-start";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
+import { PCM_MAP } from "@/lib/comptabilite-bq";
+import { PCM } from "@/lib/pcm-referentiel";
 import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { ocrFacture, matcherDocumentAvecTransactions, lettrerJustificatif } from "@/server/factures.functions";
@@ -71,7 +73,7 @@ const TYPE_PCM_DEFAULTS: Record<string, { compte: string; tva: number }> = {
   quittance_eau:    { compte: "6125",  tva: 7  },
   quittance_elec:   { compte: "6125",  tva: 14 },
   quittance_loyer:  { compte: "6131",  tva: 0  },
-  addition:         { compte: "6147",  tva: 0  },
+  addition:         { compte: PCM.DEPLACEMENTS_MISSIONS_RECEPTIONS, tva: 0  }, // 6143 — 6147 est « Services bancaires »
   dum:              { compte: "6146",  tva: 0  },
   avis_debit:       { compte: "6347",  tva: 10 },
 };
@@ -98,18 +100,22 @@ const CATEGORIES_PCM = [
   { value: "salaires",              label: "Salaires",                             code: "6171"  },
   { value: "cnss_amo",              label: "CNSS / AMO",                           code: "6174"  },
   { value: "charges_sociales",      label: "Charges Sociales",                     code: "6174"  },
-  { value: "loyers",                label: "Loyer / Location",                     code: "61311" },
-  { value: "eau_electricite",       label: "Eau / Électricité",                    code: "6125"  },
-  { value: "telecom",               label: "Téléphone / Internet",                 code: "6132"  },
+  // Comptes LUS dans PCM_MAP (table de la banque) pour toute nature commune aux
+  // deux écrans : un loyer ne peut plus partir en 6131 depuis la banque et en
+  // 61311 (terrains) depuis les justificatifs. `gasoil` reste propre à cet écran
+  // tant que l'imputation du carburant n'est pas arbitrée (cf. comptabilite-bq.ts).
+  { value: "loyers",                label: "Loyer / Location",                     code: PCM_MAP.loyers.code },
+  { value: "eau_electricite",       label: "Eau / Électricité",                    code: PCM_MAP.eau_electricite.code },
+  { value: "telecom",               label: "Téléphone / Internet",                 code: PCM_MAP.telecom.code },
   { value: "gasoil",                label: "Carburant (TVA non déductible)",       code: "61223" },
-  { value: "assurance",             label: "Assurance",                            code: "6161"  },
-  { value: "entretien",             label: "Entretien / Réparation",               code: "6141"  },
-  { value: "frais_bancaires",       label: "Frais bancaires",                      code: "6347"  },
-  { value: "frais_representation",  label: "Restaurant / Réception (Art. 106)",   code: "6147"  },
+  { value: "assurance",             label: "Assurance",                            code: PCM_MAP.assurance.code },
+  { value: "entretien",             label: "Entretien / Réparation",               code: PCM_MAP.entretien.code },
+  { value: "frais_bancaires",       label: "Frais bancaires",                      code: PCM_MAP.frais_bancaires.code },
+  { value: "frais_representation",  label: "Restaurant / Réception (Art. 106)",   code: PCM_MAP.frais_representation.code },
   { value: "transport",             label: "Transport / Déplacements",             code: "6142"  },
   { value: "tva_import",            label: "TVA récupérable sur import (DUM)",     code: "34552" },
   { value: "frais_douane",          label: "Droits de douane",                     code: "6146"  },
-  { value: "taxe_professionnelle",  label: "Taxe professionnelle",                 code: "6313"  },
+  { value: "taxe_professionnelle",  label: "Taxe professionnelle",                 code: PCM_MAP.taxe_professionnelle.code },
   { value: "droits_timbre",         label: "Droits de timbre fiscaux",             code: "61671" },
   { value: "autre",                 label: "Autre",                                code: "6141"  },
 ];
@@ -699,8 +705,12 @@ function JustificatifsPage() {
       // Cotisations sociales : le compte reste dans le 617x quoi qu'ait proposé l'IA.
       // L'AMO ("Assurance Maladie Obligatoire") est régulièrement confondue avec une
       // assurance privée (6134 / 6161), ce qui fausse l'imputation des charges sociales.
-      if (cat === "charges_sociales" && !comptePcm.startsWith("6174")) comptePcm = "6174";
-      if (cat === "taxe_professionnelle" && !/^(6313|4456)/.test(comptePcm)) comptePcm = "6313";
+      if (cat === "charges_sociales" && !comptePcm.startsWith(PCM.CHARGES_SOCIALES)) comptePcm = PCM.CHARGES_SOCIALES;
+      // Taxe professionnelle : 6161 « Impôts et taxes directs » (ou 4456 pour la TVA).
+      // C'était 6313, un compte de charges d'intérêts.
+      if (cat === "taxe_professionnelle" && !comptePcm.startsWith(PCM.IMPOTS_TAXES_DIRECTS) && !comptePcm.startsWith(PCM.TVA_DUE)) {
+        comptePcm = PCM.IMPOTS_TAXES_DIRECTS;
+      }
 
       // Override "dur" : un compte 61312 (Locations de constructions) ⇒ Quittance de loyer.
       // Garantit que le type affiché suit le PCM même si l'OCR a typé "recu".

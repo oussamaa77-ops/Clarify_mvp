@@ -4,11 +4,16 @@
 
 import { DICTIONNAIRE_PCM } from "./categorization-engine";
 import { numeroSignificatif } from "./numero-compte";
+import { joursRetard } from "./factures-filtres";
 
 /** Facture (vente ou achat) vue sous l'angle des montants et du règlement. */
 export interface FactureFiscale {
   /** Requis seulement pour rattacher les règlements datés de `paiements`. */
   id?: string | null;
+  /** Numéro de pièce — c'est par lui qu'une imputation d'avoir désigne son avoir. */
+  numero?: string | null;
+  /** `avoir` pour une note de crédit (qui porte aussi des montants négatifs). */
+  type?: string | null;
   montant_ht?: number | null;
   montant_tva?: number | null;
   montant_ttc?: number | null;
@@ -54,6 +59,26 @@ export interface PaiementFiscal {
   facture_fournisseur_id?: string | null;
   montant?: number | null;
   date_paiement?: string | null;
+  /**
+   * `avoir` = la créance a été ÉTEINTE par un avoir, sans mouvement d'argent
+   * (migration 20260909130000). Toute autre valeur est un règlement réel.
+   */
+  origine?: string | null;
+  /** Pour une imputation d'avoir : le NUMÉRO de l'avoir imputé. */
+  reference?: string | null;
+}
+
+/** Origine d'une ligne `paiements` qui n'est PAS un encaissement. */
+export const ORIGINE_AVOIR = "avoir";
+
+/** Cette ligne `paiements` est-elle l'imputation d'un avoir (aucun argent reçu) ? */
+export function estImputationAvoir(p: PaiementFiscal): boolean {
+  return String(p.origine ?? "").trim().toLowerCase() === ORIGINE_AVOIR;
+}
+
+/** Cette pièce est-elle un avoir ? Le type fait foi, le TTC négatif le trahit. */
+export function estAvoir(f: FactureFiscale): boolean {
+  return String(f.type ?? "").trim().toLowerCase() === "avoir" || n(f.montant_ttc) < 0;
 }
 
 export interface SyntheseTva {
@@ -89,23 +114,84 @@ function grouperPaiements(
 }
 
 /**
+ * Les avoirs d'un sens (ventes ou achats), séparés des règlements réels.
+ *
+ * ─── Le défaut que ce contexte existe pour empêcher ─────────────────────────
+ * Une imputation d'avoir est une ligne `paiements` (origine `avoir`) : elle
+ * éteint la créance sans qu'un dirham n'entre. La compter comme un règlement
+ * rendait « encaissée » la part de TVA qu'elle annule — +400 MAD sur FA-GOLD-003 —
+ * pendant que l'avoir lui-même, pièce négative, retirait −400 MAD à SA date.
+ * Les deux erreurs ne se compensaient qu'à l'intérieur d'un même mois : un avoir
+ * émis en juin et imputé en juillet déplaçait 400 MAD de TVA d'une déclaration à
+ * l'autre, et aucune des deux ne correspondait plus au 44551 du grand livre.
+ *
+ * ─── La règle ────────────────────────────────────────────────────────────────
+ * Une imputation dont la référence désigne un avoir CONNU de la liste :
+ *   • réduit la base de la facture imputée (TTC net = TTC − avoir) ;
+ *   • ne compte JAMAIS comme un encaissement ;
+ *   • fait sortir l'avoir imputé du calcul — son effet est déjà dans la facture.
+ * Une imputation dont l'avoir est introuvable garde l'ancien traitement : sans
+ * savoir quel avoir elle vise, l'isoler retirerait deux fois le même montant.
+ */
+function contexteAvoirs(
+  fs: FactureFiscale[],
+  paiements: PaiementFiscal[] | undefined,
+  cle: "facture_id" | "facture_fournisseur_id",
+) {
+  const index = paiements ? grouperPaiements(paiements, cle) : null;
+  const numerosAvoirs = new Set(
+    fs.filter(estAvoir).map((f) => String(f.numero ?? "").trim()).filter(Boolean));
+  const estAvoirIsole = (p: PaiementFiscal) =>
+    estImputationAvoir(p) && numerosAvoirs.has(String(p.reference ?? "").trim());
+  const avoirsImputes = new Set<string>();
+  for (const liste of index?.values() ?? []) {
+    for (const p of liste) if (estAvoirIsole(p)) avoirsImputes.add(String(p.reference).trim());
+  }
+  /** L'avoir est-il déjà porté par la facture qu'il a éteinte ? */
+  const avoirDejaImpute = (f: FactureFiscale) =>
+    estAvoir(f) && avoirsImputes.has(String(f.numero ?? "").trim());
+  return { index, estAvoirIsole, avoirDejaImpute };
+}
+
+/**
  * Décompose le règlement d'une facture entre la part adossée à des paiements
  * DATÉS (avec leur quote-part) et le reliquat réglé mais non daté.
  *
- * Un cumul de règlements supérieur au TTC (saisie en double) ne doit pas créer
- * de TVA : toutes les quotes-parts sont ramenées à 100 % du TTC.
+ * Toutes les parts sont exprimées sur le TTC D'ORIGINE : `tva × part` est alors
+ * la TVA contenue dans l'argent reçu (7 200 × 1 600 / 9 600 = 1 200), avoir
+ * imputé ou non.
+ *
+ * Un cumul de règlements supérieur au TTC net (saisie en double) ne doit pas
+ * créer de TVA : toutes les quotes-parts sont ramenées au TTC net.
  */
-function decomposerReglement(f: FactureFiscale, reglements: PaiementFiscal[]) {
+function decomposerReglement(
+  f: FactureFiscale,
+  reglements: PaiementFiscal[],
+  estAvoirIsole: (p: PaiementFiscal) => boolean = () => false,
+) {
   const ttc = n(f.montant_ttc);
-  const somme = reglements.reduce((s, p) => s + n(p.montant), 0);
-  const facteur = ttc > 0 && somme > ttc ? ttc / somme : 1;
+  const reels = reglements.filter((p) => !estAvoirIsole(p));
+  // Un avoir (TTC ≤ 0) n'a pas de base à encaisser : son sort dépend du statut.
+  if (ttc <= 0) {
+    return { parts: [] as { date: string | null | undefined; part: number }[], partDatee: 0, resteNonDate: partReglee(f) };
+  }
 
-  const parts = reglements.map((p) => ({
-    date: p.date_paiement,
-    part: ttc > 0 ? (n(p.montant) * facteur) / ttc : 0,
-  }));
-  const partDatee = Math.min(1, parts.reduce((s, p) => s + p.part, 0));
-  return { parts, partDatee, resteNonDate: Math.max(0, partReglee(f) - partDatee) };
+  const avoirs = Math.min(ttc, reglements.filter(estAvoirIsole).reduce((s, p) => s + n(p.montant), 0));
+  const ttcNet = ttc - avoirs;
+  /** Part maximale réellement encaissable, avoir déduit. */
+  const plafond = ttcNet / ttc;
+
+  const somme = reels.reduce((s, p) => s + n(p.montant), 0);
+  const facteur = somme > ttcNet ? (somme > 0 ? ttcNet / somme : 0) : 1;
+  const parts = reels.map((p) => ({ date: p.date_paiement, part: (n(p.montant) * facteur) / ttc }));
+  const partDatee = Math.min(plafond, parts.reduce((s, p) => s + p.part, 0));
+
+  // `montant_paye` INCLUT l'avoir imputé (le trigger somme toutes les lignes
+  // `paiements`) : on le retranche avant d'en déduire un reliquat non daté.
+  const partNette = f.statut_paiement === "payee"
+    ? plafond
+    : Math.min(plafond, Math.max(0, partReglee(f) - avoirs / ttc));
+  return { parts, partDatee, resteNonDate: Math.max(0, partNette - partDatee) };
 }
 
 /**
@@ -140,14 +226,16 @@ export function synthetiserTva(
   };
 
   const cumul = (fs: FactureFiscale[], cle: "facture_id" | "facture_fournisseur_id") => {
-    const index = opts.paiements ? grouperPaiements(opts.paiements, cle) : null;
+    const { index, estAvoirIsole, avoirDejaImpute } = contexteAvoirs(fs, opts.paiements, cle);
     let tva = 0;      // TVA retenue dans la période
     let datee = 0;    // TVA réglée adossée à un règlement daté, toutes périodes
     let totale = 0;   // TVA réglée toutes périodes confondues (dénominateur de couverture)
 
     for (const f of fs) {
+      // Avoir imputé : sa TVA est déjà retranchée de la facture qu'il éteint.
+      if (avoirDejaImpute(f)) continue;
       const reglements = index && f.id ? index.get(f.id) ?? [] : [];
-      const { parts, partDatee, resteNonDate } = decomposerReglement(f, reglements);
+      const { parts, partDatee, resteNonDate } = decomposerReglement(f, reglements, estAvoirIsole);
 
       for (const p of parts) if (dansPeriode(p.date)) tva += n(f.montant_tva) * p.part;
       datee += n(f.montant_tva) * partDatee;
@@ -196,11 +284,11 @@ export function periodesTva(
   };
 
   for (const [fs, cle] of [[ventes, "facture_id"], [achats, "facture_fournisseur_id"]] as const) {
-    const index = grouperPaiements(paiements, cle);
+    const { index, estAvoirIsole, avoirDejaImpute } = contexteAvoirs(fs, paiements, cle);
     for (const f of fs) {
-      if (n(f.montant_tva) === 0) continue;
-      const reglements = f.id ? index.get(f.id) ?? [] : [];
-      const { parts, resteNonDate } = decomposerReglement(f, reglements);
+      if (n(f.montant_tva) === 0 || avoirDejaImpute(f)) continue;
+      const reglements = f.id ? index?.get(f.id) ?? [] : [];
+      const { parts, resteNonDate } = decomposerReglement(f, reglements, estAvoirIsole);
       for (const p of parts) if (p.part > 1e-9) ajouter(p.date);
       if (resteNonDate > 1e-9) ajouter(f.date_facture);
     }
@@ -493,26 +581,21 @@ export interface TrancheAgee {
 }
 
 /**
- * Tranches d'ancienneté des impayés.
+ * Tranches d'ancienneté des impayés — EXACTEMENT celles de la vue SQL
+ * `v_balance_agee` et du module Balance âgée (non échu / 1-30 / 31-60 / +60).
  *
- * La spec listait « Dans les temps / 1-30 / 31-60 / +90 », ce qui laissait les
- * impayés de 61 à 90 jours sans tranche d'accueil. On intercale donc 61-90 :
- * aucun montant ne disparaît et le « +90 » critique reste isolé.
+ * Le Dashboard avait son propre découpage (61-90 / +90) : une même facture de
+ * 75 jours y tombait en « 61 à 90 jours » quand le module Fournisseurs la disait
+ * « +60 jours ». Deux écrans qui ne découpent pas pareil ne se rapprochent pas.
+ * Les clés restent celles de la vue (`retard_60_plus`…) pour qu'on puisse les
+ * comparer terme à terme.
  */
 const BORNES = [
-  { cle: "a_jour",     label: "Dans les temps", max: 0 },
-  { cle: "j_1_30",     label: "1 à 30 jours",   max: 30 },
-  { cle: "j_31_60",    label: "31 à 60 jours",  max: 60 },
-  { cle: "j_61_90",    label: "61 à 90 jours",  max: 90 },
-  { cle: "j_90_plus",  label: "+90 jours",      max: Infinity },
+  { cle: "non_echu",       label: "Dans les temps", max: 0 },
+  { cle: "retard_1_30",    label: "1 à 30 jours",   max: 30 },
+  { cle: "retard_31_60",   label: "31 à 60 jours",  max: 60 },
+  { cle: "retard_60_plus", label: "+60 jours",      max: Infinity },
 ] as const;
-
-function jourUTC(d: string | null | undefined): number | null {
-  if (!d) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(d.trim());
-  if (!m) return null;
-  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86400000;
-}
 
 /** Reste dû ; repli sur le TTC quand `montant_restant` n'est pas renseigné. */
 function resteDu(f: FactureFiscale): number {
@@ -523,15 +606,18 @@ function resteDu(f: FactureFiscale): number {
 
 /**
  * Répartit créances (ventes) et dettes (achats) non soldées par ancienneté.
- * Une facture sans échéance est comptée « dans les temps » : rien ne prouve
- * qu'elle soit en retard, et l'exclure ferait disparaître son montant.
+ *
+ * Le retard se compte depuis la date d'EXIGIBILITÉ — l'échéance, à défaut
+ * l'émission — par `joursRetard`, la fonction que partagent les tableaux de
+ * factures. Une facture sans aucune date exploitable reste « dans les temps » :
+ * rien ne prouve qu'elle soit en retard, et l'exclure ferait disparaître son
+ * montant.
  */
 export function balanceAgeeDashboard(
   ventes: FactureFiscale[],
   achats: FactureFiscale[],
   aujourdhui: Date = new Date(),
 ): TrancheAgee[] {
-  const now = Date.UTC(aujourdhui.getFullYear(), aujourdhui.getMonth(), aujourdhui.getDate()) / 86400000;
   const acc = new Map<string, { creances: number; dettes: number }>(
     BORNES.map((b) => [b.cle, { creances: 0, dettes: 0 }]),
   );
@@ -539,8 +625,7 @@ export function balanceAgeeDashboard(
   const classer = (f: FactureFiscale, champ: "creances" | "dettes") => {
     const du = resteDu(f);
     if (du <= 0) return;
-    const ech = jourUTC(f.date_echeance);
-    const retard = ech == null ? 0 : now - ech;
+    const retard = joursRetard({ ...f, montant_restant: du }, aujourdhui) ?? 0;
     const borne = BORNES.find((b) => retard <= b.max) ?? BORNES[BORNES.length - 1];
     const cell = acc.get(borne.cle)!;
     cell[champ] += du;

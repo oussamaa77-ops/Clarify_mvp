@@ -856,9 +856,9 @@ priment sur toutes les autres.
      61741 = CNSS).
    · INTERDIT pour la CNSS et l'AMO : 6134 et 6161 ("assurance"), 6147 (frais
      bancaires), 6141. L'AMO est une cotisation sociale, PAS une assurance privée.
-   · DGI / TGR → categorie_pcm = "taxe_professionnelle" ET compte_pcm = "6313"
-     pour la taxe professionnelle et les taxes locales, sinon compte_pcm =
-     "4456" (État, TVA due).
+   · DGI / TGR → categorie_pcm = "taxe_professionnelle" ET compte_pcm = "6161"
+     (impôts et taxes directs) pour la taxe professionnelle et les taxes locales,
+     sinon compte_pcm = "4456" (État, TVA due).
 
 6. DATES ET RÉFÉRENCES
    · date = "Date de Transmission", à défaut "Date d'Exécution du Prélèvement",
@@ -895,7 +895,7 @@ RÈGLES:
   · "frais_bancaires" → banque, commission bancaire, frais de tenue, CIH, Attijariwafa, BMCE, BMCI, Banque Populaire, CFG, frais bancaires
   · "encaissement_client" → uniquement si sens_facture = "client" (on émet la facture)
   · "tva_import" → DUM, déclaration douanière, importation, quittance douanière, dédouanement
-  · "taxe_professionnelle" → DGI, Direction Générale des Impôts, TGR, Trésorerie Générale du Royaume, SIMPL, quittance d'impôt, taxe professionnelle, taxes locales (compte 6313) — hors champ TVA
+  · "taxe_professionnelle" → DGI, Direction Générale des Impôts, TGR, Trésorerie Générale du Royaume, SIMPL, quittance d'impôt, taxe professionnelle, taxes locales (compte 6161) — hors champ TVA
   · "droits_timbre" → DROIT DE TIMBRE / DROITS DE TIMBRE / REMISE LCN / LETTRE DE CHANGE / TIMBRE FISCAL — taxe fiscale, hors TVA, hors EDI DGI (compte 61671)
   · "acompte_fournisseur" → bon de commande, acompte, avance fournisseur (type_document = "bon_commande")
   · "paiement_fournisseur" → achat de marchandises, fournitures, matières premières, prestation générale non classifiable ci-dessus
@@ -903,10 +903,10 @@ RÈGLES:
   · "quittance_loyer" → "61312" (Locations de constructions ; JAMAIS "61311" sauf terrain explicite)
   · "quittance_eau" → "61252" ET taux_tva = 7
   · "quittance_elec" → "61252" ET taux_tva = 14
-  · "recu" → selon la nature de la dépense : "6147" si restaurant/café/repas, "61251" si carburant/station-service, "6141" sinon
+  · "recu" → selon la nature de la dépense : "6143" (déplacements, missions et réceptions) si restaurant/café/repas, "61251" si carburant/station-service, "6141" sinon
   · frais/commissions bancaires (émetteur = banque : BP, ATW, BMCE, CIH…) → "6147"
   · "quittance_cnss" — CNSS / AMO / CIMR (categorie_pcm = "charges_sociales") → "6174" ET taux_tva = 0 (RÈGLE STRICTE, priorité absolue ; jamais 6134/6161/6147)
-  · "quittance_dgi" — DGI / TGR → "6313" (taxe professionnelle et taxes locales) sinon "4456" (État, TVA due) ET taux_tva = 0
+  · "quittance_dgi" — DGI / TGR → "6161" (impôts et taxes directs : taxe professionnelle et taxes locales) sinon "4456" (État, TVA due) ET taux_tva = 0
   · tout autre type → null
 - periode / numero_compteur (UNIQUEMENT pour quittance_eau, quittance_elec et quittance_cnss) : extraire OBLIGATOIREMENT le montant et la période (label "Période", "Mois", "Période de Cotisation", ex: "01/2025", "Janvier 2025" — retourner telle quelle) ; le numéro de compteur (label "N° Compteur", "Compteur", "N° Contrat", eau/élec uniquement) → null si absents
 - DATES — deux champs distincts à identifier OBLIGATOIREMENT pour les BL et BC :

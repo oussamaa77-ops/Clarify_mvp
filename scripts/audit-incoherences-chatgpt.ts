@@ -59,7 +59,7 @@ import {
   RACINE_COLLECTEE, RACINE_DEDUCTIBLE,
   PREFIXE_DECLARATION_TVA, PREFIXE_REGULARISATION_TVA,
 } from "../src/lib/liquidation-tva";
-import { estJournalTresorerie } from "../src/lib/integrite-tresorerie";
+import { creuxCaisse, estJournalTresorerie } from "../src/lib/integrite-tresorerie";
 import {
   rapprocherCaProduits, rapprocherEncoursClients,
 } from "../src/lib/coherence-ventes";
@@ -237,24 +237,17 @@ async function auditerDossier(d: any): Promise<Record<string, Verdict>> {
   // aucun sens comptable. S'y fier ferait dépendre le verdict de l'ordre de
   // retour de la base — un apport et le décaissement qu'il finance, saisis le
   // même jour, seraient déclarés impossibles une fois sur deux.
-  const mvtCaisse = lignes.filter((l) => relevantDe(l.compte_numero, "516"));
-  if (!mvtCaisse.length) v.R2 = VIDE();
+  // Le calcul lui-même vit dans `creuxCaisse` : le banc d'audit ne redéfinit pas
+  // l'invariant C_t ≥ 0, il l'interroge. La batterie de cas invalides et toute
+  // garde à l'écriture appellent la MÊME fonction — c'est ce qui garantit qu'un
+  // mouvement refusé à l'entrée reste condamné à l'audit, et réciproquement.
+  const c = creuxCaisse(lignes as any, EPS);
+  if (!c.mouvements) v.R2 = VIDE();
   else {
-    const parJour = new Map<string, number>();
-    for (const l of mvtCaisse) {
-      const j = jour(l.date_ecriture);
-      parJour.set(j, (parJour.get(j) ?? 0) + nb(l.debit) - nb(l.credit));
-    }
-    let cumul = 0, pire = { solde: 0, date: "" };
-    for (const j of [...parJour.keys()].sort()) {
-      cumul = r2(cumul + (parJour.get(j) ?? 0));
-      if (cumul < pire.solde) pire = { solde: cumul, date: j };
-    }
-    const mesure = `min ${fmt(pire.solde)} · clôture ${fmt(cumul)}`;
-    v.R2 = pire.solde < -EPS
-      ? FAIL([`Caisse créditrice : descend à ${fmt(pire.solde)} MAD au ${pire.date} `
-          + `(clôture ${fmt(cumul)}). Il manque une entrée de fonds d'au moins ${fmt(-pire.solde)} MAD.`], mesure)
-      : PASS(mesure);
+    const mesure = `min ${fmt(c.creux)} · clôture ${fmt(c.cloture)}`;
+    v.R2 = c.ok ? PASS(mesure)
+      : FAIL([`Caisse créditrice : descend à ${fmt(c.creux)} MAD au ${c.date} `
+          + `(clôture ${fmt(c.cloture)}). Il manque une entrée de fonds d'au moins ${fmt(c.apportManquant)} MAD.`], mesure);
   }
 
   // ── R3 : AUXILIAIRES ⇄ COLLECTIFS ────────────────────────────────────────

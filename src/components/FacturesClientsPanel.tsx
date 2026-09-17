@@ -753,11 +753,9 @@ export function FacturesClientsPanel({ dossierId }: { dossierId: string }) {
     : conformes.filter(f=>f.statut_paiement!=="payee").reduce((s,f)=>s+Number(f.montant_restant??f.montant_ttc),0);
   const enAnalyse  = factures.filter(f=>f.statut==="envoyee"||f.statut_dgi==="en_analyse").length;
   // Échéances dépassées avec un reste à encaisser — le chiffre qui déclenche la relance.
-  const enRetard   = factures.filter(f =>
-    f.statut_paiement!=="payee" && f.date_echeance &&
-    new Date(f.date_echeance) < new Date() &&
-    Number(f.montant_restant??f.montant_ttc) > 0
-  ).length;
+  // Retard compté depuis l'exigibilité (échéance, à défaut émission) — la règle
+  // de la balance âgée, partagée par `joursRetard`.
+  const enRetard   = factures.filter(f => joursRetard(f) != null).length;
 
   return (
     <div className="space-y-4">

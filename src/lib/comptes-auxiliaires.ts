@@ -22,13 +22,15 @@
  * comportement historique est strictement préservé.
  */
 
+import { PCM } from "@/lib/pcm-referentiel";
+
 /** Sens du tiers, qui détermine le compte collectif PCM. */
 export type TypeTiers = "client" | "fournisseur";
 
 /** Comptes collectifs PCM marocains. */
 export const COMPTE_COLLECTIF: Record<TypeTiers, string> = {
-  client: "3421",       // Clients
-  fournisseur: "4411",  // Fournisseurs
+  client: PCM.CLIENTS,            // Clients
+  fournisseur: PCM.FOURNISSEURS,  // Fournisseurs
 };
 
 /** Largeur de la partie numérique du compte auxiliaire (44110005 → « 0005 »). */

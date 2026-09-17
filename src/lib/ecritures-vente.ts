@@ -29,9 +29,13 @@
 // ============================================================================
 
 import { COMPTES_TVA } from "@/services/lettrage";
+import { PCM, controlerComptesPcm, validatePcmAccount } from "@/lib/pcm-referentiel";
 
-/** Compte d'avances et acomptes reçus — passif, jamais un produit. */
-export const COMPTE_ACOMPTES_CLIENTS = "4191";
+/**
+ * Compte d'avances et acomptes reçus — passif, jamais un produit.
+ * ⚠️ À VALIDER : numérotation française (419) ; le CGNC emploie 4421.
+ */
+export const COMPTE_ACOMPTES_CLIENTS = PCM.CLIENTS_AVANCES_RECUES;
 
 /** Nature de la pièce de vente. Tout ce qui n'est pas connu est ORDINAIRE. */
 export type TypeFactureVente = "facture" | "acompte" | "solde";
@@ -188,6 +192,23 @@ export function controlerLignesVente(
   const ecart = r2(lignes.reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0));
   if (Math.abs(ecart) > 0.005) {
     violations.push(`Partie double déséquilibrée de ${ecart.toFixed(2)} MAD.`);
+  }
+
+  // Référentiel PCM, puis cohérence de chaque compte avec son RÔLE dans la pièce.
+  violations.push(...controlerComptesPcm(lignes).violations);
+  for (const l of lignes) {
+    if (l.journal_code !== "VTE") continue;
+    const c = String(l.compte_numero ?? "");
+    if (Number(l.debit) > 0.005 && !validatePcmAccount(c, { usage: "client" }).ok) {
+      violations.push(`Compte ${c} débité sur une vente : la créance se porte sur un compte client (342x).`);
+    }
+    const creditAutorise = c.startsWith(COMPTES_TVA.client.attente)
+      || c.startsWith(COMPTE_ACOMPTES_CLIENTS)
+      || validatePcmAccount(c, { usage: "produit" }).ok;
+    if (Number(l.credit) > 0.005 && !creditAutorise) {
+      violations.push(`Compte ${c} crédité sur une vente : ni produit de classe 7, ni TVA en attente `
+        + `(${COMPTES_TVA.client.attente}), ni acompte (${COMPTE_ACOMPTES_CLIENTS}).`);
+    }
   }
 
   return { ok: violations.length === 0, violations, ecart };

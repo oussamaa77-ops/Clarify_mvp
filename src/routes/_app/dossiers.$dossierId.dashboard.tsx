@@ -26,6 +26,7 @@ import {
   bornesExercice, dansExercice, exerciceCourant, exercicesDisponibles,
 } from "@/lib/exercice-comptable";
 import { sansANouveaux } from "@/lib/a-nouveaux";
+import { joursRetard } from "@/lib/factures-filtres";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/dashboard")({ component: DashboardPage });
 
@@ -254,7 +255,6 @@ function DashboardPage() {
 
   // ── CENTRE D'ALERTES : retards clients / fournisseurs / échéance TVA ─────────
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const joursDepuis = (d: string) => Math.floor((today.getTime() - new Date(d).getTime()) / 86400000);
   // Montant réellement dû, robuste à un montant_restant périmé (0 par défaut alors que
   // la facture est non payée) : on retombe sur TTC − payé si le restant stocké est nul.
   const duFacture = (f: any) => {
@@ -262,29 +262,34 @@ function DashboardPage() {
     return r > 0.005 ? r : Math.max(0, Number(f.montant_ttc ?? 0) - Number(f.montant_paye ?? 0));
   };
 
-  // Retards clients : factures conformes non soldées dont l'échéance est dépassée.
+  // Retard = jours depuis la date d'EXIGIBILITÉ (échéance, à défaut émission),
+  // par `joursRetard` — la règle de la vue `v_balance_agee`. Filtrer sur la seule
+  // `date_echeance` affichait « Aucun retard » pour une facture sans échéance que
+  // le module Fournisseurs classait « Urgent (+60 j) ».
+  const retardDe = (f: any) => joursRetard({ ...f, montant_restant: duFacture(f) }, today);
+
+  // Retards clients : factures conformes non soldées, exigibles depuis au moins un jour.
   const retardsClients = factures
-    .filter(f => f.statut === "conforme" && f.statut_paiement !== "payee" && f.date_echeance && new Date(f.date_echeance) < today
-      && duFacture(f) > 0.005)   // exclut les factures réellement soldées
+    .filter(f => f.statut === "conforme" && f.statut_paiement !== "payee"
+      && duFacture(f) > 0.005 && retardDe(f) != null)
     .map(f => ({
       id: f.numero ?? "—",
       tiers: (f as any).clients?.nom ?? "Client",
       restant: duFacture(f),
-      jours: joursDepuis(f.date_echeance),
+      jours: retardDe(f)!,
     }))
     .sort((a, b) => b.jours - a.jours);
   const totalRetardsClients = retardsClients.reduce((s, r) => s + r.restant, 0);
   const maxJoursClients = retardsClients[0]?.jours ?? 0;
 
-  // Retards fournisseurs : factures fournisseurs non payées dont l'échéance est dépassée.
+  // Retards fournisseurs : même règle, côté dettes.
   const retardsFourn = ff
-    .filter(f => f.statut_paiement !== "payee" && f.date_echeance && new Date(f.date_echeance) < today
-      && duFacture(f) > 0.005)   // exclut les factures réellement soldées
+    .filter(f => f.statut_paiement !== "payee" && duFacture(f) > 0.005 && retardDe(f) != null)
     .map(f => ({
       id: f.numero ?? "—",
       tiers: f.fournisseur_nom ?? "Fournisseur",
       restant: duFacture(f),
-      jours: joursDepuis(f.date_echeance),
+      jours: retardDe(f)!,
     }))
     .sort((a, b) => b.jours - a.jours);
   const totalRetardsFourn = retardsFourn.reduce((s, r) => s + r.restant, 0);

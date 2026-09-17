@@ -478,11 +478,12 @@ describe("balanceAgeeDashboard", () => {
     ];
     const b = balanceAgeeDashboard(ventes, [], AUJ);
     const par = Object.fromEntries(b.map(t => [t.cle, t.creances]));
-    expect(par.a_jour).toBe(100);
-    expect(par.j_1_30).toBe(200);
-    expect(par.j_31_60).toBe(300);
-    expect(par.j_61_90).toBe(400);   // tranche intercalée : sans elle, 400 disparaissait
-    expect(par.j_90_plus).toBe(500);
+    // Tranches ET clés de la vue v_balance_agee : non échu / 1-30 / 31-60 / +60.
+    expect(b.map(t => t.cle)).toEqual(["non_echu", "retard_1_30", "retard_31_60", "retard_60_plus"]);
+    expect(par.non_echu).toBe(100);
+    expect(par.retard_1_30).toBe(200);
+    expect(par.retard_31_60).toBe(300);
+    expect(par.retard_60_plus).toBe(900);   // 75 j et 195 j : tous deux « +60 », comme la vue
   });
 
   it("sépare créances (ventes) et dettes (achats)", () => {
@@ -491,7 +492,7 @@ describe("balanceAgeeDashboard", () => {
       [f({ date_echeance: "2026-07-10", montant_restant: 700 })],
       AUJ,
     );
-    const t = b.find(x => x.cle === "j_1_30")!;
+    const t = b.find(x => x.cle === "retard_1_30")!;
     expect(t.creances).toBe(200);
     expect(t.dettes).toBe(700);
   });
@@ -504,9 +505,16 @@ describe("balanceAgeeDashboard", () => {
     expect(b.every(t => t.creances === 0)).toBe(true);
   });
 
-  it("facture sans échéance → « dans les temps » plutôt que perdue", () => {
+  it("facture sans échéance → retard compté depuis l'émission, comme la vue SQL", () => {
+    // Émise le 15/06, sans échéance : 39 jours au 24/07 → 31-60, et non « dans les temps ».
     const b = balanceAgeeDashboard([f({ date_echeance: null, montant_restant: 250 })], [], AUJ);
-    expect(b.find(t => t.cle === "a_jour")!.creances).toBe(250);
+    expect(b.find(t => t.cle === "retard_31_60")!.creances).toBe(250);
+    expect(b.find(t => t.cle === "non_echu")!.creances).toBe(0);
+  });
+
+  it("sans aucune date exploitable → « dans les temps » plutôt que perdue", () => {
+    const b = balanceAgeeDashboard([f({ date_echeance: null, date_facture: null, montant_restant: 250 })], [], AUJ);
+    expect(b.find(t => t.cle === "non_echu")!.creances).toBe(250);
   });
 
   it("aucun montant ne disparaît entre les tranches", () => {

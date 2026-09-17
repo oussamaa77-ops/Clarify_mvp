@@ -130,13 +130,17 @@ export function resolveJustificatifKind(j: JustificatifLike): JustificatifKind {
   if (type === "quittance_loyer" || cat === "loyers" || compteCommence(j, "6131")) return "quittance_loyer";
   if (type === "quittance_cnss" || cat === "cnss_amo" || cat === "charges_sociales" || compteCommence(j, "6174"))
     return "cnss";
-  if (type === "quittance_dgi" || cat === "taxe_professionnelle" || compteCommence(j, "6313", "4456"))
+  // Les anciens comptes fautifs (6313, 6132, 6147 pour la restauration) restent
+  // RECONNUS en lecture : des justificatifs historiques les portent encore, et
+  // la détection ne doit pas changer leur affichage. L'écriture, elle, emploie
+  // désormais les comptes du référentiel (cf. src/lib/pcm-referentiel.ts).
+  if (type === "quittance_dgi" || cat === "taxe_professionnelle" || compteCommence(j, "6161", "4456", "6313"))
     return "dgi";
   if (cat === "eau_electricite" || compteCommence(j, "6125")) return "energie";
   if (cat === "gasoil" || compteCommence(j, "61241", "61223")) return "carburant";
-  if (cat === "telecom" || compteCommence(j, "6132")) return "telecom";
-  if (cat === "assurance" || compteCommence(j, "6161")) return "assurance";
-  if (cat === "frais_representation" || type === "addition" || compteCommence(j, "6147")) return "restauration";
+  if (cat === "telecom" || compteCommence(j, "6145", "6132")) return "telecom";
+  if (cat === "assurance" || compteCommence(j, "6134")) return "assurance";
+  if (cat === "frais_representation" || type === "addition" || compteCommence(j, "6143", "6147")) return "restauration";
   if (cat === "droits_timbre" || cat === "frais_bancaires" || type === "avis_debit" || compteCommence(j, "61671", "6347"))
     return "timbre_bancaire";
 

@@ -22,14 +22,16 @@
 // enverrait les espèces hors du poste Caisse, ce qu'on refuse silencieusement.
 // ============================================================================
 
+import { PCM, RACINES_PCM } from "@/lib/pcm-referentiel";
+
 /** Caisse par défaut : sous-compte à 8 chiffres de 5161, aligné sur les auxiliaires. */
-export const COMPTE_CAISSE_DEFAUT = "51610000";
+export const COMPTE_CAISSE_DEFAUT = PCM.CAISSE_DEFAUT;
 /** Banque par défaut — inchangé, c'est déjà le compte employé partout. */
-export const COMPTE_BANQUE_DEFAUT = "5141";
+export const COMPTE_BANQUE_DEFAUT = PCM.BANQUE;
 
 /** Rubriques PCM autorisées pour chacun des deux comptes. */
-export const PREFIXE_CAISSE = "516";
-export const PREFIXE_BANQUE = "514";
+export const PREFIXE_CAISSE = RACINES_PCM.CAISSE;
+export const PREFIXE_BANQUE = RACINES_PCM.BANQUE;
 
 /** Paramètres de trésorerie portés par le dossier (colonnes optionnelles). */
 export interface ComptesTresorerieDossier {

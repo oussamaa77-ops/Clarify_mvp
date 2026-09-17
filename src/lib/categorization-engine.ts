@@ -100,7 +100,10 @@ export interface SuggestionCompte {
  * s'applique. Aligné sur l'historique (l'ancienne saisie fournisseur écrivait
  * « 6141 » en dur) → la migration vers le moteur ne change AUCUN compte existant.
  */
-export const COMPTE_CHARGE_DEFAUT = "6141"; // Achats de matières et fournitures
+// ⚠️ Au CGNC, 6141 est « Études, recherches et documentation », pas un compte
+// d'achats : repli historique conservé, À VALIDER (cf. COMPTES_A_VALIDER,
+// src/lib/pcm-referentiel.ts). Doit rester égal à PCM.CHARGE_DEFAUT — un test le verrouille.
+export const COMPTE_CHARGE_DEFAUT = "6141";
 /** Compte de produit générique (ventes de marchandises au Maroc). */
 export const COMPTE_PRODUIT_DEFAUT = "7111";
 

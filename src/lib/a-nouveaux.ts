@@ -37,14 +37,16 @@
 // ============================================================================
 
 import { auditComptesSuspens, type AuditSuspens, type LigneBalance } from "./balance-comptable";
+import { assertTvaHorsClasse6 } from "./garde-tva-classe6";
+import { PCM } from "./pcm-referentiel";
 
 /** Journal technique des à-nouveaux. À exclure de toute vue multi-exercices. */
 export const JOURNAL_AN = "AN";
 
 /** Report à nouveau — bénéfice antérieur (solde créditeur). */
-export const COMPTE_REPORT_CREDITEUR = "1161";
+export const COMPTE_REPORT_CREDITEUR = PCM.REPORT_A_NOUVEAU_CREDITEUR;
 /** Report à nouveau — perte antérieure (solde débiteur). */
-export const COMPTE_REPORT_DEBITEUR = "1169";
+export const COMPTE_REPORT_DEBITEUR = PCM.REPORT_A_NOUVEAU_DEBITEUR;
 
 const r2 = (x: unknown) => Math.round((Number(x) || 0) * 100) / 100;
 const nb = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
@@ -52,6 +54,8 @@ const txt = (v: unknown) => String(v ?? "").trim();
 
 export interface LigneSolde {
   compte_numero?: string | null;
+  /** Lu par le garde-fou « TVA en classe 6 » : c'est le libellé qui trahit la TVA. */
+  libelle?: string | null;
   journal_code?: string | null;
   date_ecriture?: string | null;
   debit?: number | null;
@@ -145,9 +149,14 @@ export function lignesDeCloture(lignes: LigneSolde[], avant: string): LigneSolde
  * qu'on rouvre pour la deuxième fois.
  */
 export function soldesCloture(lignes: LigneSolde[], avant: string): SoldesCloture {
+  const retenues = lignesDeCloture(lignes, avant);
+  // Un bilan ne se calcule pas sur une TVA récupérable passée en charge : elle
+  // minorerait le résultat reporté ET resterait déductible. On refuse de clore
+  // plutôt que de reporter un résultat faux dans l'exercice suivant.
+  assertTvaHorsClasse6(retenues, `Clôture au ${avant} refusée`);
   const parCompte = new Map<string, number>();
   let ecart = 0;
-  for (const l of lignesDeCloture(lignes, avant)) {
+  for (const l of retenues) {
     const d = txt(l.date_ecriture).slice(0, 10);
     if (!d) continue;
     const c = txt(l.compte_numero);

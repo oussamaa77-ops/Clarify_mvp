@@ -3,6 +3,7 @@ import {
   resteAPayer,
   estPayee,
   joursRetard,
+  dateExigibilite,
   trancheRetard,
   correspondStatut,
   filtrerFactures,
@@ -65,17 +66,40 @@ describe("joursRetard — recalculé à la date du jour", () => {
     expect(joursRetard(f({ date_echeance: "2026-01-01", montant_restant: 0 }), AUJ)).toBeNull();
   });
 
-  it("sans échéance → pas de retard calculable", () => {
-    expect(joursRetard(f({ date_echeance: null }), AUJ)).toBeNull();
+  it("sans échéance → retard compté depuis l'ÉMISSION (règle de v_balance_agee)", () => {
+    // 01/06 → 24/07 = 53 jours. Avant : null, et la facture restait « dans les temps ».
+    expect(joursRetard(f({ date_echeance: null }), AUJ)).toBe(53);
+  });
+
+  it("ni échéance ni date d'émission → pas de retard calculable", () => {
+    expect(joursRetard(f({ date_echeance: null, date_facture: null }), AUJ)).toBeNull();
   });
 
   it("date illisible → pas de retard (aucune invention)", () => {
-    expect(joursRetard(f({ date_echeance: "30/06/2026" }), AUJ)).toBeNull();
+    expect(joursRetard(f({ date_echeance: "30/06/2026", date_facture: "01/06/2026" }), AUJ)).toBeNull();
   });
 
   it("ignore l'heure et le fuseau (comparaison de jours calendaires)", () => {
     const tard = new Date(2026, 6, 24, 23, 59);
     expect(joursRetard(f({ date_echeance: "2026-07-23" }), tard)).toBe(1);
+  });
+});
+
+describe("dateExigibilite — COALESCE(date_echeance, date_facture)", () => {
+  it("l'échéance prime quand elle est renseignée", () => {
+    expect(dateExigibilite({ date_echeance: "2026-06-30", date_facture: "2026-06-01" })).toBe("2026-06-30");
+  });
+
+  it("à défaut, la date d'émission", () => {
+    expect(dateExigibilite({ date_echeance: null, date_facture: "2026-04-20" })).toBe("2026-04-20");
+  });
+
+  it("une échéance illisible ne masque pas la date d'émission", () => {
+    expect(dateExigibilite({ date_echeance: "n/a", date_facture: "2026-04-20" })).toBe("2026-04-20");
+  });
+
+  it("rien d'exploitable → null", () => {
+    expect(dateExigibilite({ date_echeance: null, date_facture: null })).toBeNull();
   });
 });
 

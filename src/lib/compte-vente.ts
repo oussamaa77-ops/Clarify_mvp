@@ -21,10 +21,11 @@
 // ============================================================================
 
 import { FALLBACK_SECTEUR, normaliser } from "@/lib/categorization-engine";
+import { PCM } from "@/lib/pcm-referentiel";
 
-export const COMPTE_VENTE_MARCHANDISES = "7111";
-export const COMPTE_VENTE_BIENS_PRODUITS = "7121";
-export const COMPTE_VENTE_SERVICES = "7124";
+export const COMPTE_VENTE_MARCHANDISES = PCM.VENTES_MARCHANDISES;
+export const COMPTE_VENTE_BIENS_PRODUITS = PCM.VENTES_BIENS_PRODUITS;
+export const COMPTE_VENTE_SERVICES = PCM.VENTES_SERVICES;
 
 export type NatureVente = "marchandises" | "biens_produits" | "services";
 

@@ -10,6 +10,8 @@
 // interdit qu'un total affiché diffère d'un total exporté.
 // ============================================================================
 
+import { PCM, RACINES_PCM } from "./pcm-referentiel";
+
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
 function n(v: unknown): number {
@@ -226,8 +228,15 @@ export function resultatNetBalance(balance: LigneBalance[]): ResultatNet {
 // défaut signalé. La décision reste au comptable ; ce qui n'est plus permis,
 // c'est de ne pas la voir.
 
-/** Racine PCM des comptes transitoires ou d'attente. */
-export const RACINE_COMPTES_SUSPENS = "47";
+/**
+ * Racine des comptes d'attente de l'application.
+ *
+ * ⚠️ À VALIDER (cf. `COMPTES_A_VALIDER` dans pcm-referentiel.ts) : au CGNC, la
+ * rubrique 47 porte les écarts de conversion – passif ; les comptes transitoires
+ * ou d'attente y relèvent de 3497 / 4497. La racine est conservée tant que
+ * l'historique (47120000) n'est pas arbitré.
+ */
+export const RACINE_COMPTES_SUSPENS = RACINES_PCM.COMPTES_SUSPENS;
 
 /**
  * Comptes d'attente posés automatiquement par le rapprochement bancaire.
@@ -235,7 +244,7 @@ export const RACINE_COMPTES_SUSPENS = "47";
  * nommés, parce qu'un solde résiduel y désigne un travail inachevé et non un
  * choix de comptabilisation.
  */
-export const COMPTES_ATTENTE_BANQUE = ["4711", "4712"] as const;
+export const COMPTES_ATTENTE_BANQUE = [PCM.ATTENTE_BANQUE_DEBIT, PCM.ATTENTE_BANQUE_CREDIT] as const;
 
 /** Un compte d'attente qui porte encore un solde à l'arrêté. */
 export interface CompteSuspens {

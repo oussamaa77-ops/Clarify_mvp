@@ -375,13 +375,9 @@ function FournisseursPage() {
       .reduce((s, f) => s + Number(f.montant_restant ?? f.montant_ttc), 0);
     const total = facturesFourn.length;
     const payees = facturesFourn.filter((f) => f.statut_paiement === "payee").length;
-    const en_retard = facturesFourn.filter(
-      (f) =>
-        f.statut_paiement !== "payee" &&
-        f.date_echeance &&
-        new Date(f.date_echeance) < today &&
-        Number(f.montant_restant ?? f.montant_ttc) > 0,
-    ).length;
+    // Même règle que la balance âgée et le Dashboard : retard compté depuis
+    // l'exigibilité (échéance, à défaut émission) — cf. `joursRetard`.
+    const en_retard = facturesFourn.filter((f) => joursRetard(f, today) != null).length;
     const en_attente = total - payees - en_retard;
 
     const paidFacs = facturesFourn.filter((f) => f.statut_paiement === "payee" && f.date_facture);

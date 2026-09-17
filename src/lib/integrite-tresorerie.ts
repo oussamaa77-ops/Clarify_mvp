@@ -248,3 +248,107 @@ export function assertEcrituresTresorerie(
   const r = controlerEcrituresTresorerie(lignes, contexte);
   if (!r.ok) throw new Error(`Intégrité Banque ⇄ Compta : ${r.raison}`);
 }
+
+// ─── INVARIANT C_t ≥ 0 — une caisse ne peut pas être créditrice ──────────────
+//
+// L'invariant n'est PAS « le solde de clôture est positif » : une caisse qui
+// plonge en cours d'année et se rétablit avant le 31 décembre laisse un solde
+// final impeccable, alors qu'elle a été matériellement impossible — on ne sort
+// pas d'un tiroir un argent qui n'y est pas.
+//
+// ─── Pourquoi le cumul se prend en FIN DE JOURNÉE ────────────────────────────
+// Une caisse se compte le soir. À l'intérieur d'un même jour, l'ordre des
+// écritures n'a aucun sens comptable : rien ne dit, ni ne doit dire, si l'apport
+// de fonds a été saisi avant ou après le décaissement qu'il finance. Contrôler
+// ligne à ligne ferait donc dépendre le verdict de l'ordre de retour de la base
+// — le même dossier serait déclaré impossible une fois sur deux.
+//
+// Cette fonction est la SEULE définition de la règle. Elle sert au banc d'audit
+// (R2), à la batterie de cas invalides et à toute garde qui refuserait un
+// décaissement d'espèces : une règle recopiée à trois endroits finit par dire
+// trois choses.
+
+/** Racine PCM des comptes de caisse (516x). Cf. `comptes-tresorerie.ts`. */
+export const RACINE_CAISSE = "516";
+
+export interface CreuxCaisse {
+  /** Solde de caisse le plus bas atteint, en fin de journée. 0 si jamais négatif. */
+  creux: number;
+  /** Jour où ce creux est atteint. Vide quand la caisse n'est jamais descendue. */
+  date: string;
+  /** Solde après le dernier mouvement connu. */
+  cloture: number;
+  /** Nombre de lignes de caisse prises en compte. */
+  mouvements: number;
+  /** `true` quand la caisse reste positive tous les soirs — l'invariant C_t ≥ 0. */
+  ok: boolean;
+  /** Ce qu'il aurait fallu apporter pour rendre la trajectoire possible. 0 si `ok`. */
+  apportManquant: number;
+}
+
+/**
+ * Trajectoire du solde de caisse, jour par jour, et son point le plus bas.
+ *
+ * `seuil` absorbe l'arrondi : un creux de −0,004 MAD est un zéro, pas un défaut.
+ * Les lignes SANS date sont conservées et rangées en tête — les écarter
+ * masquerait un décaissement, et l'invariant doit être pessimiste.
+ */
+export function creuxCaisse(
+  lignes: LigneTresorerie[], seuil = 0.005,
+): CreuxCaisse {
+  const caisse = (lignes ?? []).filter(
+    (l) => txt(l.compte_numero).startsWith(RACINE_CAISSE));
+
+  const parJour = new Map<string, number>();
+  for (const l of caisse) {
+    const j = txt(l.date_ecriture).slice(0, 10);
+    parJour.set(j, (parJour.get(j) ?? 0) + nb(l.debit) - nb(l.credit));
+  }
+
+  let cumul = 0;
+  let creux = 0;
+  let date = "";
+  for (const j of [...parJour.keys()].sort()) {
+    cumul = round2(cumul + (parJour.get(j) ?? 0));
+    if (cumul < creux) { creux = cumul; date = j; }
+  }
+
+  const ok = creux >= -seuil;
+  return {
+    creux: round2(creux), date, cloture: round2(cumul), mouvements: caisse.length,
+    ok, apportManquant: ok ? 0 : round2(-creux),
+  };
+}
+
+/**
+ * Ce mouvement de caisse laisserait-il le tiroir créditeur ?
+ *
+ * `existantes` est le grand livre déjà en base, `candidates` ce qu'on s'apprête
+ * à écrire : le verdict porte sur la trajectoire RÉSULTANTE, seule question qui
+ * ait un sens. Juger la pièce seule refuserait un décaissement de 500 MAD sur
+ * une caisse qui en contient 20 000.
+ */
+export function controlerCaissePositive(
+  existantes: LigneTresorerie[], candidates: LigneTresorerie[], seuil = 0.005,
+): { ok: boolean; violations: string[]; avant: CreuxCaisse; apres: CreuxCaisse } {
+  const avant = creuxCaisse(existantes, seuil);
+  const apres = creuxCaisse([...(existantes ?? []), ...(candidates ?? [])], seuil);
+
+  // On ne reproche à la pièce que ce qu'elle AGGRAVE. Sur un dossier dont la
+  // caisse était déjà créditrice, refuser toute écriture bloquerait jusqu'aux
+  // apports de fonds qui la redressent — le contrôle empêcherait la correction
+  // qu'il réclame.
+  if (apres.ok || apres.creux >= avant.creux - seuil) {
+    return { ok: true, violations: [], avant, apres };
+  }
+  return {
+    ok: false, avant, apres,
+    violations: [
+      `Caisse créditrice : ce mouvement fait descendre le solde à `
+      + `${apres.creux.toFixed(2)} MAD au ${apres.date || "(sans date)"}. Une caisse ne peut `
+      + `pas être négative — il manque une entrée de fonds d'au moins `
+      + `${apres.apportManquant.toFixed(2)} MAD, ou le décaissement est passé en espèces `
+      + `alors qu'il a été réglé par banque.`,
+    ],
+  };
+}

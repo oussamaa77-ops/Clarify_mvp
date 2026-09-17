@@ -38,18 +38,19 @@
 // Le couple (compte de trésorerie → journal) vit dans comptes-tresorerie.ts, et
 // pas ici : le paiement DGI est un décaissement comme un autre.
 import { journalDeTresorerie } from "@/lib/comptes-tresorerie";
+import { PCM, RACINES_PCM } from "@/lib/pcm-referentiel";
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 const nb = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
 const txt = (v: unknown) => String(v ?? "").trim();
 
 /** Comptes de la liquidation — mêmes numéros que le régime des encaissements. */
-export const COMPTE_TVA_COLLECTEE = "44551";
-export const COMPTE_TVA_DEDUCTIBLE = "34552";
-export const COMPTE_TVA_DUE = "4456";
+export const COMPTE_TVA_COLLECTEE = PCM.TVA_FACTUREE_EXIGIBLE;
+export const COMPTE_TVA_DEDUCTIBLE = PCM.TVA_RECUPERABLE_CHARGES;
+export const COMPTE_TVA_DUE = PCM.TVA_DUE;
 /** Racines de détection, pour ramasser les sous-comptes (44551 ⊂ 4455). */
-export const RACINE_COLLECTEE = "4455";
-export const RACINE_DEDUCTIBLE = "3455";
+export const RACINE_COLLECTEE = RACINES_PCM.TVA_FACTUREE;
+export const RACINE_DEDUCTIBLE = RACINES_PCM.TVA_RECUPERABLE;
 
 export interface LigneTva {
   journal_code?: string | null;
@@ -372,7 +373,7 @@ export function construireOdPaiementDgi(p: {
 }): LigneDeclaration[] {
   const m = round2(Math.abs(nb(p.montant)));
   if (m <= 0) return [];
-  const banque = txt(p.compteBanque) || "5141";
+  const banque = txt(p.compteBanque) || PCM.BANQUE;
   const commun = {
     journal_code: journalDeTresorerie(banque),
     date_ecriture: p.date,

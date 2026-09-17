@@ -29,7 +29,21 @@ export interface PaiementRef {
   factureId: string;
   montant: number;
   date: string;
-  origine: "encaissement" | "lettrage" | "manuel";
+  /**
+   * Ce qui a éteint la créance ou la dette. Miroir exact du CHECK
+   * `paiements_origine_check` — les élargir séparément ferait accepter ici une
+   * valeur que la base refuse, ou l'inverse.
+   *
+   *   'encaissement' / 'lettrage'  dérivées d'une pièce de trésorerie, et
+   *                                RECONSTRUITES par synchroniser_paiements_dossier ;
+   *   'manuel'                     versement saisi à la main : de l'argent EST entré ;
+   *   'avoir'                      la créance a été ANNULÉE, AUCUN argent n'a circulé.
+   *
+   * La dernière n'est pas un synonyme de 'manuel' : un état de trésorerie qui
+   * somme les règlements pour dire ce qui a été encaissé doit écarter 'avoir',
+   * sans quoi il compte une annulation comme une recette.
+   */
+  origine: "encaissement" | "lettrage" | "manuel" | "avoir";
   /** Pièce d'origine — porte l'idempotence (une ligne de relevé / un encaissement = un paiement). */
   transactionId?: string | null;
   encaissementId?: string | null;

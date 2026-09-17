@@ -375,8 +375,12 @@ const PCM_COMPTES = [
   { numero: "7111", intitule: "Ventes de marchandises", type_compte: "produit" },
   { numero: "7121", intitule: "Ventes de biens produits", type_compte: "produit" },
   { numero: "7124", intitule: "Ventes de services produits", type_compte: "produit" },
-  { numero: "6141", intitule: "Achats de marchandises", type_compte: "charge" },
-  { numero: "6111", intitule: "Achats de matières premières", type_compte: "charge" },
+  // Intitulés alignés sur `pcm_reference` : 6111 porte les ACHATS DE MARCHANDISES,
+  // et 6141 « Études, recherches et documentation ». Les deux étaient inversés /
+  // faux, si bien que le plan d'un nouveau dossier annonçait des achats de
+  // marchandises sur un compte d'études.
+  { numero: "6111", intitule: "Achats de marchandises", type_compte: "charge" },
+  { numero: "6141", intitule: "Études, recherches et documentation", type_compte: "charge" },
   { numero: "6131", intitule: "Locations", type_compte: "charge" },
   { numero: "6171", intitule: "Rémunérations du personnel", type_compte: "charge" },
 ];

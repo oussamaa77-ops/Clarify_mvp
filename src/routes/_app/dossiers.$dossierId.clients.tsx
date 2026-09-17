@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Plus, Pencil, Trash2, Users, X, FileText, Download, Wand2, BarChart2, Scale, Receipt } from "lucide-react";
 import { toast } from "sonner";
 import { logAudit } from "@/lib/audit";
+import { joursRetard } from "@/lib/factures-filtres";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
 import { TiersReporting } from "@/components/TiersReporting";
 import { BalanceAgee } from "@/components/BalanceAgee";
@@ -148,11 +149,9 @@ function ClientsPage() {
     const ca = factures.reduce((s, f) => s + Number(f.montant_ttc), 0);
     const total = factures.length;
     const payees = factures.filter(f => f.statut_paiement === "payee").length;
-    const en_retard = factures.filter(f =>
-      f.statut_paiement !== "payee" &&
-      f.date_echeance && new Date(f.date_echeance) < today &&
-      Number(f.montant_restant ?? f.montant_ttc) > 0
-    ).length;
+    // Retard compté depuis l'exigibilité (échéance, à défaut émission), comme
+    // la balance âgée — cf. `joursRetard`.
+    const en_retard = factures.filter(f => joursRetard(f, today) != null).length;
     const en_attente = total - payees - en_retard;
 
     const paidFacs = factures.filter(f => f.statut_paiement === "payee" && f.date_facture);

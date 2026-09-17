@@ -5,6 +5,7 @@
 // Compte collectif (général) côté Maroc : clients = 3421, fournisseurs = 4411.
 
 import { normaliserNumeroCompte } from "./numero-compte";
+import { PCM } from "./pcm-referentiel";
 
 export type TiersType = "client" | "fournisseur";
 
@@ -22,7 +23,7 @@ export interface TiersSage {
 // Racines PCM, en forme COURTE : elles servent de prefixe dans tout le code.
 // La colonne CSV, elle, sort en forme canonique 8 chiffres — Sage attend une
 // longueur fixe et refuse un fichier qui melange 4 et 8.
-const COMPTE_COLLECTIF: Record<TiersType, string> = { client: "3421", fournisseur: "4411" };
+const COMPTE_COLLECTIF: Record<TiersType, string> = { client: PCM.CLIENTS, fournisseur: PCM.FOURNISSEURS };
 const PREFIXE: Record<TiersType, string> = { client: "C", fournisseur: "F" };
 
 /**

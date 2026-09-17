@@ -14,6 +14,8 @@ import { z } from "zod";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { CLIENT_PREFIXES, normalizeLibelle } from "@/lib/import-grandlivre";
 import { sendMail, type MailAttachment } from "./mailer";
+import { dateExigibilite } from "@/lib/factures-filtres";
+import { postesRepriseClients } from "@/lib/relances-postes";
 
 let PROXY_DIRECT = false;
 async function proxyFetch(input: any, init?: any): Promise<Response> {
@@ -71,13 +73,13 @@ export const getRelancesClient = createServerFn({ method: "POST" })
         (sb as any).from("factures")
           .select("id,numero,montant_ttc,montant_paye,montant_restant,date_facture,date_echeance,client_id,fichier_original_url,fichier_original_nom,fichier_original_type,clients(nom,email)")
           .eq("dossier_id", data.dossierId).eq("statut", "conforme").neq("statut_paiement", "payee"),
-        // Source 2 = créances 342x de REPRISE uniquement : facture_id NULL. Une écriture
-        // liée à une facture (facture_id renseigné) est le pendant comptable d'une facture
-        // OCR déjà comptée en source 1 → l'inclure ferait un DOUBLON + un faux client nommé
-        // d'après le libellé de la facture (« Vente FAC-… »). On l'exclut donc explicitement.
+        // Source 2 = créances 342x de REPRISE. On lit TOUTES les lignes clients, y
+        // compris celles liées à une facture ou à un relevé : `postesRepriseClients`
+        // les écarte des postes, mais s'en sert pour reconnaître un À-NOUVEAU qui ne
+        // fait que reporter une créance déjà présente (sans quoi elle compte double).
         (sb as any).from("ecritures_comptables")
-          .select("id,compte_numero,libelle,debit,credit,reference_piece,date_ecriture,lettree,facture_id")
-          .eq("dossier_id", data.dossierId).is("transaction_id", null).is("facture_id", null),
+          .select("id,journal_code,compte_numero,libelle,debit,credit,reference_piece,date_ecriture,lettree,lettrage_code,facture_id,transaction_id")
+          .eq("dossier_id", data.dossierId).like("compte_numero", "342%"),
         (sb as any).from("clients")
           .select("id,nom,email").eq("dossier_id", data.dossierId).is("deleted_at", null),
       ]);
@@ -100,46 +102,34 @@ export const getRelancesClient = createServerFn({ method: "POST" })
         return e;
       };
 
-      // ── Source 1 : factures OCR en retard (échéance dépassée, non soldées) ──────
+      // ── Source 1 : factures en retard (exigibles, non soldées) ────────────────
+      // Exigibilité = échéance, à défaut émission : la règle de la balance âgée.
+      // Filtrer sur la seule échéance ignorait toute facture qui n'en porte pas.
+      const numerosRelances: string[] = [];
       for (const f of factures ?? []) {
-        if (!f.date_echeance || new Date(f.date_echeance).getTime() >= todayMs) continue;
+        const exigible = dateExigibilite(f);
+        if (!exigible || new Date(exigible).getTime() >= todayMs) continue;
         // Montant dû robuste à un montant_restant périmé (0 alors que la facture est non payée).
         const rRaw = Number(f.montant_restant ?? 0);
         const du = rRaw > 0.005 ? rRaw : Math.max(0, Number(f.montant_ttc ?? 0) - Number(f.montant_paye ?? 0));
         if (!(du > 0.005)) continue;
+        if (f.numero) numerosRelances.push(f.numero);
         const nom = f.clients?.nom ?? "Client";
         const e = getEntry(nom, f.client_id, f.clients?.email ?? null);
         e.items.push({
           source: "facture", ref: f.numero ?? String(f.id).slice(0, 8), montant: Number(du.toFixed(2)),
-          date: f.date_echeance, jours: joursDepuis(f.date_echeance, todayMs),
+          date: exigible, jours: joursDepuis(exigible, todayMs),
           factureId: f.id, fichierUrl: f.fichier_original_url ?? null,
           fichierNom: f.fichier_original_nom ?? null, fichierType: f.fichier_original_type ?? null,
         });
       }
 
       // ── Source 2 : postes ouverts 342x issus de la reprise (nettés par pièce) ──
-      const groups = new Map<string, { ids: string[]; nom: string; debit: number; credit: number; minDate: string | null; ref: string }>();
-      for (const r of ecr ?? []) {
-        const c = String(r.compte_numero ?? "").trim();
-        if (!c || r.lettree === true) continue;
-        if (r.facture_id) continue;                                     // pendant d'une facture OCR (source 1) → jamais un client à part
-        if (!CLIENT_PREFIXES.some((p) => c.startsWith(p))) continue;   // clients = 342x
-        const piece = String(r.reference_piece ?? "").trim();
-        const key = piece ? `${c}|${piece}` : `${c}|#${r.id}`;
-        const g = groups.get(key) ?? { ids: [], nom: "", debit: 0, credit: 0, minDate: null, ref: piece || c };
-        g.ids.push(r.id);
-        g.debit += Number(r.debit ?? 0);
-        g.credit += Number(r.credit ?? 0);
-        if (Number(r.debit ?? 0) > 0 && !g.nom) g.nom = String(r.libelle ?? "").trim();   // côté facture
-        if (r.date_ecriture && (!g.minDate || String(r.date_ecriture) < g.minDate)) g.minDate = r.date_ecriture;
-        groups.set(key, g);
-      }
-      for (const g of groups.values()) {
-        const residual = g.debit - g.credit;             // créance nette
-        if (!(residual > 0.01)) continue;                // soldé ou sens inverse → ignoré
-        const nom = g.nom || `Compte ${g.ref}`;
-        const e = getEntry(nom);
-        e.items.push({ source: "gl", ref: g.ref, montant: Number(residual.toFixed(2)), date: g.minDate, jours: joursDepuis(g.minDate, todayMs), ecritureIds: g.ids });
+      // Les à-nouveaux qui reportent une créance déjà connue et les pièces d'une
+      // facture déjà relancée en sortent (cf. src/lib/relances-postes.ts).
+      for (const p of postesRepriseClients(ecr ?? [], CLIENT_PREFIXES, numerosRelances)) {
+        const e = getEntry(p.nom || `Compte ${p.ref}`);
+        e.items.push({ source: "gl", ref: p.ref, montant: p.montant, date: p.date, jours: joursDepuis(p.date, todayMs), ecritureIds: p.ecritureIds });
       }
 
       // Totaux + tri.

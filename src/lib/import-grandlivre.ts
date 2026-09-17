@@ -11,6 +11,7 @@
 // ============================================================================
 
 import { normaliserNumeroCompte } from "./numero-compte";
+import { validatePcmAccount } from "./pcm-referentiel";
 
 export type TargetField =
   | "date" | "journal" | "compte" | "libelle"
@@ -237,6 +238,12 @@ export function normalizeRows(dataRows: unknown[][], mapping: Mapping): {
     const date = parseDate(cell(row, mapping.date));
     if (!date) warnings.push("date illisible");
     if (!compte) warnings.push("compte manquant");
+    else {
+      // Un grand livre historique n'est pas refusé pour un compte hors CGNC — il
+      // serait perdu. Le défaut est SIGNALÉ dans l'aperçu, avant l'import.
+      const verdict = validatePcmAccount(compte);
+      if (!verdict.ok) warnings.push(`compte hors référentiel PCM : ${verdict.erreurs.join(" ")}`);
+    }
 
     let debit = 0, credit = 0;
     if (hasDC) {

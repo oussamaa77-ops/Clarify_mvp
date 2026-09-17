@@ -66,13 +66,39 @@ export function estPayee(f: FactureFiltrable): boolean {
 }
 
 /**
+ * Date à partir de laquelle une facture est EXIGIBLE : son échéance, à défaut sa
+ * date d'émission.
+ *
+ * C'est la règle de la vue SQL `v_balance_agee` (COALESCE(date_echeance,
+ * date_facture)), et elle doit être la seule de l'application. Le Dashboard
+ * lisait l'échéance SEULE : une facture sans échéance y restait « dans les
+ * temps » pour toujours, pendant que le module Fournisseurs, adossé à la vue, la
+ * classait « Urgent (+60 j) ». FF-GOLD-001, émise le 20/04/2026 sans échéance,
+ * était ainsi à 147 jours de retard d'un côté et à 0 de l'autre.
+ *
+ * Compter le retard dès l'émission quand aucune échéance n'a été saisie est la
+ * lecture PRUDENTE — et surtout celle que la balance âgée affiche déjà. Un
+ * délai convenu se matérialise en renseignant `date_echeance`, qui prime.
+ */
+export function dateExigibilite(
+  f: Pick<FactureFiltrable, "date_echeance" | "date_facture">,
+): string | null {
+  const ech = String(f.date_echeance ?? "").trim();
+  if (ech && jourUTC(ech) != null) return ech;
+  const emission = String(f.date_facture ?? "").trim();
+  return emission && jourUTC(emission) != null ? emission : null;
+}
+
+/**
  * Nombre de jours de retard à la date du jour (recalculé à chaque affichage —
  * c'est ce qui rend le retard « dynamique »). `null` si la facture est soldée,
- * sans échéance, ou si l'échéance n'est pas encore dépassée.
+ * sans date exploitable, ou si elle n'est pas encore exigible.
+ *
+ * Le retard court depuis la date d'EXIGIBILITÉ (cf. `dateExigibilite`).
  */
 export function joursRetard(f: FactureFiltrable, aujourdhui: Date = new Date()): number | null {
   if (estPayee(f)) return null;
-  const ech = jourUTC(f.date_echeance);
+  const ech = jourUTC(dateExigibilite(f));
   const now = jourUTC(aujourdhui);
   if (ech == null || now == null) return null;
   const jours = now - ech;

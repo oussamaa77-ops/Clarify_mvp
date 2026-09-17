@@ -47,6 +47,10 @@ import {
   type LigneOD, type SensTiers,
 } from "@/services/lettrage";
 import { compteTiersAuxiliaire } from "@/lib/comptes-auxiliaires";
+import { controlerTvaHorsClasse6 } from "@/lib/garde-tva-classe6";
+import {
+  PCM, RACINES_PCM, controlerComptesPcm, validatePcmAccount,
+} from "@/lib/pcm-referentiel";
 import {
   bornesExercice, dansExercice, exerciceCourant, jourIso, type BornesExercice,
 } from "@/lib/exercice-comptable";
@@ -78,7 +82,7 @@ export const COMPTE_TVA_EXIGIBLE = {
  * (44551) et on reconnaît sur la racine (4455), qui couvre aussi les écritures
  * historiques restées sur elle — sans quoi le contrôle les laisserait passer.
  */
-export const RACINES_TVA_EXIGIBLE = ["4455", "3455"] as const;
+export const RACINES_TVA_EXIGIBLE = [RACINES_PCM.TVA_FACTUREE, RACINES_PCM.TVA_RECUPERABLE] as const;
 
 /**
  * Comptes de trésorerie interdits au journal OD.
@@ -88,7 +92,7 @@ export const RACINES_TVA_EXIGIBLE = ["4455", "3455"] as const;
  * banque). Une égalité stricte sur « 5161 » ne verrait aucune des écritures
  * réellement produites.
  */
-export const COMPTES_TRESORERIE_HORS_OD = ["5141", "5161"] as const;
+export const COMPTES_TRESORERIE_HORS_OD = [PCM.BANQUE, PCM.CAISSE] as const;
 
 /** Journaux qui constatent un fait générateur de facture — jamais un paiement. */
 export const JOURNAUX_FACTURATION = ["VTE", "ACH", "VTE-AVR", "ACH-AVR"] as const;
@@ -334,9 +338,9 @@ export function controlerUniciteReference(
 /** Racines des comptes de tiers, par nature de solde. */
 export const RACINES_TIERS = {
   /** Clients : compte d'ACTIF, éteint par un CRÉDIT à l'encaissement. */
-  client: "3421",
+  client: PCM.CLIENTS,
   /** Fournisseurs : compte de PASSIF, éteint par un DÉBIT au décaissement. */
-  fournisseur: "4411",
+  fournisseur: PCM.FOURNISSEURS,
 } as const;
 
 export function controlerSensReglement(lignes: LigneEcriture[]): ControleRegime {
@@ -383,7 +387,7 @@ export function controlerSensReglement(lignes: LigneEcriture[]): ControleRegime 
 // c'est par là que naissent les crédits de TVA auxquels un dossier n'a pas droit.
 
 /** Racine du compte de liquidation de TVA. Miroir de `COMPTE_TVA_DUE`. */
-export const RACINE_TVA_DUE = "4456";
+export const RACINE_TVA_DUE = RACINES_PCM.TVA_DUE;
 
 /**
  * Références des pièces autorisées à mouvementer le 4456.
@@ -534,7 +538,11 @@ export function controlerEcrituresRegime(
 ): VerdictRegime {
   const unicite = controlerUniciteReference(lignes, opts.existantes ?? []);
   const violations = [
+    // VERROU 10 : aucun compte hors référentiel PCM (format, classe, rubrique CGNC).
+    ...controlerComptesPcm(lignes).violations,
     ...controlerTvaOrigine(lignes).violations,
+    // VERROU 9 : la TVA récupérable ne touche jamais une charge de classe 6.
+    ...controlerTvaHorsClasse6(lignes).violations,
     ...controlerJournalOd(lignes).violations,
     ...controlerCutoffExercice(lignes, opts.bornes).violations,
     ...controlerSensReglement(lignes).violations,
@@ -612,7 +620,7 @@ export interface LigneAchat {
 }
 
 /** Compte de charge par défaut, aligné sur le moteur de catégorisation. */
-export const COMPTE_CHARGE_DEFAUT_ACHAT = "6141";
+export const COMPTE_CHARGE_DEFAUT_ACHAT = PCM.CHARGE_DEFAUT;
 
 /**
  * Les écritures du journal des ACHATS pour une facture fournisseur.
@@ -680,12 +688,25 @@ export interface ControleLignesAchat extends ControleRegime {
  *   3. une partie double déséquilibrée.
  */
 export function controlerLignesAchat(lignes: LigneEcriture[]): ControleLignesAchat {
-  const violations = [...controlerTvaOrigine(lignes).violations];
+  const violations = [
+    ...controlerComptesPcm(lignes).violations,
+    ...controlerTvaOrigine(lignes).violations,
+    ...controlerTvaHorsClasse6(lignes).violations,
+  ];
 
   const debitCharge = lignes.reduce(
-    (s, l) => txt(l.compte_numero).startsWith("6") ? s + r2(l.debit) - r2(l.credit) : s, 0);
+    (s, l) => txt(l.compte_numero).startsWith(RACINES_PCM.CHARGES) ? s + r2(l.debit) - r2(l.credit) : s, 0);
   if (r2(debitCharge) <= 0.005) {
     violations.push("Aucune charge de classe 6 débitée : cet achat n'apparaîtrait pas au compte de résultat.");
+  }
+
+  // La dette d'une facture d'achat se porte sur un compte FOURNISSEUR (441x) :
+  // un crédit sur un compte client ou de produit ferait naître la dette ailleurs.
+  for (const l of lignes) {
+    if (r2(l.credit) > 0.005 && !validatePcmAccount(l.compte_numero, { usage: "fournisseur" }).ok) {
+      violations.push(`Compte ${txt(l.compte_numero)} crédité sur un achat : la dette se porte sur `
+        + `un compte fournisseur (${RACINES_PCM.FOURNISSEURS}x).`);
+    }
   }
 
   const ecart = r2(lignes.reduce((s, l) => s + r2(l.debit) - r2(l.credit), 0));

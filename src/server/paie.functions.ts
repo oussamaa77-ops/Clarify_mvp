@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
+import { assertLignesPaie, lignesEcrituresPaie } from "@/lib/ecritures-paie";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -197,21 +198,12 @@ export const validerBulletin = createServerFn({ method: "POST" })
     if (b.ecriture_creee) throw new Error("Bulletin déjà validé");
 
     const nom = `${b.employes?.prenom} ${b.employes?.nom}`;
-    const ref = `PAIE-${b.periode}`;
 
-    await supabase.from("ecritures_comptables").insert(normaliserComptesLignes([
-      // Charge salariale brute
-      { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "6171", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `Salaire ${nom} ${b.periode}`, debit: Number(b.net_a_payer) + Number(b.total_retenues), credit: 0, reference_piece: ref, valide: true },
-      // CNSS + AMO salarial (retenu sur salaire)
-      { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "4441", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `CNSS salarial ${nom}`, debit: 0, credit: Number(b.cnss_salarie) + Number(b.amo_salarie), reference_piece: ref, valide: true },
-      // IR retenu à la source
-      { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "4443", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `IR/salaire ${nom}`, debit: 0, credit: Number(b.ir_net), reference_piece: ref, valide: true },
-      // Net à payer
-      { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "4441", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `Net à payer ${nom}`, debit: 0, credit: Number(b.net_a_payer), reference_piece: ref, valide: true },
-      // Charges patronales CNSS/AMO
-      { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "6174", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `Charges sociales patronales ${nom}`, debit: Number(b.cnss_patronal) + Number(b.amo_patronal) + Number(b.taxe_formation_pro), credit: 0, reference_piece: ref, valide: true },
-      { dossier_id: b.dossier_id, journal_code: "OD", compte_numero: "4441", date_ecriture: b.date_paiement ?? b.periode + "-01", libelle: `CNSS/AMO patronal ${nom}`, debit: 0, credit: Number(b.cnss_patronal) + Number(b.amo_patronal) + Number(b.taxe_formation_pro), reference_piece: ref, valide: true },
-    ]));
+    // Lignes construites et contrôlées par la lib pure (net à payer en 4432,
+    // partie double et référentiel PCM vérifiés AVANT l'insert).
+    const lignes = lignesEcrituresPaie(b, nom);
+    assertLignesPaie(lignes, b);
+    await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(lignes));
 
     await (supabase as any).from("bulletins_paie").update({ statut: "valide", ecriture_creee: true }).eq("id", data.bulletin_id);
 

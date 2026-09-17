@@ -30,13 +30,14 @@
 import { statutPaiement } from "@/lib/paiements";
 import { estJournalTresorerie } from "@/lib/integrite-tresorerie";
 import { paiementsRecevables } from "@/lib/reglements";
+import { PCM, RACINES_PCM } from "@/lib/pcm-referentiel";
 
 /** Racines PCM. Les auxiliaires en dérivent par préfixe : 34210002 ⊂ 3421. */
-export const COMPTE_CLIENTS = "3421";
-export const COMPTE_FOURNISSEURS = "4411";
+export const COMPTE_CLIENTS = PCM.CLIENTS;
+export const COMPTE_FOURNISSEURS = PCM.FOURNISSEURS;
 /** Banque (514x) et caisse (516x) — les deux poches de la trésorerie. */
-export const COMPTE_BANQUE = "5141";
-export const RACINES_TRESORERIE = ["514", "516"] as const;
+export const COMPTE_BANQUE = PCM.BANQUE;
+export const RACINES_TRESORERIE = [RACINES_PCM.BANQUE, RACINES_PCM.CAISSE] as const;
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 const nb = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };

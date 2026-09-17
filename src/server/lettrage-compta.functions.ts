@@ -24,6 +24,7 @@ import {
   JOURNAUX_REGLEMENT, type LigneTresoreriePreuve,
 } from "@/lib/genererEcritures";
 import { memeCompte, normaliserNumeroCompte } from "@/lib/numero-compte";
+import { controlerCaissePositive, RACINE_CAISSE } from "@/lib/integrite-tresorerie";
 
 /**
  * Insère une pièce d'OD construite par le moteur, en dégradant proprement.
@@ -62,6 +63,33 @@ export async function insererPiece(
         .eq("dossier_id", dossierId)
         .in("journal_code", [...JOURNAUX_REGLEMENT]);
       if (!error) tresorerie = (data ?? []) as LigneTresoreriePreuve[];
+    } catch {
+      // Client sans `select` (bouchons de test) : verrou non armé, à dessein.
+    }
+  }
+
+  // ── VERROU 8 : une caisse ne peut pas devenir créditrice (C_t ≥ 0) ────────
+  // Même raisonnement que le verrou 7, et même prudence : l'invariant porte sur
+  // la TRAJECTOIRE du solde, que seul le grand livre connaît. On ne le lit que
+  // si la pièce SORT des espèces — un encaissement ne peut pas creuser le
+  // tiroir, et faire une requête de plus à chaque écriture coûterait sans rien
+  // protéger.
+  //
+  // Le contrôle ne reproche à la pièce que ce qu'elle AGGRAVE (cf.
+  // `controlerCaissePositive`) : sur un dossier dont la caisse est déjà
+  // créditrice, refuser tout mouvement bloquerait jusqu'aux apports de fonds qui
+  // la redressent — le verrou empêcherait la correction qu'il réclame.
+  const sortEspeces = lignes.some(
+    (l) => String(l.compte_numero ?? "").startsWith(RACINE_CAISSE) && Number(l.credit) > 0.005);
+  if (sortEspeces) {
+    try {
+      const { data, error } = await sb.from("ecritures_comptables")
+        .select("journal_code,compte_numero,date_ecriture,debit,credit")
+        .eq("dossier_id", dossierId);
+      if (!error) {
+        const c = controlerCaissePositive((data ?? []) as any[], lignes as any[]);
+        if (!c.ok) return { error: c.violations.join(" ") };
+      }
     } catch {
       // Client sans `select` (bouchons de test) : verrou non armé, à dessein.
     }

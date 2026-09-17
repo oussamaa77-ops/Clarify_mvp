@@ -1514,7 +1514,7 @@ function BanquePage() {
   };
 
   const genererEDI=async()=>{
-    const COMPTES_TVA_DEDUCTIBLE=["4411","6122","6125","6131","6132","6141","6142","6145","6146","6347"];
+    const COMPTES_TVA_DEDUCTIBLE=["4411","6122","6125","6131","6132","6133","6141","6142","6145","6146","6347"];
     const txEligibles=txExtraites.filter(tx=>{
       if(tx.type!=="debit") return false;
       if(tx.justificatif_id){
@@ -1779,7 +1779,7 @@ function BanquePage() {
     //  • frais bancaires (compte 6347) sans document — exception générique, HT/TVA/TTC
     //    reconstitués par corrélation de comptes PCM (6347 ↔ 4456 même référence).
     // Les lignes de TVA isolées (compte 4456) ne se déclarent jamais seules (exclues).
-    const COMPTES_TVA_DEDUCTIBLE=["4411","6122","6125","6131","6132","6141","6142","6145","6146","6347"];
+    const COMPTES_TVA_DEDUCTIBLE=["4411","6122","6125","6131","6132","6133","6141","6142","6145","6146","6347"];
     const txEligibles = transactions.filter(tx => {
       if (!selectedTxIds.has(tx.id) || tx.type !== "debit") return false;
       const code=_comptePcm(tx as any);

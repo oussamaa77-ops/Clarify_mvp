@@ -25,6 +25,7 @@
 // ============================================================================
 
 import { CLIENT_PREFIXES, FOURNISSEUR_PREFIXES } from "@/lib/import-grandlivre";
+import { PCM, RACINES_PCM } from "@/lib/pcm-referentiel";
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 const n = (v: unknown): number => {
@@ -56,9 +57,13 @@ export const TOLERANCE_LETTRAGE = 0.005;
 // Un seul compte par nature, du fait générateur à la déclaration.
 export const COMPTES_TVA = {
   /** Vente : TVA facturée en attente (4458) → TVA collectée exigible (44551). */
-  client:      { attente: "4458", exigible: "44551", racineExigible: "4455" },
+  client: {
+    attente: PCM.TVA_ATTENTE_VENTE, exigible: PCM.TVA_FACTUREE_EXIGIBLE, racineExigible: RACINES_PCM.TVA_FACTUREE,
+  },
   /** Achat : TVA sur achats en attente (3458) → TVA récupérable (34552). */
-  fournisseur: { attente: "3458", exigible: "34552", racineExigible: "3455" },
+  fournisseur: {
+    attente: PCM.TVA_ATTENTE_ACHAT, exigible: PCM.TVA_RECUPERABLE_CHARGES, racineExigible: RACINES_PCM.TVA_RECUPERABLE,
+  },
 } as const;
 
 /**
@@ -75,13 +80,15 @@ export const COMPTES_TVA = {
  * à être emportée par l'annulation d'un règlement. Le 4456 est interdit au
  * lettrage (cf. `RACINES_TVA_NON_LETTRABLES`), ce qui est une autre question.
  */
-export const RACINES_TVA_TRANSIT = ["4455", "4458", "3455", "3458"] as const;
+export const RACINES_TVA_TRANSIT = [
+  RACINES_PCM.TVA_FACTUREE, RACINES_PCM.TVA_ATTENTE_VENTE, RACINES_PCM.TVA_RECUPERABLE, RACINES_PCM.TVA_ATTENTE_ACHAT,
+] as const;
 
 /**
  * Tous les comptes de TVA interdits au lettrage — transit ET 4456 « État TVA due ».
  * Aucun ne porte de créance : ils se soldent par la déclaration périodique.
  */
-export const RACINES_TVA_NON_LETTRABLES = [...RACINES_TVA_TRANSIT, "4456"] as const;
+export const RACINES_TVA_NON_LETTRABLES = [...RACINES_TVA_TRANSIT, RACINES_PCM.TVA_DUE] as const;
 
 export type SensTiers = "client" | "fournisseur";
 export type ComptesTva = Record<SensTiers, { attente: string; exigible: string; racineExigible?: string }>;
@@ -292,8 +299,8 @@ export interface VerdictLettrable {
  * fonctions séparées, et non par un seul jeu de préfixes élargi.
  */
 export const COMPTES_LETTRABLES: Record<SensTiers, string> = {
-  client: "3421",
-  fournisseur: "4411",
+  client: PCM.CLIENTS,
+  fournisseur: PCM.FOURNISSEURS,
 };
 
 /** Ce compte peut-il être lettré ? Rend le sens du tiers quand oui. */

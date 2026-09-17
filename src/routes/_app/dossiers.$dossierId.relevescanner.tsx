@@ -16,6 +16,8 @@ import { parseAttijariReleve, extractRibMarocain } from "@/lib/releve-attijari";
 import { enregistrerPaiement } from "@/lib/paiements";
 import { traiterPagesEnPipeline } from "@/lib/pipeline-pages";
 import { COMPTE_CAISSE_DEFAUT } from "@/lib/comptes-tresorerie";
+import { PCM_MAP } from "@/lib/comptabilite-bq";
+import { PCM, RACINES_PCM } from "@/lib/pcm-referentiel";
 import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
 
@@ -51,28 +53,33 @@ interface InfoReleve {
   solde_initial: number; solde_final: number;
 }
 
+// Les comptes sont LUS dans PCM_MAP (src/lib/comptabilite-bq.ts), la table de
+// la banque : une nature n'a qu'un compte, quel que soit l'écran qui la saisit.
+// Deux exceptions volontaires, propres au scanner : `cnss_amo` y constate la
+// CHARGE (6174) et non l'extinction de la dette (4441), et `gasoil` y reste sur
+// 6122 — l'imputation du carburant est en attente d'arbitrage (cf. PCM_MAP).
 const NATURES_OPERATION = [
-  { value: "encaissement_client",  label: "Encaissement client",    code: "3421", tva: false },
-  { value: "paiement_fournisseur", label: "Paiement fournisseur",   code: "4411", tva: true  },
-  { value: "salaires",             label: "Paiement salaires",      code: "6171", tva: false },
-  { value: "cnss_amo",             label: "CNSS / AMO",             code: "6174", tva: false },
-  { value: "tva_dgi",              label: "TVA / Impôts DGI",       code: "4456", tva: false },
-  { value: "loyers",               label: "Loyer / Location",       code: "6131", tva: true  },
-  { value: "eau_electricite",      label: "Eau / Électricité ONEE", code: "6125", tva: true  },
-  { value: "telecom",              label: "Téléphone / Internet",   code: "6132", tva: true  },
+  { value: "encaissement_client",  label: "Encaissement client",    code: PCM_MAP.encaissement_client.code, tva: false },
+  { value: "paiement_fournisseur", label: "Paiement fournisseur",   code: PCM_MAP.paiement_fournisseur.code, tva: true  },
+  { value: "salaires",             label: "Paiement salaires",      code: PCM_MAP.salaires.code, tva: false },
+  { value: "cnss_amo",             label: "CNSS / AMO",             code: PCM.CHARGES_SOCIALES, tva: false },
+  { value: "tva_dgi",              label: "TVA / Impôts DGI",       code: PCM_MAP.tva_dgi.code, tva: false },
+  { value: "loyers",               label: "Loyer / Location",       code: PCM_MAP.loyers.code, tva: true  },
+  { value: "eau_electricite",      label: "Eau / Électricité ONEE", code: PCM_MAP.eau_electricite.code, tva: true  },
+  { value: "telecom",              label: "Téléphone / Internet",   code: PCM_MAP.telecom.code, tva: true  },
   { value: "gasoil",               label: "Gasoil / Carburant",     code: "6122", tva: true  },
-  { value: "assurance",            label: "Assurance",              code: "6161", tva: false },
-  { value: "entretien",            label: "Entretien / Réparation", code: "6141", tva: true  },
-  { value: "frais_bancaires",      label: "Frais bancaires",        code: "6347", tva: false },
-  { value: "taxe_professionnelle", label: "Taxe Professionnelle",   code: "6313", tva: false },
+  { value: "assurance",            label: "Assurance",              code: PCM_MAP.assurance.code, tva: false },
+  { value: "entretien",            label: "Entretien / Réparation", code: PCM_MAP.entretien.code, tva: true  },
+  { value: "frais_bancaires",      label: "Frais bancaires",        code: PCM_MAP.frais_bancaires.code, tva: false },
+  { value: "taxe_professionnelle", label: "Taxe Professionnelle",   code: PCM_MAP.taxe_professionnelle.code, tva: false },
   // Caisse : le MÊME compte que les règlements en espèces et que comptabilite-bq.
   // « 5161 » tout court était le bon niveau mais pas le bon compte : deux libellés
   // de caisse dans le grand livre, donc deux soldes à rapprocher à la main.
   { value: "retrait_especes",      label: "Retrait espèces / GAB",  code: COMPTE_CAISSE_DEFAUT, tva: false },
-  { value: "interets_crediteurs",  label: "Intérêts créditeurs",    code: "7611", tva: false },
-  { value: "frais_representation", label: "Frais de représentation",code: "6147", tva: false },
-  { value: "frais_douane",         label: "Frais douane / import",  code: "6146", tva: false },
-  { value: "autre",                label: "Autre opération",        code: "6141", tva: false },
+  { value: "interets_crediteurs",  label: "Intérêts créditeurs",    code: PCM_MAP.interets_crediteurs.code, tva: false },
+  { value: "frais_representation", label: "Frais de représentation",code: PCM_MAP.frais_representation.code, tva: false },
+  { value: "frais_douane",         label: "Frais douane / import",  code: PCM_MAP.frais_douane.code, tva: false },
+  { value: "autre",                label: "Autre opération",        code: PCM_MAP.autre.code, tva: false },
 ];
 
 
@@ -642,11 +649,20 @@ function RelEveScanner() {
 
         ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: "5141", date_ecriture: date, libelle, debit: tx.montant_credit ? montant : 0, credit: tx.montant_debit ? montant : 0, reference_piece: tx.document_reference || tx.reference, valide: true, transaction_id });
 
-        if (tva > 0 && tx.montant_debit) {
+        // La TVA ne s'isole en banque que sur une CHARGE (classe 6) payée sans
+        // facture. Sur un compte de tiers (4411…), elle est déjà en 3458 depuis la
+        // facture et bascule au lettrage : l'isoler ici la déduirait deux fois et
+        // laisserait la dette fournisseur ouverte du montant de la TVA.
+        const surCharge = String(tx.code_comptable ?? "").startsWith(RACINES_PCM.CHARGES);
+        if (tva > 0 && tx.montant_debit && surCharge) {
           ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: tx.code_comptable, date_ecriture: date, libelle, debit: ht, credit: 0, reference_piece: tx.document_reference, valide: true, transaction_id });
-          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: "34552", date_ecriture: date, libelle: `TVA ${libelle.slice(0,50)}`, debit: tva, credit: 0, reference_piece: tx.document_reference, valide: true, transaction_id });
+          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: PCM.TVA_RECUPERABLE_CHARGES, date_ecriture: date, libelle: `TVA ${libelle.slice(0,50)}`, debit: tva, credit: 0, reference_piece: tx.document_reference, valide: true, transaction_id });
         } else {
-          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: tx.code_comptable, date_ecriture: date, libelle, debit: tx.montant_debit ? 0 : ht, credit: tx.montant_credit ? 0 : ht, reference_piece: tx.document_reference, valide: true, transaction_id });
+          // Contrepartie du MONTANT de la banque, au sens OPPOSÉ : une sortie
+          // d'argent (crédit 5141) débite la contrepartie, une entrée la crédite.
+          // L'ancienne forme posait la contrepartie du même côté que la banque —
+          // la pièce doublait au lieu de solder.
+          ecritures.push({ dossier_id: dossierId, journal_code: "BQ", compte_numero: tx.code_comptable, date_ecriture: date, libelle, debit: tx.montant_debit ? montant : 0, credit: tx.montant_credit ? montant : 0, reference_piece: tx.document_reference, valide: true, transaction_id });
         }
 
         if (tx.facture_id) {

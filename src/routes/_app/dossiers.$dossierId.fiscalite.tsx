@@ -92,7 +92,9 @@ function FiscalitePage() {
         // peut ne pas exister (migration du moteur de paiement non appliquée) —
         // `synthetiserTva` retombe alors sur la date de facture.
         supabase.from("paiements")
-          .select("facture_id,facture_fournisseur_id,montant,date_paiement")
+          // `origine` + `reference` : une imputation d'AVOIR n'est pas un encaissement,
+          // et c'est par sa référence qu'elle désigne l'avoir imputé.
+          .select("facture_id,facture_fournisseur_id,montant,date_paiement,origine,reference")
           .eq("dossier_id", dossierId),
       ]);
       setEcritures(ecr ?? []);

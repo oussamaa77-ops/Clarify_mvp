@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import { compteTiersAuxiliaire, suffixeAuxiliaire } from "@/lib/comptes-auxiliaires";
 import { synthetiserBalance, ventilerSolde, type LigneBalance as LigneBalanceLib } from "@/lib/balance-comptable";
 import { normaliserNumeroCompte } from "@/lib/numero-compte";
+import { validatePcmAccount } from "@/lib/pcm-referentiel";
 import { bornesExercice, exerciceParDefaut, exercicesDisponibles } from "@/lib/exercice-comptable";
 import { JOURNAL_AN, sansANouveaux } from "@/lib/a-nouveaux";
 import { supabase } from "@/integrations/supabase/client";
@@ -20,6 +21,7 @@ import {
 import { toast } from "sonner";
 import ImportGrandLivre from "@/components/ImportGrandLivre";
 import LettrageManuel from "@/components/compta/LettrageManuel";
+import GrandLivreComptes from "@/components/compta/GrandLivreComptes";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/comptabilite")({
   component: ComptabilitePage,
@@ -69,7 +71,9 @@ const nomOnglet = (nom: string) => nom.replace(/[\\/?*[\]:]/g, "-").slice(0, 31)
 
 function ComptabilitePage() {
   const { dossierId } = Route.useParams();
-  const [tab, setTab] = useState<"grandlivre"|"balance"|"saisie"|"lettrage"|"import">("grandlivre");
+  // « journal » = Journal Général (chronologique, éditable) ; « grandlivre » = le
+  // Grand Livre par dossier de compte (lecture, drill-down, exports CGNC).
+  const [tab, setTab] = useState<"journal"|"grandlivre"|"balance"|"saisie"|"lettrage"|"import">("journal");
   const [livre, setLivre] = useState<LivreKey>("tous");
   const [ecritures, setEcritures] = useState<Ecriture[]>([]);
   const [pcmComptes, setPcmComptes] = useState<{ numero: string; intitule: string }[]>([]);
@@ -134,7 +138,9 @@ function ComptabilitePage() {
     setLoading(true);
     let query = supabase.from("ecritures_comptables")
       .select("*").eq("dossier_id", dossierId)
-      .order("date_ecriture", { ascending: false })
+      // Journal Général : ordre CHRONOLOGIQUE continu (le grand livre, lui,
+      // regroupe par compte dans son propre onglet).
+      .order("date_ecriture", { ascending: true })
       .order("journal_code").order("created_at", { ascending: true });
 
     if (filtreJournal !== "TOUS") query = query.eq("journal_code", filtreJournal);
@@ -229,6 +235,10 @@ function ComptabilitePage() {
     if (!newCompte || !newDate || (!newDebit && !newCredit)) {
       toast.error("Compte, date et montant requis"); return;
     }
+    // Garde-fou PCM : un numéro hors référentiel n'entre pas au grand livre.
+    const verdictCompte = validatePcmAccount(newCompte);
+    if (!verdictCompte.ok) { toast.error(verdictCompte.erreurs.join(" ")); return; }
+    if (verdictCompte.avertissements.length) toast.warning(verdictCompte.avertissements.join(" "));
     setSaving(true);
     try {
       const { error } = await supabase.from("ecritures_comptables").insert({
@@ -447,7 +457,7 @@ function ComptabilitePage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold">Comptabilité</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">Grand livre · Balance · Saisie manuelle</p>
+          <p className="text-muted-foreground text-sm mt-0.5">Journal général · Grand livre · Balance · Saisie manuelle</p>
         </div>
         <div className="flex gap-2">
           {modifiees > 0 && (
@@ -504,6 +514,9 @@ function ComptabilitePage() {
             <SelectItem value="TOUS">Tous exercices</SelectItem>
           </SelectContent>
         </Select>
+        {/* Le Grand Livre porte ses PROPRES filtres (période, classe, intervalle) :
+            ceux-ci ne concernent que le Journal Général et la Balance. */}
+        {tab !== "grandlivre" && (<>
         <Select value={filtreJournal} onValueChange={setFiltreJournal}>
           <SelectTrigger className="w-32"><SelectValue placeholder="Journal"/></SelectTrigger>
           <SelectContent>
@@ -520,6 +533,7 @@ function ComptabilitePage() {
             <Trash2 className="h-3.5 w-3.5 mr-1"/>Supprimer filtre
           </Button>
         )}
+        </>)}
       </div>
 
       {/* Les autres exercices ne sont pas cachés, ils sont AILLEURS : le dire
@@ -535,15 +549,27 @@ function ComptabilitePage() {
 
       <Tabs value={tab} onValueChange={v=>setTab(v as any)}>
         <TabsList>
-          <TabsTrigger value="grandlivre">Grand Livre ({ecritures.length})</TabsTrigger>
+          <TabsTrigger value="journal">Journal Général ({ecritures.length})</TabsTrigger>
+          <TabsTrigger value="grandlivre">Grand Livre</TabsTrigger>
           <TabsTrigger value="balance">Balance ({balance.length} comptes)</TabsTrigger>
           <TabsTrigger value="saisie">Saisie manuelle</TabsTrigger>
           <TabsTrigger value="lettrage">Lettrage</TabsTrigger>
           <TabsTrigger value="import">+ Import</TabsTrigger>
         </TabsList>
 
-        {/* ── GRAND LIVRE ÉDITABLE ── */}
+        {/* ── GRAND LIVRE : un dossier par compte PCM (lecture, drill-down, exports) ── */}
         <TabsContent value="grandlivre" className="mt-4">
+          <GrandLivreComptes
+            dossierId={dossierId}
+            exercice={exercice}
+            bornes={bornes ? { debut: bornes.debut, fin: bornes.fin } : null}
+            pcmComptes={pcmComptes}
+            intitulesAux={intitulesAux}
+          />
+        </TabsContent>
+
+        {/* ── JOURNAL GÉNÉRAL ÉDITABLE : vue chronologique continue ── */}
+        <TabsContent value="journal" className="mt-4">
           {/* Sélecteur des 3 Grands Livres distincts */}
           <div className="flex items-center gap-1 mb-3 p-1 bg-muted rounded-lg w-fit">
             {(Object.keys(LIVRES) as LivreKey[]).map(k => (
@@ -575,10 +601,11 @@ function ComptabilitePage() {
                 </div>
                 <div className="col-span-1">Date</div>
                 <div className="col-span-1">Journal</div>
+                {/* Colonnes du Journal Général : Date, Journal, N° pièce, Compte,
+                    Libellé, Lettrage, Débit, Crédit (1+1+1+1+1+2+1+2+2 = 12). */}
+                <div className="col-span-1">N° pièce</div>
                 <div className="col-span-1">Compte</div>
-                {/* Libellé passe de 4 à 3 colonnes : la grille est en 12 et
-                    Lettrage doit tenir sans déborder (1+1+1+1+3+1+2+2 = 12). */}
-                <div className="col-span-3">Libellé</div>
+                <div className="col-span-2">Libellé</div>
                 <div className="col-span-1 text-center">Lettrage</div>
                 <div className="col-span-2 text-right">Débit</div>
                 <div className="col-span-2 text-right">Crédit</div>
@@ -608,11 +635,16 @@ function ComptabilitePage() {
                       </select>
                     </div>
                     <div className="col-span-1">
+                      <input value={e.reference_piece||""} title={e.reference_piece||""}
+                        onChange={ev=>updateEcriture(e.id,"reference_piece",ev.target.value||null)}
+                        className="w-full text-xs font-mono bg-transparent border-0 focus:outline-none focus:ring-1 focus:ring-primary rounded px-1 truncate"/>
+                    </div>
+                    <div className="col-span-1">
                       <input value={e.compte_numero}
                         onChange={ev=>updateEcriture(e.id,"compte_numero",ev.target.value)}
                         className="w-full text-xs font-mono bg-transparent border-0 focus:outline-none focus:ring-1 focus:ring-primary rounded px-1"/>
                     </div>
-                    <div className="col-span-3">
+                    <div className="col-span-2">
                       <input value={e.libelle||""}
                         onChange={ev=>updateEcriture(e.id,"libelle",ev.target.value)}
                         className="w-full text-xs bg-transparent border-0 focus:outline-none focus:ring-1 focus:ring-primary rounded px-1"/>
