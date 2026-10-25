@@ -10,27 +10,16 @@
 // GET  = page de confirmation (ne modifie RIEN)
 // POST = suppression effective
 //
-// Pourquoi ce détour en deux temps, alors que l'approbation agit dès le GET :
-// les clients mail (Gmail, Outlook) et les antivirus PRÉ-CHARGENT les liens
-// d'un message pour les analyser. Sur l'approbation, un préchargement est
-// bénin — le pire cas approuve un compte que l'admin allait approuver. Sur un
-// refus, il détruirait le compte sans que personne n'ait cliqué. La suppression
-// exige donc une action que seul un humain déclenche.
+// Pourquoi ce détour en deux temps : les clients mail (Gmail, Outlook) et les
+// antivirus PRÉ-CHARGENT les liens d'un message pour les analyser. Sur un
+// refus, un préchargement détruirait le compte sans que personne n'ait cliqué.
+// La suppression exige donc une action que seul un humain déclenche — comme
+// l'approbation (/api/approve-user), pour la même raison.
 // ============================================================================
 import { createFileRoute } from "@tanstack/react-router";
 import { verifyApprovalToken } from "@/server/approval.token";
 import { getSupabaseAdmin } from "@/server/approval.functions";
-
-function page(titre: string, corps: string, status = 200): Response {
-  return new Response(
-    `<!doctype html><html lang="fr"><head><meta charset="utf-8">
-     <meta name="viewport" content="width=device-width,initial-scale=1">
-     <title>${titre}</title></head>
-     <body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:60px auto;padding:0 20px;color:#111">
-     ${corps}</body></html>`,
-    { status, headers: { "content-type": "text/html; charset=utf-8" } }
-  );
-}
+import { echapper, page } from "@/server/page-html";
 
 /** Le jeton est le même HMAC que pour l'approbation : un admin qui détient le
  *  lien du mail détient les deux pouvoirs, approuver et refuser. */
@@ -77,12 +66,12 @@ export const Route = createFileRoute("/api/reject-user")({
           "Confirmer le refus",
           `<h2 style="margin:0 0 4px">Refuser cette inscription ?</h2>
            <p style="color:#555;margin:0 0 24px">
-             Le compte <strong>${email}</strong> sera <strong>définitivement supprimé</strong>, ainsi que son cabinet.
+             Le compte <strong>${echapper(email)}</strong> sera <strong>définitivement supprimé</strong>, ainsi que son cabinet.
              L'adresse redeviendra libre : la personne pourra se réinscrire.
            </p>
            <form method="POST">
-             <input type="hidden" name="userId" value="${userId}">
-             <input type="hidden" name="token" value="${token}">
+             <input type="hidden" name="userId" value="${echapper(userId)}">
+             <input type="hidden" name="token" value="${echapper(token)}">
              <button type="submit" style="background:#dc2626;color:#fff;border:0;padding:12px 22px;border-radius:6px;font-weight:600;font-size:15px;cursor:pointer">
                Oui, refuser et supprimer
              </button>
@@ -114,7 +103,7 @@ export const Route = createFileRoute("/api/reject-user")({
           return page(
             "Inscription refusée",
             `<h2 style="margin:0 0 4px">Inscription refusée</h2>
-             <p style="color:#555">Le compte <strong>${email}</strong> a été supprimé. Il ne peut pas se connecter, et l'adresse est de nouveau disponible.</p>`
+             <p style="color:#555">Le compte <strong>${echapper(email)}</strong> a été supprimé. Il ne peut pas se connecter, et l'adresse est de nouveau disponible.</p>`
           );
         } catch (err: any) {
           console.error("[reject-user] échec:", err?.message ?? err);

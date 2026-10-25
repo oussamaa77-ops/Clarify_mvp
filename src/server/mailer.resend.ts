@@ -22,6 +22,10 @@
 import { readFile } from "node:fs/promises";
 import { Resend } from "resend";
 import type { SendMailInput } from "./mailer";
+// Le proxy TLS du poste de dev casse le fetch global de Node — donc aussi celui
+// du SDK Resend. Le repli direct passe par ./proxy-fetch : jamais sans
+// vérification TLS en production (il l'était ici à CHAQUE repli, sans condition).
+import { proxyFetch } from "./proxy-fetch";
 
 const ENDPOINT = "https://api.resend.com/emails";
 
@@ -101,17 +105,6 @@ function getClient(key: string): Resend {
     _cle = key;
   }
   return _client;
-}
-
-/** Le proxy TLS d'entreprise casse le fetch global de Node — donc aussi celui
- *  qu'utilise le SDK Resend. On garde une voie directe par undici pour le poste
- *  de dev ; sur Railway le fetch global marche et ce chemin ne sert jamais. */
-async function proxyFetch(url: string, init: RequestInit): Promise<Response> {
-  const { fetch: uf, Agent } = await import("undici");
-  return (uf as any)(url, {
-    ...init,
-    dispatcher: new Agent({ connect: { rejectUnauthorized: false } }),
-  });
 }
 
 /** Pièces jointes → format Resend : {filename, content(base64)} ou {filename, path(URL)}. */

@@ -70,11 +70,36 @@ describe("retrait d'espèces → compte de caisse", () => {
 });
 
 describe("genererLignesBQ — les autres règles restent inchangées", () => {
-  it("transaction orpheline → compte d'attente 4711 / 4712", () => {
+  it("transaction orpheline → compte d'attente CGNC 3497 / 4497", () => {
     expect(genererLignesBQ({ libelle: "OPERATION INCONNUE", type: "debit", montant: 300 })
-      .map((l) => l.compte)).toContain("4711");
+      .map((l) => l.compte)).toContain("3497");
     expect(genererLignesBQ({ libelle: "OPERATION INCONNUE", type: "credit", montant: 300 })
-      .map((l) => l.compte)).toContain("4712");
+      .map((l) => l.compte)).toContain("4497");
+  });
+
+  it("la TVA prélevée sur les commissions est RÉCUPÉRABLE (34552), pas due (4456)", () => {
+    for (const lib of ["TVA S/COMMISSION", "TVA SUR FRAIS TENUE DE COMPTE", "COMMISSION VIREMENT TVA"]) {
+      expect(deriveCategorie(lib, "debit")).toMatchObject({ categorie: "tva_frais_bancaires", code: "34552" });
+      const l = genererLignesBQ({ libelle: lib, type: "debit", montant: 12 });
+      expect(l.map((x) => x.compte)).toEqual(["34552", "5141"]);
+    }
+    // Le paiement de la déclaration, lui, solde la dette au 4456.
+    expect(deriveCategorie("PAIEMENT TVA DGI 03/2026", "debit").code).toBe("4456");
+  });
+
+  it("IR retenu → 44525, acompte d'IS → 3453 : on solde la dette, jamais la TVA due", () => {
+    expect(deriveCategorie("PRELEVEMENT IR SALAIRES 03/2026", "debit").code).toBe("44525");
+    expect(deriveCategorie("ACOMPTE IS 1ER TRIMESTRE", "debit").code).toBe("3453");
+    expect(genererLignesBQ({ libelle: "ACOMPTE IS", type: "debit", montant: 5000, categorie: "acompte_is" })
+      .map((l) => l.compte)).toEqual(["3453", "5141"]);
+  });
+
+  it("frais bancaires en 61473, carburant en 61223, douane en 61678 — plus de 6347 / 61241 / 6146", () => {
+    expect(PCM_MAP.frais_bancaires.code).toBe("61473");
+    expect(PCM_MAP.gasoil.code).toBe("61223");
+    expect(PCM_MAP.frais_douane.code).toBe("61678");
+    // Pas de TVA « reconstituée » sur un règlement fournisseur sans facture.
+    expect(PCM_MAP.paiement_fournisseur.tva).toBe(0);
   });
 
   it("facture liée → compte de tiers pour le TTC, jamais de TVA en banque", () => {

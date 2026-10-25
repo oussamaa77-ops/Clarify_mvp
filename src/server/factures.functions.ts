@@ -23,6 +23,7 @@ import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
 import { compteTiersAuxiliaire } from "../lib/comptes-auxiliaires";
 import { imputationTresorerie, COMPTE_CAISSE_DEFAUT } from "../lib/comptes-tresorerie";
+import { PCM_MAP } from "../lib/comptabilite-bq";
 // TVA au régime des encaissements : la vente crédite le compte d'ATTENTE, la
 // bascule vers la TVA collectée exigible se fait au lettrage du règlement.
 import { COMPTES_TVA } from "../services/lettrage";
@@ -37,6 +38,7 @@ import { assertLignesVente, lignesEcrituresVente, normaliserTypeVente } from "@/
 import { assertEcrituresRegime, bornesExerciceActif } from "@/lib/genererEcritures";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
 import { validerDateReglement } from "@/lib/date-reglement";
+import { proxyFetch as proxyFetchServeur } from "./proxy-fetch";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -80,30 +82,14 @@ async function envoyerEmail(
 }
 
 // ─── fetch tolérant au proxy SSL d'entreprise ───────────────────────────────
-// Derrière un proxy d'inspection TLS, le PREMIER `fetch` échoue (SELF_SIGNED_CERT)
-// et on doit réessayer via undici sans vérif TLS. Pour ne PAS payer cet échec sur
-// CHAQUE appel (OCR + extraction + N lots de matching), on mémorise la détection :
-// une fois le proxy vu, tous les appels suivants passent DIRECTEMENT par undici.
-let PROXY_DIRECT = false;
+// Repli du poste de dev : voir ./proxy-fetch (jamais actif en production).
+// L'erreur est préfixée « Réseau KO » : l'OCR la reconnaît pour retomber sur
+// le résultat regex partiel au lieu d'échouer.
 async function proxyFetch(url: string, opts: any): Promise<Response> {
-  if (PROXY_DIRECT) {
-    const { fetch: undiciFetch, Agent } = await import("undici");
-    const agent = new Agent({ connect: { rejectUnauthorized: false } });
-    return await (undiciFetch as any)(url, { ...opts, dispatcher: agent }) as Response;
-  }
   try {
-    return await fetch(url, opts);
+    return await proxyFetchServeur(url, opts);
   } catch (fetchErr: any) {
     const cause: string = fetchErr?.cause?.code ?? fetchErr?.cause?.message ?? fetchErr?.message ?? "";
-    // Proxy d'inspection TLS : le premier fetch échoue soit sur le certificat
-    // (SELF_SIGNED/CERT_), soit avec un « fetch failed » générique. Dans les deux
-    // cas, on rebascule sur undici sans vérif TLS (le proxy présente son propre CA).
-    if (/SELF_SIGNED|CERT_|UNABLE_TO_VERIFY|fetch failed|ECONNRESET|EPROTO/i.test(cause) || /fetch failed/i.test(String(fetchErr?.message ?? ""))) {
-      PROXY_DIRECT = true; // mémorise → plus aucun échec de fetch sur les appels suivants
-      const { fetch: undiciFetch, Agent } = await import("undici");
-      const agent = new Agent({ connect: { rejectUnauthorized: false } });
-      return await (undiciFetch as any)(url, { ...opts, dispatcher: agent }) as Response;
-    }
     throw new Error(`Réseau KO: ${cause || "fetch failed"}`);
   }
 }
@@ -709,7 +695,7 @@ export const generateFactureXml = createServerFn({ method: "POST" })
       // Les trois jeux d'écritures (ordinaire / acompte / solde) sont désormais
       // fabriqués par une fonction PURE, testée à part (src/lib/ecritures-vente.ts).
       // `assertLignesVente` interdit ce que ce bloc pouvait produire sans qu'on
-      // s'en aperçoive : un crédit du 4191 — compte de PASSIF — sur une facture
+      // s'en aperçoive : un crédit du 4421 — compte de PASSIF — sur une facture
       // ordinaire, qui escamote le chiffre d'affaires du compte de résultat.
       const typeVente = normaliserTypeVente(typeFacture);
       const ecrituresVente = lignesEcrituresVente({
@@ -746,7 +732,10 @@ export const generateFactureXml = createServerFn({ method: "POST" })
         bornes: bornesExerciceActif((facture as any).dossiers ?? null),
         existantes: (refsExistantes ?? []) as any[],
       });
-      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresVente));
+      // Erreur RENDUE par Supabase, pas levée : sans ce contrôle, la facture
+      // était archivée et réputée comptabilisée sans aucune écriture VTE.
+      const { error: eVte } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresVente));
+      if (eVte) throw new Error(`Écritures de vente refusées : ${eVte.message}`);
       await supabase.from("ged_documents").insert({
         dossier_id: facture.dossier_id,
         facture_id: facture.id,
@@ -1434,7 +1423,10 @@ export const marquerPayee = createServerFn({ method: "POST" })
     // elle, ces deux lignes seraient exactement l'écriture fantôme que la règle
     // interdit (une banque qui bouge sans qu'aucun argent n'ait bougé).
     assertEcrituresTresorerie(ecritures, { origine: "saisie_manuelle", piece });
-    await (supabase as any).from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+    // Erreur RENDUE par Supabase, pas levée : la remonter plutôt que de lettrer
+    // et d'annoncer un règlement que le journal de trésorerie ignore.
+    const { error: eTreso } = await (supabase as any).from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+    if (eTreso) throw new Error(`Paiement enregistré mais écritures de trésorerie refusées : ${eTreso.message}`);
 
     // Estampille du mode réellement employé : c'est elle que lit la colonne
     // « Mode de paiement » quand aucune pièce bancaire n'explique le règlement
@@ -2567,23 +2559,26 @@ ALGORITHME DE MATCHING (ordre strict)
 
   3a. B2B (SARL, SA, STE, SOCIETE, ENT, ETS, GROUP, etc.) → paiement_fournisseur (débit) ou encaissement_client (crédit), 75%
   3b. Services:
-    - CNSS, AMO → cnss_amo/4441/0% (solde de la dette sociale, pas le compte de charge 6174)
-    - TVA, DGI, IR, IS → tva_dgi/4456/0%
-    - EAU, ONEE, AMENAU → eau_electricite/6125/7%
-    - IAM, ORANGE, INWI, MAROC TELECOM, MEDITEL → telecom/6145/20% (PRIORITÉ ABSOLUE)
-    - Assurance → assurance/6161/0%
+    - CNSS, AMO → cnss_amo/${PCM_MAP.cnss_amo.code}/${PCM_MAP.cnss_amo.tva}% (solde de la dette sociale, pas le compte de charge 6174)
+    - TVA S/COMMISSION, TVA/FRAIS (TVA prélevée par la banque) → tva_frais_bancaires/${PCM_MAP.tva_frais_bancaires.code}/${PCM_MAP.tva_frais_bancaires.tva}% (TVA récupérable, PAS 4456)
+    - TVA, DGI (paiement de la déclaration) → tva_dgi/${PCM_MAP.tva_dgi.code}/${PCM_MAP.tva_dgi.tva}%
+    - IS (acompte d'impôt sur les sociétés) → acompte_is/${PCM_MAP.acompte_is.code}/${PCM_MAP.acompte_is.tva}%
+    - IR, IGR (IR retenu sur salaires) → ir_salaires/${PCM_MAP.ir_salaires.code}/${PCM_MAP.ir_salaires.tva}%
+    - EAU, ONEE, AMENAU, ELECTRICITE → eau_electricite/${PCM_MAP.eau_electricite.code}/${PCM_MAP.eau_electricite.tva}%
+    - IAM, ORANGE, INWI, MAROC TELECOM, MEDITEL → telecom/${PCM_MAP.telecom.code}/${PCM_MAP.telecom.tva}% (PRIORITÉ ABSOLUE)
+    - Assurance → assurance/${PCM_MAP.assurance.code}/${PCM_MAP.assurance.tva}%
     - FACTURE + nom de service → service, pas restaurant
-  3c. Bancaire: COMMISSION, FRAIS, AGIOS, ARRETE, TENUE → frais_bancaires/6347/10%
-  3d. Personnel: SALAIRE, PAIE, REMUNERATION → salaires/6171/0%
-  3e. Restauration (payé CB sur place, nom court, pas de FACTURE dans libellé) → frais_representation/6147/0%
+  3c. Bancaire: COMMISSION, FRAIS, AGIOS, ARRETE, TENUE → frais_bancaires/${PCM_MAP.frais_bancaires.code}/${PCM_MAP.frais_bancaires.tva}%
+  3d. Personnel: SALAIRE, PAIE, REMUNERATION → salaires/${PCM_MAP.salaires.code}/${PCM_MAP.salaires.tva}% (solde des rémunérations dues ; la charge 6171 est au journal des salaires)
+  3e. Restauration (payé CB sur place, nom court, pas de FACTURE dans libellé) → frais_representation/${PCM_MAP.frais_representation.code}/${PCM_MAP.frais_representation.tva}%
   3f. Autres:
-    - GASOIL, STATION → gasoil/61241/0%
+    - GASOIL, STATION → gasoil/${PCM_MAP.gasoil.code}/${PCM_MAP.gasoil.tva}%
     - RETRAIT ESPECES, RETRAIT GAB → retrait_especes/${COMPTE_CAISSE_DEFAUT}/0% (PRIORITÉ ABSOLUE — compte de CAISSE, rubrique 516 ; jamais 5143 qui est la Trésorerie Générale)
-    - VIR AG EMIS, VERSEMENT, VIREMENT INTERNE (mouvement entre comptes propres) → virement_interne/5115/0%
-    - DOUANE, IMPORT → frais_douane/6146/0%
-    - TRANSPORT, DEPLACEMENT → transport/6142/14%
-    - LOYER, LOCATION → loyers/6131/0%
-    - ENTRETIEN, REPARATION → entretien/6141/20%
+    - VIR AG EMIS, VERSEMENT, VIREMENT INTERNE (mouvement entre comptes propres) → virement_interne/${PCM_MAP.virement_interne.code}/${PCM_MAP.virement_interne.tva}%
+    - DOUANE, IMPORT → frais_douane/${PCM_MAP.frais_douane.code}/${PCM_MAP.frais_douane.tva}%
+    - TRANSPORT, DEPLACEMENT → transport/${PCM_MAP.transport.code}/${PCM_MAP.transport.tva}%
+    - LOYER, LOCATION → loyers/${PCM_MAP.loyers.code}/${PCM_MAP.loyers.tva}%
+    - ENTRETIEN, REPARATION → entretien/${PCM_MAP.entretien.code}/${PCM_MAP.entretien.tva}%
 
 [NIVEAU 4] PAR DÉFAUT:
   Crédit → encaissement_client/3421, 55%
@@ -3057,7 +3052,7 @@ export const matcherDocumentAvecTransactions = createServerFn({ method: "POST" }
       // transaction est encore orpheline (WHERE facture_id IS NULL → anti-concurrence)
       // et met à jour le document (montant payé / statut) sans double-comptage. Sans
       // ce lien, la transaction serait fermée « à vide » et tomberait en compte
-      // d'attente 4711 à la clôture.
+      // d'attente 3497 à la clôture.
       const { data: linked, error: rpcErr } = await (sb as any).rpc("lier_transaction", {
         p_tx_id:   bestTx.id,
         p_doc_id:  data.document_id,
@@ -3185,7 +3180,7 @@ export const lettrerJustificatif = createServerFn({ method: "POST" })
     //      transactions CLÔTURÉES comprises (verrou 'cloture' levé) ;
     //    • conserve le statut 'cloture' ; passe le justificatif à 'rapproche' ;
     //    • déclenche le trigger `sync_ecriture_contrepartie` qui rebascule la ligne
-    //      de contrepartie du compte d'attente 4711/4712 vers le compte PCM du
+    //      de contrepartie du compte d'attente 3497/4497 vers le compte PCM du
     //      justificatif (ex. 61312) → Grand Livre mis à jour SANS double comptage.
     //    On NE génère donc PAS d'écriture ici : elle existe déjà (Grand Livre continu).
     const { data: ok, error: rpcErr } = await (sb as any).rpc("lier_transaction", {

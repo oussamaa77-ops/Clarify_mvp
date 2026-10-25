@@ -14,20 +14,9 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { CLIENT_PREFIXES, FOURNISSEUR_PREFIXES } from "@/lib/import-grandlivre";
+import { proxyFetch } from "./proxy-fetch";
 
-// Le proxy TLS d'entreprise fait échouer le `fetch` global côté serveur : sans
-// ce repli undici, supabase-js rend des erreurs réseau opaques et le lettrage
-// paraît « ne rien faire ». Même dispositif que paiements.functions.ts.
-let PROXY_DIRECT = false;
-async function proxyFetch(input: any, init?: any): Promise<Response> {
-  const direct = async () => {
-    const { fetch: uf, Agent } = await import("undici");
-    return (uf as any)(String(input), { ...init, dispatcher: new Agent({ connect: { rejectUnauthorized: false } }) });
-  };
-  if (PROXY_DIRECT) return direct();
-  try { return await fetch(String(input), init); }
-  catch { PROXY_DIRECT = true; return direct(); }
-}
+// fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -235,7 +224,7 @@ export const lettrerDossier = createServerFn({ method: "POST" })
     const supabase = getSupabase();
 
     // 1) Cibles : transactions du dossier encore orphelines.
-    // Les clôturées orphelines (parquées sur compte d'attente 4711/4712) sont
+    // Les clôturées orphelines (parquées sur compte d'attente 3497/4497) sont
     // INCLUSES → lettrage tardif permis ; le RPC conserve leur statut 'cloture'
     // et le trigger SQL bascule le compte d'attente vers le compte final.
     let q = (supabase.from("transactions_bancaires") as any)

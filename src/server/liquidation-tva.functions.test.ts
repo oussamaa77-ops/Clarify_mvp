@@ -149,7 +149,13 @@ describe("executerDeclarationTva", () => {
     ]);
     const r = await executerDeclarationTva(sb, { dossierId: D, periode: "2026-03" });
     expect(r).toMatchObject({ ok: true, montant: 3000, dette: false });
-    expect(sb.rows.find((l) => memeCompte(l.compte_numero, "4456"))).toMatchObject({ debit: 3000 });
+    // Le crédit est porté au 3456 (actif), jamais en solde débiteur du 4456.
+    expect(sb.rows.find((l) => memeCompte(l.compte_numero, "3456"))).toMatchObject({ debit: 3000 });
+    expect(sb.rows.some((l) => memeCompte(l.compte_numero, "4456"))).toBe(false);
+    // Déclarée bien qu'aucune ligne ne touche le 4456 : pas de seconde OD.
+    const bis = await executerDeclarationTva(sb, { dossierId: D, periode: "2026-03" });
+    expect(bis.ok).toBe(false);
+    expect(bis.raison).toMatch(/déjà déclarée/);
   });
 });
 
@@ -300,9 +306,9 @@ describe("executerPointageTva", () => {
     expect(sb.rows.some((l) => l.pointe === true)).toBe(false);
   });
 
-  it("REFUSE de pointer un crédit de TVA — le 4456 débiteur n'est pas une dette soldée", async () => {
-    // Déductible > collectée : l'OD débite le 4456, donc `resteAPayer` est
-    // NÉGATIF et passerait une garde qui ne testerait que « ≤ 0 ».
+  it("REFUSE de pointer un crédit de TVA — rien n'a été prélevé", async () => {
+    // Déductible > collectée : l'OD débite le 3456, aucune dette n'existe et
+    // aucune ligne bancaire n'est à rapprocher.
     const sb = fakeSb([
       { journal_code: "OD", compte_numero: "44551", date_ecriture: "2026-03-05", debit: 0, credit: 1000, dossier_id: D },
       { journal_code: "OD", compte_numero: "34552", date_ecriture: "2026-03-12", debit: 4000, credit: 0, dossier_id: D },
@@ -413,14 +419,14 @@ describe("liquiderPeriodeTva", () => {
     expect(r).toMatchObject({ ok: true, montant: 300 });
   });
 
-  it("porte un crédit de TVA au débit du 4456 sans le confondre avec une dette", async () => {
+  it("porte un crédit de TVA au débit du 3456 sans le confondre avec une dette", async () => {
     const sb = fakeSb([
       { journal_code: "OD", compte_numero: "34552", date_ecriture: "2026-05-04", debit: 240, credit: 0, dossier_id: D },
     ]);
     const r = await liquiderPeriodeTva(D, "2026-05", { client: sb });
     expect(r).toMatchObject({ ok: true, montant: 240, dette: false });
-    const du = sb.rows.find((x: any) => memeCompte(x.compte_numero, "4456") && x.reference_piece === "DECL-TVA-2026-05");
-    expect(du).toMatchObject({ debit: 240, credit: 0 });
+    const credit = sb.rows.find((x: any) => memeCompte(x.compte_numero, "3456") && x.reference_piece === "DECL-TVA-2026-05");
+    expect(credit).toMatchObject({ debit: 240, credit: 0 });
   });
 
   it("ne touche à rien en simulation", async () => {

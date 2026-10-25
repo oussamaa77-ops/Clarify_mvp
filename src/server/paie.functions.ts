@@ -10,26 +10,46 @@ function getSupabase() {
   return createClient(url, key);
 }
 
-// ── Taux officiels Maroc 2024 ─────────────────────────────────────────────────
+// ── Taux officiels Maroc 2026 ─────────────────────────────────────────────────
+// CNSS : prestations sociales 4,48 % / 8,98 % plafonnées à 6 000 MAD par mois ;
+// allocations familiales 6,40 % patronales, AMO 2,26 % / 4,11 % et TFP 1,60 %,
+// sans plafond. Frais professionnels (art. 59 CGI, LF 2023) : 35 % si le brut
+// imposable annuel n'excède pas 78 000 MAD, 25 % au-delà, plafonnés à 35 000 MAD
+// par an. Charges de famille (art. 74 CGI, LF 2026) : 600 MAD par personne à
+// charge et par an, 6 personnes au plus.
 export const TAUX_PAIE = {
   cnss_salarie: 0.0448,
   cnss_patronal: 0.0898,
-  cnss_plafond: 9000,
+  cnss_plafond: 6000,
+  allocations_familiales: 0.064,
   amo_salarie: 0.0226,
   amo_patronal: 0.0411,
   tfp: 0.016,
-  frais_pro_taux: 0.20,
-  frais_pro_max: 2500,
+  frais_pro_taux: 0.35,
+  frais_pro_taux_au_dela: 0.25,
+  frais_pro_seuil_annuel: 78000,
+  frais_pro_plafond_annuel: 35000,
+  deduction_famille_annuelle: 600,
+  personnes_a_charge_max: 6,
 };
 
+// Barème annuel de l'IR sur salaires (art. 73-I CGI, LF 2025).
 export const BAREME_IR = [
-  { min: 0,      max: 30000,   taux: 0,    deduction: 0 },
-  { min: 30001,  max: 50000,   taux: 0.10, deduction: 3000 },
-  { min: 50001,  max: 60000,   taux: 0.15, deduction: 5500 },
-  { min: 60001,  max: 80000,   taux: 0.20, deduction: 8500 },
-  { min: 80001,  max: 180000,  taux: 0.30, deduction: 16500 },
-  { min: 180001, max: Infinity, taux: 0.34, deduction: 23700 },
+  { min: 0,      max: 40000,   taux: 0,    deduction: 0 },
+  { min: 40001,  max: 60000,   taux: 0.10, deduction: 4000 },
+  { min: 60001,  max: 80000,   taux: 0.20, deduction: 10000 },
+  { min: 80001,  max: 100000,  taux: 0.30, deduction: 18000 },
+  { min: 100001, max: 180000,  taux: 0.34, deduction: 22000 },
+  { min: 180001, max: Infinity, taux: 0.37, deduction: 27400 },
 ];
+
+/** Frais professionnels MENSUELS déductibles d'un brut imposable mensuel. */
+export function fraisProfessionnels(brutImposableMensuel: number): number {
+  const annuel = Math.max(0, brutImposableMensuel) * 12;
+  const taux = annuel <= TAUX_PAIE.frais_pro_seuil_annuel
+    ? TAUX_PAIE.frais_pro_taux : TAUX_PAIE.frais_pro_taux_au_dela;
+  return Math.min(annuel * taux, TAUX_PAIE.frais_pro_plafond_annuel) / 12;
+}
 
 export function calculBulletin(params: {
   salaire_base: number;
@@ -65,13 +85,16 @@ export function calculBulletin(params: {
 
   const base_cnss = Math.min(brut_global, TAUX_PAIE.cnss_plafond);
   const cnss_salarie = cnss_assujetti ? Math.round(base_cnss * TAUX_PAIE.cnss_salarie * 100) / 100 : 0;
-  const cnss_patronal = cnss_assujetti ? Math.round(base_cnss * TAUX_PAIE.cnss_patronal * 100) / 100 : 0;
+  // Part patronale CNSS : prestations sociales (plafonnées) + allocations familiales (déplafonnées).
+  const cnss_patronal = cnss_assujetti
+    ? Math.round((base_cnss * TAUX_PAIE.cnss_patronal + brut_global * TAUX_PAIE.allocations_familiales) * 100) / 100
+    : 0;
   const amo_salarie = amo_assujetti ? Math.round(brut_global * TAUX_PAIE.amo_salarie * 100) / 100 : 0;
   const amo_patronal = amo_assujetti ? Math.round(brut_global * TAUX_PAIE.amo_patronal * 100) / 100 : 0;
   const cimr_salarie = Math.round(brut_global * (cimr_taux / 100) * 100) / 100;
   const cimr_patronal = cimr_salarie;
 
-  const frais_pro = Math.min(brut_imposable * TAUX_PAIE.frais_pro_taux, TAUX_PAIE.frais_pro_max);
+  const frais_pro = fraisProfessionnels(brut_imposable);
   const base_ir = Math.max(0, brut_imposable - frais_pro - cnss_salarie - amo_salarie - cimr_salarie);
   const base_ir_annuelle = base_ir * 12;
 
@@ -84,8 +107,12 @@ export function calculBulletin(params: {
   }
   const ir_brut = ir_annuel / 12;
 
-  const nb_enfants_ded = Math.min(nombre_enfants, 6);
-  const ded_annuelle = (situation_familiale !== "celibataire" ? 360 : 0) + nb_enfants_ded * 360;
+  // Le conjoint et les enfants à charge comptent ensemble dans la limite de 6.
+  const personnes = Math.min(
+    (situation_familiale !== "celibataire" ? 1 : 0) + Math.max(0, nombre_enfants),
+    TAUX_PAIE.personnes_a_charge_max,
+  );
+  const ded_annuelle = personnes * TAUX_PAIE.deduction_famille_annuelle;
   const deduction_familiale = ded_annuelle / 12;
   const ir_net = Math.max(0, Math.round((ir_brut - deduction_familiale) * 100) / 100);
 
@@ -203,7 +230,11 @@ export const validerBulletin = createServerFn({ method: "POST" })
     // partie double et référentiel PCM vérifiés AVANT l'insert).
     const lignes = lignesEcrituresPaie(b, nom);
     assertLignesPaie(lignes, b);
-    await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(lignes));
+    // Erreur RENDUE par Supabase, pas levée : sans ce contrôle, le bulletin
+    // passait « validé, écriture créée » sans écriture — et ne pouvait plus
+    // jamais être revalidé (garde `ecriture_creee` ci-dessus).
+    const { error: ePaie } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(lignes));
+    if (ePaie) throw new Error(`Écritures de paie refusées : ${ePaie.message}`);
 
     await (supabase as any).from("bulletins_paie").update({ statut: "valide", ecriture_creee: true }).eq("id", data.bulletin_id);
 

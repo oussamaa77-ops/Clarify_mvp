@@ -9,7 +9,6 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as PreviewtvaRouteImport } from './routes/previewtva'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
@@ -36,11 +35,6 @@ import { Route as AppDossiersDossierIdAnalyticsRouteImport } from './routes/_app
 import { Route as AppDossiersDossierIdFournisseursTestRouteImport } from './routes/_app/dossiers.$dossierId.fournisseurs.test'
 import { Route as AppDossiersDossierIdBanqueReleveIdRouteImport } from './routes/_app/dossiers.$dossierId.banque.$releveId'
 
-const PreviewtvaRoute = PreviewtvaRouteImport.update({
-  id: '/previewtva',
-  path: '/previewtva',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
@@ -185,7 +179,6 @@ const AppDossiersDossierIdBanqueReleveIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
-  '/previewtva': typeof PreviewtvaRoute
   '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
   '/api/approve-user': typeof ApiApproveUserRoute
@@ -212,7 +205,6 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
-  '/previewtva': typeof PreviewtvaRoute
   '/abonnement': typeof AppAbonnementRoute
   '/dossiers': typeof AppDossiersRouteWithChildren
   '/api/approve-user': typeof ApiApproveUserRoute
@@ -241,7 +233,6 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
   '/auth': typeof AuthRoute
-  '/previewtva': typeof PreviewtvaRoute
   '/_app/abonnement': typeof AppAbonnementRoute
   '/_app/dossiers': typeof AppDossiersRouteWithChildren
   '/api/approve-user': typeof ApiApproveUserRoute
@@ -270,7 +261,6 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/auth'
-    | '/previewtva'
     | '/abonnement'
     | '/dossiers'
     | '/api/approve-user'
@@ -297,7 +287,6 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/auth'
-    | '/previewtva'
     | '/abonnement'
     | '/dossiers'
     | '/api/approve-user'
@@ -325,7 +314,6 @@ export interface FileRouteTypes {
     | '/'
     | '/_app'
     | '/auth'
-    | '/previewtva'
     | '/_app/abonnement'
     | '/_app/dossiers'
     | '/api/approve-user'
@@ -354,7 +342,6 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AppRoute: typeof AppRouteWithChildren
   AuthRoute: typeof AuthRoute
-  PreviewtvaRoute: typeof PreviewtvaRoute
   ApiApproveUserRoute: typeof ApiApproveUserRoute
   ApiDiagMailRoute: typeof ApiDiagMailRoute
   ApiRejectUserRoute: typeof ApiRejectUserRoute
@@ -362,13 +349,6 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/previewtva': {
-      id: '/previewtva'
-      path: '/previewtva'
-      fullPath: '/previewtva'
-      preLoaderRoute: typeof PreviewtvaRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/auth': {
       id: '/auth'
       path: '/auth'
@@ -636,7 +616,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AppRoute: AppRouteWithChildren,
   AuthRoute: AuthRoute,
-  PreviewtvaRoute: PreviewtvaRoute,
   ApiApproveUserRoute: ApiApproveUserRoute,
   ApiDiagMailRoute: ApiDiagMailRoute,
   ApiRejectUserRoute: ApiRejectUserRoute,
@@ -646,10 +625,11 @@ export const routeTree = rootRouteImport
   ._addFileTypes<FileRouteTypes>()
 
 import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
+import type { startInstance } from './start.ts'
 declare module '@tanstack/react-start' {
   interface Register {
     ssr: true
     router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
   }
 }

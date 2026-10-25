@@ -404,7 +404,7 @@ export const LIBELLE_PAIEMENT_DGI_MIROIR = "Paiement TVA DGI";
 
 export function controlerMouvementsTvaDue(lignes: LigneEcriture[]): ControleRegime {
   const fautives = (lignes ?? []).filter((l) => {
-    if (!commencePar(l.compte_numero, [RACINE_TVA_DUE]) || !mouvementee(l)) return false;
+    if (!commencePar(l.compte_numero, [RACINE_TVA_DUE, RACINES_PCM.CREDIT_TVA]) || !mouvementee(l)) return false;
     const ref = txt(l.reference_piece);
     if (PREFIXES_PIECES_TVA_DUE.some((prefixe) => ref.startsWith(prefixe))) return false;
     // Le paiement à la DGI se reconnaît à son LIBELLÉ : il porte la référence de
@@ -576,7 +576,7 @@ export function assertEcrituresRegime(
 // ─── 1. VENTES — D 3421 TTC / C 7xxx HT / C 4458 TVA ─────────────────────────
 //
 // Le corps du générateur vit dans `ecritures-vente.ts`, qui porte en plus
-// l'invariant du 4191 (acomptes). On le réexporte ici pour que tout le
+// l'invariant du 4421 (acomptes). On le réexporte ici pour que tout le
 // vocabulaire du régime soit atteignable d'un seul import.
 
 export {

@@ -6,7 +6,7 @@
 //
 //   (a) CA HT des factures        =  crédits nets de classe 7
 //   (b) encours clients            =  postes 342x non lettrés
-//   (c) aucun crédit 4191 sur une facture de vente ordinaire
+//   (c) aucun crédit 4421 (ex-4191) sur une facture de vente ordinaire
 //   (d) statut « payée »           ⇒ encaissement attesté en trésorerie
 //   (e) date de règlement          ≥ date de facture
 //
@@ -59,28 +59,28 @@ const venteComptabilisee = (
 
 // ─── (c) L'invariant du générateur ───────────────────────────────────────────
 
-describe("(c) le journal des ventes ne crédite jamais le 4191 hors acompte", () => {
+describe("(c) le journal des ventes ne crédite jamais le 4421 hors acompte", () => {
   const ctx = {
     dossier_id: "D", facture_id: "F1", reference: "FAC-001", date_facture: "2026-05-17",
     montant_ht: 26310, montant_tva: 5262, montant_ttc: 31572,
     compte_client: "34210003", compte_produit: "7124",
   };
 
-  it("facture ordinaire : le produit est crédité, le 4191 est absent", () => {
+  it("facture ordinaire : le produit est crédité, le 4421 est absent", () => {
     const l = lignesEcrituresVente({ ...ctx, type: "facture" });
     expect(l.some((x) => x.compte_numero === COMPTE_ACOMPTES_CLIENTS)).toBe(false);
     expect(l.find((x) => x.compte_numero === "7124")?.credit).toBe(26310);
     expect(controlerLignesVente(l, "facture").ok).toBe(true);
   });
 
-  it("facture d'acompte : le 4191 est crédité, AUCUN produit ne l'est", () => {
+  it("facture d'acompte : le 4421 est crédité, AUCUN produit ne l'est", () => {
     const l = lignesEcrituresVente({ ...ctx, type: "acompte" });
     expect(l.find((x) => x.compte_numero === COMPTE_ACOMPTES_CLIENTS)?.credit).toBe(26310);
     expect(l.some((x) => x.compte_numero.startsWith("7"))).toBe(false);
     expect(controlerLignesVente(l, "acompte").ok).toBe(true);
   });
 
-  it("facture de solde : le produit est constaté ET le 4191 soldé par l'OD", () => {
+  it("facture de solde : le produit est constaté ET le 4421 soldé par l'OD", () => {
     const l = lignesEcrituresVente({ ...ctx, type: "solde" });
     const solde4191 = l
       .filter((x) => x.compte_numero === COMPTE_ACOMPTES_CLIENTS)
@@ -105,20 +105,20 @@ describe("(c) le journal des ventes ne crédite jamais le 4191 hors acompte", ()
     expect(normaliserTypeVente("Acompte")).toBe("acompte");
   });
 
-  it("l'assertion REFUSE un crédit du 4191 glissé sur une facture ordinaire", () => {
+  it("l'assertion REFUSE un crédit du 4421 glissé sur une facture ordinaire", () => {
     const l = lignesEcrituresVente({ ...ctx, type: "acompte" });
     // Mêmes lignes, mais présentées comme une facture ordinaire : c'est
     // exactement la régression que l'invariant doit intercepter.
-    expect(() => assertLignesVente(l, "facture")).toThrow(/4191/);
+    expect(() => assertLignesVente(l, "facture")).toThrow(/4421/);
   });
 
   it("l'assertion REFUSE une vente sans aucun produit de classe 7", () => {
     const l = lignesEcrituresVente({ ...ctx, type: "facture" })
-      .map((x) => (x.compte_numero === "7124" ? { ...x, compte_numero: "4191" } : x));
+      .map((x) => (x.compte_numero === "7124" ? { ...x, compte_numero: "4421" } : x));
     expect(() => assertLignesVente(l, "facture")).toThrow();
   });
 
-  it("détecte le crédit 4191 sur le STOCK d'écritures, pas seulement au flux", () => {
+  it("détecte le crédit 4191 (historique) sur le STOCK d'écritures, pas seulement au flux", () => {
     const f = facture({ id: "F1", montant_ht: 42000, montant_ttc: 50400 });
     const lignes = [
       ligne({ compte_numero: "34210001", debit: 50400, reference_piece: "F1" }),

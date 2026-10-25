@@ -16,8 +16,11 @@
 // Seuls les comptes de BILAN (classes 1 à 5) sont reportés. Les comptes de
 // GESTION (classes 6 et 7) ne le sont jamais : ils sont soldés par la
 // détermination du résultat, et c'est ce RÉSULTAT qui est reporté — au compte
-// 1161 « Report à nouveau (solde créditeur) » s'il s'agit d'un bénéfice, au 1169
-// « Report à nouveau (solde débiteur) » s'il s'agit d'une perte.
+// 1181 « Résultats nets en instance d'affectation (solde créditeur) » s'il
+// s'agit d'un bénéfice, au 1189 (solde débiteur) s'il s'agit d'une perte.
+// L'affectation (réserve légale 1140, dividendes 4465, report à nouveau 116x)
+// est décidée par l'AGO et passée ensuite par OD : la verser d'office en report
+// à nouveau escamotait la dotation obligatoire à la réserve légale.
 //
 // C'est ce qui rend l'à-nouveau ÉQUILIBRÉ sans qu'on ait à le forcer : le grand
 // livre d'un exercice se solde à zéro, donc Σ(bilan) = −Σ(gestion), et le report
@@ -43,10 +46,10 @@ import { PCM } from "./pcm-referentiel";
 /** Journal technique des à-nouveaux. À exclure de toute vue multi-exercices. */
 export const JOURNAL_AN = "AN";
 
-/** Report à nouveau — bénéfice antérieur (solde créditeur). */
-export const COMPTE_REPORT_CREDITEUR = PCM.REPORT_A_NOUVEAU_CREDITEUR;
-/** Report à nouveau — perte antérieure (solde débiteur). */
-export const COMPTE_REPORT_DEBITEUR = PCM.REPORT_A_NOUVEAU_DEBITEUR;
+/** Résultat en instance d'affectation — bénéfice antérieur (solde créditeur, 1181). */
+export const COMPTE_REPORT_CREDITEUR = PCM.RESULTAT_INSTANCE_AFFECTATION_CREDITEUR;
+/** Résultat en instance d'affectation — perte antérieure (solde débiteur, 1189). */
+export const COMPTE_REPORT_DEBITEUR = PCM.RESULTAT_INSTANCE_AFFECTATION_DEBITEUR;
 
 const r2 = (x: unknown) => Math.round((Number(x) || 0) * 100) / 100;
 const nb = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
@@ -124,8 +127,8 @@ export function dernierANouveau(lignes: LigneSolde[], avant: string): string | n
  * totalité du bilan. L'ancre garde ce cas et corrige l'autre.
  *
  * ─── Et le RÉSULTAT, alors ? ────────────────────────────────────────────────
- * L'ancre porte déjà le résultat des exercices antérieurs, converti en 1161 /
- * 1169 — un compte de BILAN, donc reporté comme un solde. Les comptes de
+ * L'ancre porte déjà le résultat des exercices antérieurs, converti en 1181 /
+ * 1189 — un compte de BILAN, donc reporté comme un solde. Les comptes de
  * gestion retenus sont dès lors ceux de la seule période [ancre, avant) : le
  * résultat calculé est celui des exercices écoulés depuis, jamais deux fois le
  * même.
@@ -190,7 +193,7 @@ export interface PlanANouveaux {
   lignes: LigneANouveau[];
   /** Résultat antérieur reporté, signé : négatif = bénéfice, positif = perte. */
   resultatReporte: number;
-  /** Compte de report retenu — 1161 ou 1169. */
+  /** Compte de report retenu — 1181 ou 1189. */
   compteReport: string;
   /** Écart de la partie double de l'écriture produite. Doit valoir 0. */
   ecart: number;
@@ -263,13 +266,13 @@ export function lignesANouveaux(
   }
 
   // Le résultat antérieur : Σ(gestion) signée. Positif = charges > produits =
-  // PERTE, qui se reporte au DÉBIT du 1169. Négatif = bénéfice, au CRÉDIT du 1161.
+  // PERTE, qui se reporte au DÉBIT du 1189. Négatif = bénéfice, au CRÉDIT du 1181.
   const resultatReporte = soldes.totalGestion;
   const compteReport = resultatReporte > 0 ? COMPTE_REPORT_DEBITEUR : COMPTE_REPORT_CREDITEUR;
   if (Math.abs(resultatReporte) >= seuil) {
     lignes.push({
       ...base, compte_numero: compteReport,
-      libelle: `Report à nouveau — résultat des exercices antérieurs`,
+      libelle: `Résultat en instance d'affectation — exercices antérieurs`,
       debit: resultatReporte > 0 ? r2(resultatReporte) : 0,
       credit: resultatReporte < 0 ? r2(-resultatReporte) : 0,
     });
@@ -282,7 +285,7 @@ export function lignesANouveaux(
 
   // ── Contrôle d'audit : comptes d'attente non apurés ───────────────────────
   // Le moment est le bon : c'est ICI que l'exercice change, et c'est ici qu'un
-  // 4712 garni cesse d'être une anomalie de l'exercice clos pour devenir le
+  // 4497 garni cesse d'être une anomalie de l'exercice clos pour devenir le
   // solde d'ouverture du suivant. On le calcule sur les soldes REPORTÉS, donc
   // sur ce que l'à-nouveau va réellement propager.
   const suspens = auditComptesSuspens(

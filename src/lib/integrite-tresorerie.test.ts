@@ -3,6 +3,7 @@ import {
   assertEcrituresTresorerie, cleEcritureTresorerie, clePiece, controlerEcrituresTresorerie,
   controlerCaissePositive, creuxCaisse,
   ecartPartieDouble, estJournalTresorerie, grouperEnEcritures, origineEcritureTresorerie,
+  transactionsDejaEnTresorerie,
 } from "./integrite-tresorerie";
 
 describe("estJournalTresorerie", () => {
@@ -259,5 +260,24 @@ describe("controlerCaissePositive", () => {
     const c = controlerCaissePositive(enDefaut, [cai("2026-02-02", 0, 1000)]);
     expect(c.ok).toBe(false);
     expect(c.apres.creux).toBe(-5000);
+  });
+});
+
+describe("transactionsDejaEnTresorerie — pas de double passage en banque", () => {
+  it("retient les transactions qui ont déjà une écriture BQ / CAI", () => {
+    const ids = transactionsDejaEnTresorerie([
+      { transaction_id: "tx-dgi", journal_code: "BQ" },   // paiement TVA DGI déjà passé
+      { transaction_id: "tx-cai", journal_code: "cai" },
+    ]);
+    expect([...ids].sort()).toEqual(["tx-cai", "tx-dgi"]);
+  });
+
+  it("ignore les écritures ACH / VTE estampillées par un lettrage, et les lignes sans transaction", () => {
+    const ids = transactionsDejaEnTresorerie([
+      { transaction_id: "tx-lettree", journal_code: "ACH" },
+      { transaction_id: "tx-vente", journal_code: "VTE" },
+      { transaction_id: null, journal_code: "BQ" },
+    ]);
+    expect(ids.size).toBe(0);
   });
 });

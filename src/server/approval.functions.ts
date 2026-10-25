@@ -11,22 +11,9 @@ import { z } from "zod";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { sendMail } from "./mailer";
 import { signApprovalToken } from "./approval.token";
+import { proxyFetch } from "./proxy-fetch";
 
-// Proxy TLS d'entreprise : le fetch global de Node est bloqué, supabase-js doit
-// recevoir un fetch tolérant (même motif que les autres fonctions serveur).
-let PROXY_DIRECT = false;
-async function proxyFetch(input: any, init?: any): Promise<Response> {
-  if (PROXY_DIRECT) {
-    const { fetch: uf, Agent } = await import("undici");
-    return (uf as any)(String(input), { ...init, dispatcher: new Agent({ connect: { rejectUnauthorized: false } }) });
-  }
-  try { return await fetch(String(input), init); }
-  catch {
-    PROXY_DIRECT = true;
-    const { fetch: uf, Agent } = await import("undici");
-    return (uf as any)(String(input), { ...init, dispatcher: new Agent({ connect: { rejectUnauthorized: false } }) });
-  }
-}
+// fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
 
 /** Client à clé de SERVICE. Contrairement aux autres modules, pas de repli sur
  *  la clé publishable : approuver un compte contourne la RLS par nature, une

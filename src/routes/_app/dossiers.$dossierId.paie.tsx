@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
-import { genererBulletin, validerBulletin, TAUX_PAIE } from "@/server/paie.functions";
+import { genererBulletin, validerBulletin, calculBulletin } from "@/server/paie.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -90,32 +90,15 @@ function PaiePage() {
   useEffect(() => {
     const emp = employes.find(e => e.id === selectedEmpId);
     if (!emp) { setSimulation(null); return; }
-    // Calcul local pour aperçu rapide
-    const sb = Number(emp.salaire_base);
-    const th = sb / 191;
-    const mhs = heuresSup * th * 1.25;
-    const bg = sb + mhs + primes + avantagesNature;
-    const bi = bg - indemnitesExo;
-    const baseCnss = Math.min(bg, TAUX_PAIE.cnss_plafond);
-    const cnss = emp.cnss_assujetti ? baseCnss * TAUX_PAIE.cnss_salarie : 0;
-    const amo = emp.amo_assujetti ? bg * TAUX_PAIE.amo_salarie : 0;
-    const fp = Math.min(bi * TAUX_PAIE.frais_pro_taux, TAUX_PAIE.frais_pro_max);
-    const baseIR = Math.max(0, bi - fp - cnss - amo);
-    const irAnnuel = baseIR * 12;
-    let irB = 0;
-    const BAREME = [[0,30000,0,0],[30001,50000,0.10,3000],[50001,60000,0.15,5500],[60001,80000,0.20,8500],[80001,180000,0.30,16500],[180001,Infinity,0.34,23700]];
-    for (const [min,,taux,ded] of BAREME) {
-      if (irAnnuel > min) { irB = Math.max(0, irAnnuel * taux - ded); if (irAnnuel <= BAREME[BAREME.indexOf([min,,taux,ded] as any)][1]) break; }
-    }
-    const irM = irB / 12;
-    const dedFam = ((emp.situation_familiale !== "celibataire" ? 360 : 0) + Math.min(emp.nombre_enfants, 6) * 360) / 12;
-    const irNet = Math.max(0, irM - dedFam);
-    const retenues = cnss + amo + irNet;
-    const net = Math.round((bg - retenues) * 100) / 100;
-    const cnssP = emp.cnss_assujetti ? baseCnss * TAUX_PAIE.cnss_patronal : 0;
-    const amoP = emp.amo_assujetti ? bg * TAUX_PAIE.amo_patronal : 0;
-    const tfp = bg * TAUX_PAIE.tfp;
-    setSimulation({ brut: bg, cnss: Math.round(cnss*100)/100, amo: Math.round(amo*100)/100, irNet: Math.round(irNet*100)/100, retenues: Math.round(retenues*100)/100, net, cout: Math.round((bg+cnssP+amoP+tfp)*100)/100 });
+    // Aperçu : MÊME calcul que le bulletin enregistré — une seule grille de taux.
+    const c = calculBulletin({
+      salaire_base: Number(emp.salaire_base), heures_sup: heuresSup, primes,
+      indemnites_exo: indemnitesExo, avantages_nature: avantagesNature,
+      cimr_taux: Number(emp.cimr_taux) || 0,
+      situation_familiale: emp.situation_familiale, nombre_enfants: Number(emp.nombre_enfants) || 0,
+      cnss_assujetti: emp.cnss_assujetti, amo_assujetti: emp.amo_assujetti,
+    });
+    setSimulation({ brut: c.brut_global, cnss: c.cnss_salarie, amo: c.amo_salarie, irNet: c.ir_net, retenues: c.total_retenues, net: c.net_a_payer, cout: c.cout_employeur });
   }, [selectedEmpId, heuresSup, primes, indemnitesExo, avantagesNature, employes]);
 
   const handleSaveEmp = async () => {

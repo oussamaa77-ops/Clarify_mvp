@@ -753,7 +753,7 @@ function ComptabilitePage() {
             </div>
 
             {/* Contrôle d'arrêté : comptes d'attente (47*) non apurés.
-                Placé ENTRE le total et le résultat à dessein : un 4712 garni
+                Placé ENTRE le total et le résultat à dessein : un 4497 garni
                 n'entame pas le résultat affiché juste en dessous, et c'est
                 précisément ce qui le rend invisible sans ce bandeau. */}
             {!suspens.apure && (

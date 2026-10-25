@@ -332,6 +332,28 @@ export interface OptionsReleveDeductions {
  * Une ligne = un règlement. Les achats sans TVA (exonérés, hors champ) sont
  * écartés : ils n'ouvrent aucun droit à déduction et alourdiraient le dépôt.
  */
+/**
+ * Quote-part d'une facture couverte par UN règlement : HT et TVA au prorata du
+ * montant réglé, TTC = le règlement lui-même. Bornée à la facture entière : un
+ * trop-perçu ne fait pas déduire plus de TVA que la facture n'en porte.
+ *
+ * Seule règle de ventilation du relevé de déductions — l'export EDI de l'écran
+ * Banque l'emploie aussi : il reprenait la facture ENTIÈRE à chaque virement,
+ * si bien qu'une facture réglée en deux fois faisait déduire deux fois sa TVA.
+ */
+export function quotePartReglement(
+  doc: { ht: number; tva: number; ttc: number },
+  montantRegle: number,
+): { ht: number; tva: number; ttc: number } {
+  if (!(doc.ttc > 0)) return { ht: round2(doc.ht), tva: round2(doc.tva), ttc: round2(doc.ttc) };
+  const quote = Math.min(1, Math.max(0, montantRegle) / doc.ttc);
+  return {
+    ht: round2(doc.ht * quote),
+    tva: round2(doc.tva * quote),
+    ttc: round2(quote === 1 ? doc.ttc : montantRegle),
+  };
+}
+
 export function construireReleveDeductions(opts: OptionsReleveDeductions): LigneReleveDeduction[] {
   const paiementsParFacture = new Map<string, PaiementFiscal[]>();
   for (const p of opts.paiements ?? []) {
@@ -376,12 +398,12 @@ export function construireReleveDeductions(opts: OptionsReleveDeductions): Ligne
 
     for (const r of reglementsDeLaFacture(f, paiementsParFacture.get(f.id ?? "") ?? [])) {
       if (!dansPeriode(r.date)) continue;
-      const quote = r.montant / ttc;
+      const part = quotePartReglement({ ht: n(f.montant_ht), tva, ttc }, r.montant);
       lignes.push({
         ...commun,
-        montantHt: round2(n(f.montant_ht) * quote),
-        montantTva: round2(tva * quote),
-        montantTtc: round2(r.montant),
+        montantHt: part.ht,
+        montantTva: part.tva,
+        montantTtc: part.ttc,
         datePaiement: r.date,
         reglementDate: r.date_ok,
       });

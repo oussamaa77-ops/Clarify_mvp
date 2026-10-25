@@ -61,7 +61,7 @@ import {
   declarerTva, enregistrerQuittanceTva, etatPeriodeTva, payerTvaDgi, pointerTvaPeriode,
 } from "@/server/liquidation-tva.functions";
 import {
-  COMPTE_TVA_COLLECTEE, COMPTE_TVA_DEDUCTIBLE, COMPTE_TVA_DUE,
+  COMPTE_TVA_COLLECTEE, COMPTE_TVA_DEDUCTIBLE, COMPTE_TVA_DUE, COMPTE_CREDIT_TVA,
   bornesPeriode, referenceDeclaration,
 } from "@/lib/liquidation-tva";
 import {
@@ -98,6 +98,8 @@ export interface EtatPeriode {
   periode: string;
   liquidation: {
     collectee: number; deductible: number; net: number; montant: number;
+    /** Crédit antérieur (3456) imputé sur la TVA de la période. */
+    creditImpute?: number;
     dette: boolean; neant: boolean; periode: string;
   } | null;
   declaree: boolean;
@@ -708,12 +710,12 @@ export function VueDeclarationTva({
               {etat.bouclee ? (
                 <div className="flex items-start gap-2 text-sm text-emerald-700 dark:text-emerald-400">
                   <CheckCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                  {/* Un crédit reportable laisse le 4456 DÉBITEUR : la période est
-                      close, mais annoncer « tous à 0,00 » serait faux. */}
+                  {/* Un crédit reportable reste au 3456 : la période est close,
+                      mais annoncer « tous à 0,00 » serait faux. */}
                   {(etat.creditReporte ?? 0) > 0.005 ? (
                     <span>
                       <strong>Période bouclée</strong> — {COMPTE_TVA_COLLECTEE} et {COMPTE_TVA_DEDUCTIBLE} sont
-                      soldés au {bornes?.fin}, et rien n'est dû. Le {COMPTE_TVA_DUE} reste débiteur de{" "}
+                      soldés au {bornes?.fin}, et rien n'est dû. Le {COMPTE_CREDIT_TVA} porte un crédit de{" "}
                       <strong>{fmt(etat.creditReporte!)} MAD</strong> : c'est le crédit de TVA reporté sur les
                       périodes suivantes, qui s'imputera sur la prochaine TVA due.
                     </span>
@@ -770,7 +772,7 @@ export function VueDeclarationTva({
                   valeur={liq.deductible} classe="text-green-600"
                 />
                 <LigneRecap
-                  label={liq.dette ? `TVA à payer (${COMPTE_TVA_DUE})` : `Crédit de TVA reportable (${COMPTE_TVA_DUE})`}
+                  label={liq.dette ? `TVA à payer (${COMPTE_TVA_DUE})` : `Crédit de TVA reportable (${COMPTE_CREDIT_TVA})`}
                   valeur={liq.montant}
                   classe={liq.dette ? "text-orange-600" : "text-blue-600"}
                   gras
@@ -788,10 +790,15 @@ export function VueDeclarationTva({
                 {Math.abs(liq.deductible) > 0.005 && (
                   <p>Crédit&nbsp;{COMPTE_TVA_DEDUCTIBLE}&nbsp;&nbsp;{fmt(liq.deductible)} MAD</p>
                 )}
-                <p>
-                  {liq.dette ? "Crédit" : "Débit "}&nbsp;{COMPTE_TVA_DUE}&nbsp;&nbsp;&nbsp;{fmt(liq.montant)} MAD
-                  {" "}({liq.dette ? "dette envers l'État" : "crédit reportable"})
-                </p>
+                {(liq.creditImpute ?? 0) > 0.005 && (
+                  <p>Crédit&nbsp;{COMPTE_CREDIT_TVA}&nbsp;&nbsp;&nbsp;{fmt(liq.creditImpute ?? 0)} MAD (crédit antérieur imputé)</p>
+                )}
+                {Math.abs(liq.net) > 0.005 && (
+                  <p>
+                    {liq.dette ? "Crédit" : "Débit "}&nbsp;{liq.dette ? COMPTE_TVA_DUE : COMPTE_CREDIT_TVA}&nbsp;&nbsp;&nbsp;{fmt(liq.montant)} MAD
+                    {" "}({liq.dette ? "dette envers l'État" : "crédit reportable"})
+                  </p>
+                )}
               </div>
 
               {liq.neant && (

@@ -26,6 +26,8 @@
  * accepté à titre informatif (traçabilité/logs).
  */
 
+import { PCM } from "./pcm-referentiel";
+
 // ── Types publics ────────────────────────────────────────────────────────────
 
 /** Sens comptable : charge (achats) ou produit (ventes). */
@@ -97,13 +99,11 @@ export interface SuggestionCompte {
 
 /**
  * Compte de charge « générique » utilisé quand aucune règle plus précise ne
- * s'applique. Aligné sur l'historique (l'ancienne saisie fournisseur écrivait
- * « 6141 » en dur) → la migration vers le moteur ne change AUCUN compte existant.
+ * s'applique : 6125 « Achats non stockés de matières et fournitures ». C'était
+ * 6141 « Études, recherches et documentation », qui n'est pas un compte d'achats.
+ * Lu dans le référentiel : il ne peut plus diverger de PCM.CHARGE_DEFAUT.
  */
-// ⚠️ Au CGNC, 6141 est « Études, recherches et documentation », pas un compte
-// d'achats : repli historique conservé, À VALIDER (cf. COMPTES_A_VALIDER,
-// src/lib/pcm-referentiel.ts). Doit rester égal à PCM.CHARGE_DEFAUT — un test le verrouille.
-export const COMPTE_CHARGE_DEFAUT = "6141";
+export const COMPTE_CHARGE_DEFAUT: string = PCM.CHARGE_DEFAUT;
 /** Compte de produit générique (ventes de marchandises au Maroc). */
 export const COMPTE_PRODUIT_DEFAUT = "7111";
 
@@ -156,12 +156,12 @@ export const DICTIONNAIRE_PCM: RegleMotCle[] = [
     motsCles: ["eau", "redal", "lydec eau", "onep", "radeema"],
   },
   {
-    compte: "61252", label: "Électricité", sens: "charge",
+    compte: "61251", label: "Électricité", sens: "charge",
     motsCles: ["electricite", "electricity", "one", "onee", "lydec"],
   },
   // — Carburants et combustibles.
   {
-    compte: "61411", label: "Combustibles / carburants", sens: "charge",
+    compte: PCM.ACHATS_COMBUSTIBLES, label: "Combustibles / carburants", sens: "charge",
     motsCles: ["carburant", "gasoil", "gazole", "essence", "diesel", "station service", "shell", "total energies", "afriquia"],
   },
   // — Entretien et réparations.
@@ -191,7 +191,7 @@ export const DICTIONNAIRE_PCM: RegleMotCle[] = [
   },
   // — Services bancaires.
   {
-    compte: "6147", label: "Services bancaires", sens: "charge",
+    compte: PCM.SERVICES_BANCAIRES, label: "Frais et commissions sur services bancaires", sens: "charge",
     motsCles: ["frais bancaire", "frais bancaires", "commission bancaire", "agios", "tenue de compte"],
   },
 ];
@@ -204,7 +204,7 @@ interface FallbackSecteur { charge: string; produit: string }
  * Compte par défaut par secteur, quand ni le tiers ni les mots-clés ne tranchent.
  * Choix prudents : un négociant achète surtout des marchandises (6111) et vend
  * des marchandises (7111) ; une société de services facture des prestations
- * (7124) et achète peu de marchandises (repli sur le générique 6141).
+ * (7124) et achète surtout des études et prestations (6141).
  */
 export const FALLBACK_SECTEUR: Record<string, FallbackSecteur> = {
   "Commerce / Négoce": { charge: "6111", produit: "7111" },

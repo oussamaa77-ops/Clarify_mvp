@@ -43,18 +43,32 @@ describe("écritures de paie", () => {
     expect(controlerLignesPaie(l).ok).toBe(true);
   });
 
-  it("REFUSE une paie avec CIMR : la retenue n'a pas de contrepartie arbitrée", () => {
-    const b = bulletin({ cimr_salarie: 300, total_retenues: 2123.4, net_a_payer: 7876.6 });
+  it("crédite la CIMR (salariale ET patronale) au 4443 « Caisses de retraite » — pièce équilibrée", () => {
+    const b = bulletin({ cimr_salarie: 300, cimr_patronal: 300, total_retenues: 2123.4, net_a_payer: 7876.6 });
+    const l = lignesEcrituresPaie(b, "X");
+    const cimr = l.filter((x) => x.compte_numero === "4443");
+    expect(cimr.map((x) => x.credit)).toEqual([300, 300]);
+    expect(controlerLignesPaie(l, b)).toMatchObject({ ok: true, ecart: 0 });
+    expect(() => assertLignesPaie(l, b)).not.toThrow();
+  });
+
+  it("crédite l'IR retenu au 44525 « État, IGR », jamais au 4443 (caisses de retraite)", () => {
+    const ir = lignesEcrituresPaie(bulletin(), "X").find((x) => x.libelle.startsWith("IR/"))!;
+    expect(ir.compte_numero).toBe("44525");
+  });
+
+  it("REFUSE une retenue diverse sans compte arbitré", () => {
+    const b = bulletin({ total_retenues: 2123.4, net_a_payer: 7876.6 });
     const l = lignesEcrituresPaie(b, "X");
     const c = controlerLignesPaie(l, b);
     expect(c.ok).toBe(false);
     expect(c.ecart).toBe(300);
-    expect(c.violations.join(" ")).toMatch(/CIMR salariale 300\.00/);
     expect(() => assertLignesPaie(l, b)).toThrow(/déséquilibrée/);
   });
 
-  it("date la pièce au premier du mois à défaut de date de paiement", () => {
-    const l = lignesEcrituresPaie(bulletin({ date_paiement: null }), "X");
-    expect(l[0].date_ecriture).toBe("2026-03-01");
+  it("date la pièce au DERNIER jour du mois à défaut de date de paiement", () => {
+    expect(lignesEcrituresPaie(bulletin({ date_paiement: null }), "X")[0].date_ecriture).toBe("2026-03-31");
+    expect(lignesEcrituresPaie(bulletin({ date_paiement: null, periode: "2028-02" }), "X")[0].date_ecriture)
+      .toBe("2028-02-29");
   });
 });

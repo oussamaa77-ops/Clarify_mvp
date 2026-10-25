@@ -4,6 +4,7 @@ import {
   codeModePaiementDGI, construireReleveDeductions, designationAchat, designationDGI,
   indexerComptesCharge, resoudreIdentiteFiscale, tauxTvaFacture,
   ligneVersCellules, totauxReleveDeductions, type AchatDeduction,
+  quotePartReglement,
 } from "./releve-deductions";
 
 /** Achat 1000 HT + 200 TVA = 1200 TTC, soldé, du fournisseur F1. */
@@ -349,5 +350,27 @@ describe("tauxTvaFacture", () => {
   it("rend le taux réel quand il sort du barème", () => {
     expect(tauxTvaFacture(1000, 330)).toBe(33);
     expect(tauxTvaFacture(0, 200)).toBe(0);
+  });
+});
+
+describe("quotePartReglement — une ligne par règlement, jamais la facture entière deux fois", () => {
+  const facture = { ht: 10000, tva: 2000, ttc: 12000 };
+
+  it("répartit HT et TVA au prorata d'un règlement partiel", () => {
+    expect(quotePartReglement(facture, 6000)).toEqual({ ht: 5000, tva: 1000, ttc: 6000 });
+  });
+
+  it("deux virements de moitié déduisent ensemble la TVA de la facture, pas le double", () => {
+    const a = quotePartReglement(facture, 6000);
+    const b = quotePartReglement(facture, 6000);
+    expect(a.tva + b.tva).toBe(2000);
+  });
+
+  it("borne un trop-perçu à la facture entière", () => {
+    expect(quotePartReglement(facture, 15000)).toEqual({ ht: 10000, tva: 2000, ttc: 12000 });
+  });
+
+  it("rend le document tel quel sans TTC exploitable", () => {
+    expect(quotePartReglement({ ht: 100, tva: 20, ttc: 0 }, 50)).toEqual({ ht: 100, tva: 20, ttc: 0 });
   });
 });

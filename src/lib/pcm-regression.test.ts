@@ -200,7 +200,8 @@ describe("banque et caisse", () => {
   const ROLE_CONTREPARTIE: Record<string, UsageCompte> = {
     encaissement_client: "client", paiement_fournisseur: "fournisseur", cnss_amo: "organisme_social",
     tva_dgi: "tva_due", retrait_especes: "caisse", virement_interne: "virement_fonds",
-    interets_crediteurs: "produit",
+    interets_crediteurs: "produit", salaires: "personnel", tva_frais_bancaires: "tva_recuperable",
+    ir_salaires: "impots", acompte_is: "impots",
   };
 
   it.each(Object.entries(PCM_MAP))("PCM_MAP.%s : compte recevable et dans son rôle", (categorie, { code }) => {
@@ -268,18 +269,19 @@ describe("banque et caisse", () => {
   });
 });
 
-describe("comptes d'attente 47 — rapprochement bancaire", () => {
+describe("comptes d'attente 3497 / 4497 — rapprochement bancaire", () => {
   const orpheline = genererLignesBQ({ libelle: "VIREMENT RECU INCONNU", type: "credit", montant: 500 });
   const sortie = genererLignesBQ({ libelle: "PRELEVEMENT INCONNU", type: "debit", montant: 80 });
 
-  it("une transaction sans pièce est parquée en 4712 (crédit) / 4711 (débit)", () => {
+  it("une transaction sans pièce est parquée en 4497 (crédit) / 3497 (débit)", () => {
+    expect([orpheline[0].compte, sortie[0].compte]).toEqual(["4497", "3497"]);
     expect(orpheline[0].compte).toBe(PCM.ATTENTE_BANQUE_CREDIT);
     expect(sortie[0].compte).toBe(PCM.ATTENTE_BANQUE_DEBIT);
     role(orpheline[0].compte, "attente_bancaire");
     expect(ecart([...orpheline, ...sortie])).toBe(0);
   });
 
-  it("l'arrêté les signale comme non apurés, et les avertissements PCM les disent à valider", () => {
+  it("l'arrêté les signale comme non apurés, sur des comptes conformes au CGNC", () => {
     const balance: LigneBalance[] = [orpheline[0], sortie[0]].map((l) => ({
       compte: normaliserNumeroCompte(l.compte), total_debit: l.debit, total_credit: l.credit,
       solde: Math.abs(l.debit - l.credit), sens: l.debit >= l.credit ? "D" : "C",
@@ -288,7 +290,7 @@ describe("comptes d'attente 47 — rapprochement bancaire", () => {
     expect(audit.apure).toBe(false);
     expect(audit.comptes.every((c) => c.attenteBancaire)).toBe(true);
     expect(audit.total).toBe(580);
-    expect(controlerComptesPcm(orpheline).avertissements.join(" ")).toMatch(/4497/);
+    expect(controlerComptesPcm([...orpheline, ...sortie]).avertissements).toEqual([]);
   });
 });
 

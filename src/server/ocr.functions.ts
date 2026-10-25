@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { PCM } from "@/lib/pcm-referentiel";
 import { z } from "zod";
 import { createHash } from "crypto";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
@@ -358,31 +359,49 @@ export const writeAuditLog = createServerFn({ method: "POST" })
 const PCM_COMPTES = [
   // Report à nouveau — les deux contreparties de l'écriture d'à-nouveau, qui
   // rouvre l'exercice en reportant les soldes de bilan (cf. src/lib/a-nouveaux.ts).
-  { numero: "1161", intitule: "Report à nouveau (solde créditeur)", type_compte: "passif" },
-  { numero: "1169", intitule: "Report à nouveau (solde débiteur)", type_compte: "passif" },
-  { numero: "3421", intitule: "Clients", type_compte: "actif" },
-  { numero: "4191", intitule: "Clients — avances et acomptes reçus", type_compte: "passif" },
-  { numero: "4411", intitule: "Fournisseurs", type_compte: "passif" },
-  { numero: "44551", intitule: "TVA collectée", type_compte: "passif" },
-  { numero: "34552", intitule: "TVA récupérable", type_compte: "actif" },
-  { numero: "5141", intitule: "Banque", type_compte: "actif" },
-  { numero: "5161", intitule: "Caisse", type_compte: "actif" },
+  { numero: PCM.REPORT_A_NOUVEAU_CREDITEUR, intitule: "Report à nouveau (solde créditeur)", type_compte: "passif" },
+  { numero: PCM.REPORT_A_NOUVEAU_DEBITEUR, intitule: "Report à nouveau (solde débiteur)", type_compte: "passif" },
+  // Résultat de l'exercice clos, en attente de la décision d'affectation de l'AGO.
+  { numero: PCM.RESULTAT_INSTANCE_AFFECTATION_CREDITEUR, intitule: "Résultats nets en instance d'affectation (solde créditeur)", type_compte: "passif" },
+  { numero: PCM.RESULTAT_INSTANCE_AFFECTATION_DEBITEUR, intitule: "Résultats nets en instance d'affectation (solde débiteur)", type_compte: "passif" },
+  { numero: PCM.CLIENTS, intitule: "Clients", type_compte: "actif" },
+  { numero: PCM.CLIENTS_AVANCES_RECUES, intitule: "Clients — avances et acomptes reçus sur commandes en cours", type_compte: "passif" },
+  { numero: PCM.FOURNISSEURS, intitule: "Fournisseurs", type_compte: "passif" },
+  { numero: PCM.REMUNERATIONS_DUES_PERSONNEL, intitule: "Rémunérations dues au personnel", type_compte: "passif" },
+  { numero: PCM.CNSS, intitule: "Caisse Nationale de la Sécurité Sociale", type_compte: "passif" },
+  { numero: PCM.CAISSES_RETRAITE, intitule: "Caisses de retraite", type_compte: "passif" },
+  { numero: PCM.IR_RETENU_SALAIRES, intitule: "État, IGR (IR retenu à la source)", type_compte: "passif" },
+  { numero: PCM.TVA_FACTUREE_EXIGIBLE, intitule: "État, TVA facturée", type_compte: "passif" },
+  { numero: PCM.TVA_DUE, intitule: "État, TVA due (suivant déclarations)", type_compte: "passif" },
+  { numero: PCM.TVA_ATTENTE_VENTE, intitule: "État, autres comptes créditeurs (TVA facturée en attente)", type_compte: "passif" },
+  { numero: PCM.ATTENTE_BANQUE_CREDIT, intitule: "Comptes transitoires ou d'attente – créditeurs", type_compte: "passif" },
+  { numero: PCM.ACOMPTES_IS, intitule: "Acomptes sur impôts sur les résultats", type_compte: "actif" },
+  { numero: PCM.TVA_RECUPERABLE_CHARGES, intitule: "État, TVA récupérable sur charges", type_compte: "actif" },
+  { numero: PCM.CREDIT_TVA, intitule: "État, crédit de TVA (suivant déclarations)", type_compte: "actif" },
+  { numero: PCM.TVA_ATTENTE_ACHAT, intitule: "État, autres comptes débiteurs (TVA sur achats en attente)", type_compte: "actif" },
+  { numero: PCM.ATTENTE_BANQUE_DEBIT, intitule: "Comptes transitoires ou d'attente – débiteurs", type_compte: "actif" },
+  { numero: PCM.VIREMENTS_DE_FONDS, intitule: "Virements de fonds", type_compte: "actif" },
+  { numero: PCM.BANQUE, intitule: "Banque", type_compte: "actif" },
+  { numero: PCM.CAISSE, intitule: "Caisse", type_compte: "actif" },
   // Les trois comptes de vente du PCM, avec leurs VRAIS intitulés. Le 7121 était
   // libellé « Ventes de services » alors qu'il porte les BIENS PRODUITS, et le
   // 7124 — le compte des prestations, celui que `compteVente` désigne pour une
   // société de services — n'était pas créé du tout : le plan du dossier ne
   // proposait donc aucun compte pour l'activité la plus courante.
-  { numero: "7111", intitule: "Ventes de marchandises", type_compte: "produit" },
-  { numero: "7121", intitule: "Ventes de biens produits", type_compte: "produit" },
-  { numero: "7124", intitule: "Ventes de services produits", type_compte: "produit" },
+  { numero: PCM.VENTES_MARCHANDISES, intitule: "Ventes de marchandises", type_compte: "produit" },
+  { numero: PCM.VENTES_BIENS_PRODUITS, intitule: "Ventes de biens produits", type_compte: "produit" },
+  { numero: PCM.VENTES_SERVICES, intitule: "Ventes de services produits", type_compte: "produit" },
   // Intitulés alignés sur `pcm_reference` : 6111 porte les ACHATS DE MARCHANDISES,
   // et 6141 « Études, recherches et documentation ». Les deux étaient inversés /
   // faux, si bien que le plan d'un nouveau dossier annonçait des achats de
   // marchandises sur un compte d'études.
-  { numero: "6111", intitule: "Achats de marchandises", type_compte: "charge" },
-  { numero: "6141", intitule: "Études, recherches et documentation", type_compte: "charge" },
-  { numero: "6131", intitule: "Locations", type_compte: "charge" },
-  { numero: "6171", intitule: "Rémunérations du personnel", type_compte: "charge" },
+  { numero: PCM.ACHATS_MARCHANDISES, intitule: "Achats de marchandises", type_compte: "charge" },
+  { numero: PCM.ETUDES_RECHERCHES_DOCUMENTATION, intitule: "Études, recherches et documentation", type_compte: "charge" },
+  { numero: PCM.ACHATS_NON_STOCKES, intitule: "Achats non stockés de matières et fournitures", type_compte: "charge" },
+  { numero: PCM.LOCATIONS, intitule: "Locations et charges locatives", type_compte: "charge" },
+  { numero: PCM.SERVICES_BANCAIRES, intitule: "Frais et commissions sur services bancaires", type_compte: "charge" },
+  { numero: PCM.REMUNERATIONS_PERSONNEL, intitule: "Rémunérations du personnel", type_compte: "charge" },
+  { numero: PCM.CHARGES_SOCIALES, intitule: "Charges sociales", type_compte: "charge" },
 ];
 
 const PCM_JOURNAUX = [

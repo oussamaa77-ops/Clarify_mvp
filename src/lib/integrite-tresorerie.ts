@@ -241,6 +241,28 @@ export function controlerEcrituresTresorerie(
   };
 }
 
+/**
+ * Transactions déjà comptabilisées en TRÉSORERIE : celles qui portent déjà au
+ * moins une écriture BQ / CAI. La clôture d'un relevé ne doit pas leur en
+ * générer une seconde.
+ *
+ * Le cas réel : le paiement de la TVA à la DGI, saisi depuis le panneau TVA
+ * avec la ligne de relevé, passe D 4456 / C 5141 estampillé de son
+ * transaction_id. La clôture repassait ensuite le MÊME D 4456 / C 5141 : banque
+ * créditée deux fois, et un faux crédit de TVA au 4456. Une écriture ACH / VTE
+ * estampillée par un lettrage, elle, ne compte pas : ce n'est pas un mouvement
+ * d'argent, et la ligne de relevé doit encore être passée en banque.
+ */
+export function transactionsDejaEnTresorerie(
+  lignes: { transaction_id?: string | null; journal_code?: string | null }[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const l of lignes) {
+    if (l.transaction_id && estJournalTresorerie(l.journal_code)) ids.add(l.transaction_id);
+  }
+  return ids;
+}
+
 /** Même contrôle, en version bloquante — à placer juste avant l'`insert`. */
 export function assertEcrituresTresorerie(
   lignes: EcritureAInserer[], contexte: ContexteEcriture,

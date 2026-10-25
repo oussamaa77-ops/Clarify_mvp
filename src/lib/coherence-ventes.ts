@@ -6,14 +6,14 @@
 //
 //   (a) CA HT des factures  =  Σ des crédits nets de classe 7
 //         Casse quand une facture n'est pas comptabilisée, ou quand son produit
-//         a été porté au 4191 (compte de PASSIF) au lieu d'un compte de vente.
+//         a été porté au 4421 (compte de PASSIF) au lieu d'un compte de vente.
 //         Le compte de résultat est alors amputé du montant.
 //
 //   (b) Encours clients  =  postes DÉBITEURS non lettrés du compte 342x
 //         Casse quand le statut commercial d'une facture avance sans que la
 //         comptabilité suive : « payée » sans écriture, ou l'inverse.
 //
-//   (c) Aucun crédit du 4191 sur une facture ordinaire
+//   (c) Aucun crédit du 4421 sur une facture ordinaire
 //         L'invariant du générateur (cf. src/lib/ecritures-vente.ts), vérifié
 //         cette fois sur le STOCK et non sur le flux.
 //
@@ -34,7 +34,7 @@ import {
   situationFactureGrandLivre, type LigneGrandLivre, type PieceReglement,
 } from "@/lib/encours-grandlivre";
 import { estJournalTresorerie } from "@/lib/integrite-tresorerie";
-import { COMPTE_ACOMPTES_CLIENTS, normaliserTypeVente } from "@/lib/ecritures-vente";
+import { COMPTES_ACOMPTES_CLIENTS, normaliserTypeVente } from "@/lib/ecritures-vente";
 import { statutDepuisMontants, statutStocke, type StatutStocke } from "@/lib/statut-paiement";
 import { dansExercice, jourIso, type BornesExercice } from "@/lib/exercice-comptable";
 import { sansANouveaux } from "@/lib/a-nouveaux";
@@ -165,7 +165,7 @@ export function rapprocherEncoursClients(
 
 export interface AcompteIndu {
   facture: FactureVente;
-  /** Les lignes fautives : crédit du 4191 hors facture d'acompte. */
+  /** Les lignes fautives : crédit du 4421 hors facture d'acompte. */
   lignes: LigneGrandLivre[];
   montant: number;
   /** Compte de produit sur lequel la reclasser. */
@@ -173,7 +173,7 @@ export interface AcompteIndu {
 }
 
 /**
- * Crédits du 4191 rattachés à une facture qui n'est PAS un acompte.
+ * Crédits du 4421 (ou de l'ancien 4191) rattachés à une facture qui n'est PAS un acompte.
  *
  * `compteProduit` est rendu par l'appelant : le choix du 7111 / 7121 / 7124
  * dépend des désignations et du secteur (cf. src/lib/compte-vente.ts), données
@@ -187,7 +187,7 @@ export function acomptesIndus(
   for (const f of factures ?? []) {
     if (estAcompte(f)) continue;
     const fautives = lignesDeLaFacture(lignes, f).filter(
-      (l) => txt(l.compte_numero).startsWith(COMPTE_ACOMPTES_CLIENTS) && nb(l.credit) > 0.005,
+      (l) => COMPTES_ACOMPTES_CLIENTS.some((c) => txt(l.compte_numero).startsWith(c)) && nb(l.credit) > 0.005,
     );
     if (!fautives.length) continue;
     indus.push({

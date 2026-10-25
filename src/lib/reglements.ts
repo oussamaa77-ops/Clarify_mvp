@@ -219,7 +219,7 @@ export function examinerPaiements(
     // règlement supérieur au TTC n'est pas un règlement fictif : l'argent est
     // arrivé, avec un trop-perçu. Le rejeter ferait passer la facture pour
     // impayée alors qu'elle est plus que soldée — on le retient donc, et la
-    // projection le plafonne au TTC (le trop-perçu relève d'un avoir ou du 4191).
+    // projection le plafonne au TTC (le trop-perçu relève d'un avoir ou du 4421).
     //
     // Ce qui est fautif, c'est le règlement qui déborde APRÈS un autre : c'est la
     // signature du double comptage, et c'est cela qu'on écarte.
@@ -353,7 +353,7 @@ export function projeterEtatReglement(
   const retenu = accepterPieces ? Math.max(comptabilise, surPieces) : comptabilise;
 
   // Le payé ne dépasse jamais le dû : au-delà, ce n'est plus un règlement de
-  // cette facture mais un trop-perçu, qui relève d'un avoir ou du 4191.
+  // cette facture mais un trop-perçu, qui relève d'un avoir ou du 4421.
   const paye = ttc > 0.005 ? Math.min(retenu, ttc) : retenu;
 
   const datesPieces = recus.map((e) => jour(e.paiement.date_paiement)).filter(Boolean).sort();

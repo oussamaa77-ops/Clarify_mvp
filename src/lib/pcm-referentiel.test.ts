@@ -122,7 +122,7 @@ describe("référentiel PCM de l'application", () => {
     expect(PCM.PRIMES_ASSURANCES).toBe("6134");           // pas 6161 (impôts directs)
     expect(PCM.IMPOTS_TAXES_DIRECTS).toBe("6161");        // taxe professionnelle, pas 6313
     expect(PCM.DEPLACEMENTS_MISSIONS_RECEPTIONS).toBe("6143"); // réceptions, pas 6147
-    expect(PCM.SERVICES_BANCAIRES).toBe("6147");
+    expect(PCM.SERVICES_BANCAIRES).toBe("61473");
     expect(PCM.FRAIS_POSTAUX_TELECOMMUNICATIONS).toBe("6145"); // pas 6132 (crédit-bail)
     expect(PCM.INTERETS_PRODUITS_ASSIMILES).toBe("7381"); // pas 7611
     expect(PCM.REMUNERATIONS_DUES_PERSONNEL).toBe("4432"); // net à payer, pas 4441

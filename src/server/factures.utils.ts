@@ -2,6 +2,8 @@
 
 import { extractRibMarocain, estEnteteOuMetaReleve } from "../lib/releve-attijari";
 import { identifierBanque } from "../lib/bank-identity";
+import { TVA_RATES_MA } from "../lib/tva";
+import { PCM } from "../lib/pcm-referentiel";
 
 export function parseInvoiceRegex(text: string, dossierNom: string, dossierIce: string) {
   const norm = text.replace(/\r\n/g, "\n").replace(/\t/g, " ");
@@ -134,7 +136,7 @@ export interface MontantsInput {
 }
 
 export function correctMontants(input: MontantsInput): MontantsInput {
-  const TVA_RATES = [0, 7, 10, 14, 20];
+  const TVA_RATES: readonly number[] = TVA_RATES_MA;
   const ht   = Number(input.montant_ht)  || 0;
   const ttc  = Number(input.montant_ttc) || 0;
   const txAI = Number(input.taux_tva)   || 0;
@@ -795,11 +797,12 @@ Ces règles l'emportent sur toute autre déduction. Ne JAMAIS les contredire.
   JAMAIS "61311" (terrains) SAUF mention explicite d'un terrain / terrain nu.
 - Frais / commissions bancaires — émetteur banque (BP, Banque Populaire, ATW,
   Attijariwafa, BMCE, Bank of Africa, BMCI, CIH, CFG, Crédit du Maroc, SGMB…)
-  → compte_pcm = "6147".
+  → compte_pcm = "${PCM.SERVICES_BANCAIRES}".
 - Carburant (station-service, Gazole, Sans plomb, Diesel, Essence)
-  → compte_pcm = "61251".
+  → compte_pcm = "${PCM.ACHATS_COMBUSTIBLES}" (Achats de combustibles).
 - Eau / Électricité (Lydec, Amendis, ONEE, ONEP, Redal, Radeema, Radeef…)
-  → compte_pcm = "61252".
+  → compte_pcm = "${PCM.EAU_ELECTRICITE}" (Achats de fournitures non stockables : eau, électricité).
+  JAMAIS "61252", qui est « Achats de fournitures d'entretien ».
 - CNSS / AMO / CIMR / DGI → voir la section [ORGANISMES SOCIAUX ET PUBLICS]
   ci-dessous, qui l'emporte sur toute autre règle de compte.
 
@@ -851,14 +854,19 @@ priment sur toutes les autres.
      informations de contexte : elles ne remplacent JAMAIS le total dû.
 
 5. PLAN COMPTABLE MAROCAIN
-   · CNSS / AMO / CIMR → categorie_pcm = "charges_sociales" ET compte_pcm =
-     "6174" (cotisations aux caisses de retraite et de prévoyance sociale ;
-     61741 = CNSS).
+   · CNSS / AMO → categorie_pcm = "charges_sociales" ET compte_pcm = "${PCM.CNSS}"
+     (Caisse Nationale de la Sécurité Sociale). Le bordereau constate le
+     PAIEMENT d'une dette sociale : la charge (6174) est déjà constatée au
+     journal des salaires — l'imputer une seconde fois en 6174 la doublerait.
+   · CIMR → categorie_pcm = "charges_sociales" ET compte_pcm = "${PCM.CAISSES_RETRAITE}" (Caisses de retraite).
    · INTERDIT pour la CNSS et l'AMO : 6134 et 6161 ("assurance"), 6147 (frais
      bancaires), 6141. L'AMO est une cotisation sociale, PAS une assurance privée.
-   · DGI / TGR → categorie_pcm = "taxe_professionnelle" ET compte_pcm = "6161"
-     (impôts et taxes directs) pour la taxe professionnelle et les taxes locales,
-     sinon compte_pcm = "4456" (État, TVA due).
+   · DGI / TGR → selon l'impôt payé :
+       - taxe professionnelle, taxes locales → categorie_pcm = "taxe_professionnelle"
+         ET compte_pcm = "6161" (impôts et taxes directs) ;
+       - TVA → compte_pcm = "${PCM.TVA_DUE}" (État, TVA due) ;
+       - IS (acompte ou reliquat) → compte_pcm = "${PCM.ACOMPTES_IS}" (Acomptes sur impôts sur les résultats) ;
+       - IR retenu à la source sur salaires → compte_pcm = "${PCM.IR_RETENU_SALAIRES}" (État, IGR).
 
 6. DATES ET RÉFÉRENCES
    · date = "Date de Transmission", à défaut "Date d'Exécution du Prélèvement",
@@ -890,7 +898,7 @@ RÈGLES:
   · "eau_electricite" → ONEE, LYDEC, RADEEF, RADEM, RADEEM, eau, électricité, énergie — ou articles = consommation eau/électricité
   · "loyers" → loyer, location, bail, gérance, loyer commercial
   · "assurance" → assurance, Wafa Assurance, AXA, RMA, Allianz, SAHAM, police, prime d'assurance
-  · "charges_sociales" → CNSS, Caisse Nationale de Sécurité Sociale, Sécurité Sociale, AMO, CIMR, cotisations sociales, bordereau / déclaration / attestation de télé-règlement CNSS (compte 6174). NE PAS confondre avec "assurance" (compagnie privée : l'AMO n'en est pas une) ni avec la CNCA (banque)
+  · "charges_sociales" → CNSS, Caisse Nationale de Sécurité Sociale, Sécurité Sociale, AMO, CIMR, cotisations sociales, bordereau / déclaration / attestation de télé-règlement CNSS (compte 4441, CIMR 4443). NE PAS confondre avec "assurance" (compagnie privée : l'AMO n'en est pas une) ni avec la CNCA (banque)
   · "entretien" → maintenance, réparation, pièces détachées, atelier, garage, dépannage, révision
   · "frais_bancaires" → banque, commission bancaire, frais de tenue, CIH, Attijariwafa, BMCE, BMCI, Banque Populaire, CFG, frais bancaires
   · "encaissement_client" → uniquement si sens_facture = "client" (on émet la facture)
@@ -901,12 +909,12 @@ RÈGLES:
   · "paiement_fournisseur" → achat de marchandises, fournitures, matières premières, prestation générale non classifiable ci-dessus
 - compte_pcm: code comptable PCM selon type_document_justificatif (respecter les RÈGLES STRICTES ci-dessus en priorité absolue) :
   · "quittance_loyer" → "61312" (Locations de constructions ; JAMAIS "61311" sauf terrain explicite)
-  · "quittance_eau" → "61252" ET taux_tva = 7
-  · "quittance_elec" → "61252" ET taux_tva = 14
-  · "recu" → selon la nature de la dépense : "6143" (déplacements, missions et réceptions) si restaurant/café/repas, "61251" si carburant/station-service, "6141" sinon
-  · frais/commissions bancaires (émetteur = banque : BP, ATW, BMCE, CIH…) → "6147"
-  · "quittance_cnss" — CNSS / AMO / CIMR (categorie_pcm = "charges_sociales") → "6174" ET taux_tva = 0 (RÈGLE STRICTE, priorité absolue ; jamais 6134/6161/6147)
-  · "quittance_dgi" — DGI / TGR → "6161" (impôts et taxes directs : taxe professionnelle et taxes locales) sinon "4456" (État, TVA due) ET taux_tva = 0
+  · "quittance_eau" → "${PCM.EAU_ELECTRICITE}" ET taux_tva = taux imprimé sur la facture (depuis 2026 : 10 % usage non domestique, exonéré usage domestique ; 7 % sur les factures antérieures à 2024)
+  · "quittance_elec" → "${PCM.EAU_ELECTRICITE}" ET taux_tva = taux imprimé sur la facture (20 % depuis 2026 ; 18 % en 2025, 16 % en 2024, 14 % avant)
+  · "recu" → selon la nature de la dépense : "6143" (déplacements, missions et réceptions) si restaurant/café/repas, "${PCM.ACHATS_COMBUSTIBLES}" si carburant/station-service, "${PCM.CHARGE_DEFAUT}" sinon
+  · frais/commissions bancaires (émetteur = banque : BP, ATW, BMCE, CIH…) → "${PCM.SERVICES_BANCAIRES}"
+  · "quittance_cnss" — CNSS / AMO (categorie_pcm = "charges_sociales") → "${PCM.CNSS}", CIMR → "${PCM.CAISSES_RETRAITE}", ET taux_tva = 0 (RÈGLE STRICTE, priorité absolue ; jamais 6134/6161/6147)
+  · "quittance_dgi" — DGI / TGR → "6161" (taxe professionnelle et taxes locales), "${PCM.TVA_DUE}" (TVA), "${PCM.ACOMPTES_IS}" (IS), "${PCM.IR_RETENU_SALAIRES}" (IR sur salaires) ET taux_tva = 0
   · tout autre type → null
 - periode / numero_compteur (UNIQUEMENT pour quittance_eau, quittance_elec et quittance_cnss) : extraire OBLIGATOIREMENT le montant et la période (label "Période", "Mois", "Période de Cotisation", ex: "01/2025", "Janvier 2025" — retourner telle quelle) ; le numéro de compteur (label "N° Compteur", "Compteur", "N° Contrat", eau/élec uniquement) → null si absents
 - DATES — deux champs distincts à identifier OBLIGATOIREMENT pour les BL et BC :

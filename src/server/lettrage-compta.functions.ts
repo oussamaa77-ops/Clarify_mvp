@@ -25,6 +25,7 @@ import {
 } from "@/lib/genererEcritures";
 import { memeCompte, normaliserNumeroCompte } from "@/lib/numero-compte";
 import { controlerCaissePositive, RACINE_CAISSE } from "@/lib/integrite-tresorerie";
+import { proxyFetch } from "./proxy-fetch";
 
 /**
  * Insère une pièce d'OD construite par le moteur, en dégradant proprement.
@@ -145,19 +146,7 @@ export async function insererPiece(
   return { error: msg || "Insertion refusée" };
 }
 
-// Le proxy TLS d'entreprise fait échouer le `fetch` global côté serveur : sans
-// ce repli undici, supabase-js rend des erreurs réseau opaques et le lettrage
-// paraît « ne rien faire ».
-let PROXY_DIRECT = false;
-async function proxyFetch(input: any, init?: any): Promise<Response> {
-  const direct = async () => {
-    const { fetch: uf, Agent } = await import("undici");
-    return (uf as any)(String(input), { ...init, dispatcher: new Agent({ connect: { rejectUnauthorized: false } }) });
-  };
-  if (PROXY_DIRECT) return direct();
-  try { return await fetch(String(input), init); }
-  catch { PROXY_DIRECT = true; return direct(); }
-}
+// fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";

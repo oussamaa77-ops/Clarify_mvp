@@ -27,24 +27,43 @@ function getSupabase(): SupabaseClient {
 
 const now = () => new Date().toISOString();
 
+/** Le fichier est téléchargé avec la clé service_role, donc HORS RLS du
+ *  storage : sans ces gardes, n'importe quel utilisateur pouvait passer SON
+ *  dossier_id et le chemin d'un fichier d'un autre cabinet, et en recevoir
+ *  l'OCR. Les fichiers sont rangés sous `<dossier_id>/…` (banque, fournisseurs,
+ *  justificatifs) : on exige ce préfixe, dans un bucket connu. */
+const BUCKETS_DOCUMENTS = ["factures-originales", "releves-bancaires"] as const;
+
+export function cheminDansDossier(dossierId: string, filePath: string): boolean {
+  return filePath.startsWith(`${dossierId}/`) && !filePath.split("/").includes("..");
+}
+
 export const enqueueDocumentJob = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z.object({
       dossier_id: z.string().uuid(),
       type: z.enum(["facture", "releve", "justificatif"]),
-      bucket: z.string().nullish(),
+      bucket: z.enum(BUCKETS_DOCUMENTS).nullish(),
       file_path: z.string().nullish(),
       payload: z.any().nullish(),
       // Clé d'idempotence explicite (sinon dérivée du contenu).
       idempotency_key: z.string().nullish(),
-    }).parse(input),
+    })
+      .refine((d) => !d.file_path || cheminDansDossier(d.dossier_id, d.file_path), {
+        message: "Fichier hors du dossier.",
+        path: ["file_path"],
+      })
+      .parse(input),
   )
   .handler(async ({ data }) => {
     const supabase = getSupabase();
 
     // Clé d'idempotence : fournie, ou hash (dossier+type+file_path+payload).
+    // Une clé fournie est préfixée du dossier : la colonne est UNIQUE pour
+    // toute la base, et une clé partagée rendrait le résultat OCR d'un autre
+    // cabinet (le hash, lui, contient déjà le dossier).
     const idem =
-      data.idempotency_key ??
+      (data.idempotency_key ? `${data.dossier_id}:${data.idempotency_key}` : null) ??
       createHash("sha1")
         .update(JSON.stringify({ d: data.dossier_id, t: data.type, f: data.file_path ?? "", p: data.payload ?? null }))
         .digest("hex");

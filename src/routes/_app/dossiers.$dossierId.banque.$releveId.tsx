@@ -1,3 +1,4 @@
+import { TVA_RATES_MA } from "@/lib/tva";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
@@ -11,7 +12,7 @@ import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
 import { lettrerDossier } from "@/server/lettrage.functions";
 import { deriveCategorie, genererLignesBQ, PCM_MAP } from "@/lib/comptabilite-bq";
-import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
+import { assertEcrituresTresorerie, transactionsDejaEnTresorerie } from "@/lib/integrite-tresorerie";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
 
 export const Route = createFileRoute("/_app/dossiers/$dossierId/banque/$releveId")({
@@ -33,7 +34,7 @@ const mimeFromName = (name?: string | null): string | null => {
 
 // Taux de TVA marocains standards — on « aimante » le taux reconstitué vers le plus
 // proche quand l'écart est minime (< 1 pt), pour gommer les écarts de centimes.
-const TAUX_TVA_STANDARD = [0, 7, 10, 14, 20];
+const TAUX_TVA_STANDARD: readonly number[] = TVA_RATES_MA;
 const snapTauxTva = (taux: number | null): number | null => {
   if (taux == null || !isFinite(taux)) return null;
   const proche = TAUX_TVA_STANDARD.reduce((best, t) => (Math.abs(t - taux) < Math.abs(best - taux) ? t : best), TAUX_TVA_STANDARD[0]);
@@ -190,16 +191,23 @@ function ReleveDetailPage() {
   // ── Clôturer le relevé (modèle Odoo / Grand Livre continu) ───────────────────
   // Génère une écriture BQ pour TOUTES les transactions du relevé non encore
   // clôturées — lettrées (compte tiers/PCM) comme orphelines (compte d'attente
-  // 4711/4712). Chaque écriture porte transaction_id → le trigger SQL substitue
+  // 3497/4497). Chaque écriture porte transaction_id → le trigger SQL substitue
   // dynamiquement le compte d'attente lors d'un lettrage tardif.
   const cloturerReleve = async () => {
     const txAcloturer = txs.filter((t) => (t.statut ?? (t.rapproche ? "ferme" : "ouvert")) !== "cloture");
     if (!txAcloturer.length) { toast.info("Aucune transaction à clôturer — tout est déjà comptabilisé"); return; }
-    if (!window.confirm(`Clôturer ce relevé ?\n\n${txAcloturer.length} transaction(s) seront comptabilisées au Journal BQ. Les lignes sans pièce seront parquées sur le compte d'attente 4711/4712 (lettrage tardif resté possible).`)) return;
+    if (!window.confirm(`Clôturer ce relevé ?\n\n${txAcloturer.length} transaction(s) seront comptabilisées au Journal BQ. Les lignes sans pièce seront parquées sur le compte d'attente 3497/4497 (lettrage tardif resté possible).`)) return;
     setCloturerLoading(true);
     try {
+      // Transactions déjà passées en banque (paiement TVA DGI saisi depuis le
+      // panneau TVA, par exemple) : on les clôture sans écriture de plus.
+      const { data: dejaBq, error: eDeja } = await (supabase.from("ecritures_comptables") as any)
+        .select("transaction_id,journal_code").in("transaction_id", txAcloturer.map((t) => t.id));
+      if (eDeja) throw eDeja;
+      const deja = transactionsDejaEnTresorerie(dejaBq ?? []);
       const ecritures: any[] = [];
       for (const tx of txAcloturer) {
+        if (deja.has(tx.id)) continue;
         // Catégorie : valeur stockée si valide, sinon dérivée du libellé.
         const storedCat = tx.categorie ?? undefined;
         const cat = storedCat && PCM_MAP[storedCat]
@@ -220,8 +228,10 @@ function ReleveDetailPage() {
       // Origine « relevé » : ces écritures naissent des transactions de CE relevé,
       // chacune estampillée de son transaction_id (cf. src/lib/integrite-tresorerie.ts).
       assertEcrituresTresorerie(ecritures, { origine: "releve" });
-      const { error: ecrErr } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
-      if (ecrErr) throw ecrErr;
+      if (ecritures.length) {
+        const { error: ecrErr } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+        if (ecrErr) throw ecrErr;
+      }
       const { error: txErr } = await (supabase.from("transactions_bancaires") as any)
         .update({ statut: "cloture" }).in("id", txAcloturer.map((t) => t.id));
       if (txErr) throw txErr;
