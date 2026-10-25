@@ -81,7 +81,7 @@ describe("(c) le journal des ventes ne crédite jamais le 4421 hors acompte", ()
   });
 
   it("facture de solde : le produit est constaté ET le 4421 soldé par l'OD", () => {
-    const l = lignesEcrituresVente({ ...ctx, type: "solde" });
+    const l = lignesEcrituresVente({ ...ctx, type: "solde", montant_acomptes_ht: 26310 });
     const solde4191 = l
       .filter((x) => x.compte_numero === COMPTE_ACOMPTES_CLIENTS)
       .reduce((s, x) => s + x.debit - x.credit, 0);
@@ -94,7 +94,7 @@ describe("(c) le journal des ventes ne crédite jamais le 4421 hors acompte", ()
 
   it("les trois jeux respectent la partie double", () => {
     for (const type of ["facture", "acompte", "solde"] as const) {
-      expect(controlerLignesVente(lignesEcrituresVente({ ...ctx, type }), type).ecart).toBe(0);
+      expect(controlerLignesVente(lignesEcrituresVente({ ...ctx, type, montant_acomptes_ht: 5000 }), type).ecart).toBe(0);
     }
   });
 

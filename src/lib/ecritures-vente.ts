@@ -76,6 +76,12 @@ export interface ContexteEcrituresVente {
   /** Compte de produit retenu par `compteVente` — 7111 / 7121 / 7124. */
   compte_produit: string;
   type: TypeFactureVente;
+  /**
+   * Facture de SOLDE : HT des factures d'acompte de la même commande, déjà portés
+   * au 4421. C'est ce montant — et non le HT du solde — que l'OD impute au produit.
+   * Absent ou nul : aucune imputation (aucun acompte retrouvé).
+   */
+  montant_acomptes_ht?: number | null;
 }
 
 /** Un type de facture inconnu n'est pas un acompte : il est ORDINAIRE. */
@@ -95,7 +101,7 @@ const r2 = (n: unknown) => Math.round((Number(n) || 0) * 100) / 100;
  *   ACOMPTE     D 3421 TTC  /  C 4421 HT  +  C 4458 TVA
  *                 — aucun produit : l'acompte n'est pas du chiffre d'affaires.
  *   SOLDE       les trois lignes ordinaires, PLUS l'OD d'imputation qui solde le
- *               4421 ouvert par l'acompte :  D 4421 HT / C 7xxx HT.
+ *               4421 ouvert par l'acompte :  D 4421 / C 7xxx pour le HT des ACOMPTES.
  *
  * La TVA transite systématiquement par le 4458 : le régime des encaissements ne
  * la rend exigible (44551) qu'au règlement, via l'OD de bascule du lettrage.
@@ -140,17 +146,21 @@ export function lignesEcrituresVente(ctx: ContexteEcrituresVente): LigneVente[] 
 
   if (ctx.type !== "solde") return venteOrdinaire;
 
-  // Facture de SOLDE : la vente est constatée en totalité au produit, puis
-  // l'acompte antérieurement porté au 4421 est imputé sur ce même produit. Le
-  // 4421 revient à zéro ; le produit n'est pas compté deux fois, car le débit et
-  // le crédit de l'OD se neutralisent sur le résultat.
+  // Facture de SOLDE : elle porte le RESTANT dû (total de la commande moins les
+  // acomptes facturés). Le produit reçoit ce restant, puis l'OD transfère les
+  // acomptes du 4421 au produit : D 4421 / C 7xxx pour le HT des ACOMPTES. Le CA
+  // de la commande est ainsi constaté une seule fois et le 4421 revient à zéro.
+  // L'OD imputait le HT du SOLDE : le CA était compté deux fois et le 4421
+  // devenait débiteur dès que le solde différait de l'acompte.
   venteOrdinaire[0] = { ...venteOrdinaire[0], libelle: `Solde ${ref}` };
+  const acomptes = r2(ctx.montant_acomptes_ht);
+  if (acomptes <= 0.005) return venteOrdinaire;
   return [
     ...venteOrdinaire,
     { ...base, journal_code: "OD", compte_numero: COMPTE_ACOMPTES_CLIENTS,
-      libelle: `Imputation acompte ${ref}`, debit: ht, credit: 0 },
+      libelle: `Imputation acompte ${ref}`, debit: acomptes, credit: 0 },
     { ...base, journal_code: "OD", compte_numero: ctx.compte_produit,
-      libelle: `Imputation acompte ${ref}`, debit: 0, credit: ht },
+      libelle: `Imputation acompte ${ref}`, debit: 0, credit: acomptes },
   ];
 }
 

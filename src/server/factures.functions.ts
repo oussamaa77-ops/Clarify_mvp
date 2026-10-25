@@ -698,6 +698,22 @@ export const generateFactureXml = createServerFn({ method: "POST" })
       // s'en aperçoive : un crédit du 4421 — compte de PASSIF — sur une facture
       // ordinaire, qui escamote le chiffre d'affaires du compte de résultat.
       const typeVente = normaliserTypeVente(typeFacture);
+      // Facture de SOLDE : les acomptes de la MÊME commande, chez le même client,
+      // déjà comptabilisés (conformes) — leur HT est ce que l'OD impute au produit.
+      let montantAcomptesHt = 0;
+      const numeroCommande = String((facture as any).numero_commande ?? "").trim();
+      if (typeVente === "solde" && numeroCommande && facture.client_id) {
+        const { data: acomptes } = await supabase
+          .from("factures")
+          .select("montant_ht")
+          .eq("dossier_id", facture.dossier_id)
+          .eq("client_id", facture.client_id)
+          .eq("type", "acompte")
+          .eq("statut", "conforme")
+          .eq("numero_commande", numeroCommande)
+          .neq("id", facture.id);
+        montantAcomptesHt = (acomptes ?? []).reduce((s: number, a: any) => s + (Number(a.montant_ht) || 0), 0);
+      }
       const ecrituresVente = lignesEcrituresVente({
         dossier_id: facture.dossier_id,
         facture_id: facture.id,
@@ -709,6 +725,7 @@ export const generateFactureXml = createServerFn({ method: "POST" })
         compte_client: compteClient,
         compte_produit: compteVenteFacture,
         type: typeVente,
+        montant_acomptes_ht: montantAcomptesHt,
       });
       assertLignesVente(ecrituresVente, typeVente);
 
