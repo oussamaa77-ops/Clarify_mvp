@@ -80,18 +80,23 @@ export function calculBulletin(params: {
 
   const taux_horaire = salaire_base / 191;
   const montant_hs = Math.round(heures_sup * taux_horaire * taux_hs * 100) / 100;
-  const brut_global = salaire_base + montant_hs + primes + avantages_nature;
+  // Les indemnités exonérées (transport, panier… dans les limites légales) sont
+  // VERSÉES au salarié mais n'entrent ni dans la base IR ni dans l'assiette des
+  // cotisations. Elles étaient retranchées d'un brut qui ne les contenait pas :
+  // le salarié perdait l'indemnité et son IR était minoré d'autant.
+  const brut_global = salaire_base + montant_hs + primes + avantages_nature + indemnites_exo;
   const brut_imposable = brut_global - indemnites_exo;
 
-  const base_cnss = Math.min(brut_global, TAUX_PAIE.cnss_plafond);
+  // Assiette des cotisations sociales : le brut imposable (avantages en nature compris).
+  const base_cnss = Math.min(brut_imposable, TAUX_PAIE.cnss_plafond);
   const cnss_salarie = cnss_assujetti ? Math.round(base_cnss * TAUX_PAIE.cnss_salarie * 100) / 100 : 0;
   // Part patronale CNSS : prestations sociales (plafonnées) + allocations familiales (déplafonnées).
   const cnss_patronal = cnss_assujetti
-    ? Math.round((base_cnss * TAUX_PAIE.cnss_patronal + brut_global * TAUX_PAIE.allocations_familiales) * 100) / 100
+    ? Math.round((base_cnss * TAUX_PAIE.cnss_patronal + brut_imposable * TAUX_PAIE.allocations_familiales) * 100) / 100
     : 0;
-  const amo_salarie = amo_assujetti ? Math.round(brut_global * TAUX_PAIE.amo_salarie * 100) / 100 : 0;
-  const amo_patronal = amo_assujetti ? Math.round(brut_global * TAUX_PAIE.amo_patronal * 100) / 100 : 0;
-  const cimr_salarie = Math.round(brut_global * (cimr_taux / 100) * 100) / 100;
+  const amo_salarie = amo_assujetti ? Math.round(brut_imposable * TAUX_PAIE.amo_salarie * 100) / 100 : 0;
+  const amo_patronal = amo_assujetti ? Math.round(brut_imposable * TAUX_PAIE.amo_patronal * 100) / 100 : 0;
+  const cimr_salarie = Math.round(brut_imposable * (cimr_taux / 100) * 100) / 100;
   const cimr_patronal = cimr_salarie;
 
   const frais_pro = fraisProfessionnels(brut_imposable);
@@ -117,8 +122,10 @@ export function calculBulletin(params: {
   const ir_net = Math.max(0, Math.round((ir_brut - deduction_familiale) * 100) / 100);
 
   const total_retenues = Math.round((cnss_salarie + amo_salarie + cimr_salarie + ir_net) * 100) / 100;
-  const net_a_payer = Math.round((brut_global - total_retenues) * 100) / 100;
-  const tfp = Math.round(brut_global * TAUX_PAIE.tfp * 100) / 100;
+  // L'avantage en nature est imposable et cotisable, mais déjà fourni en nature
+  // (logement, véhicule…) : il ne se paie pas une seconde fois en espèces.
+  const net_a_payer = Math.round((brut_global - total_retenues - avantages_nature) * 100) / 100;
+  const tfp = Math.round(brut_imposable * TAUX_PAIE.tfp * 100) / 100;
   const cout_employeur = Math.round((brut_global + cnss_patronal + amo_patronal + cimr_patronal + tfp) * 100) / 100;
 
   return {

@@ -47,6 +47,8 @@ export const PCM_MAP: Record<string, { code: string; tva: number }> = {
   frais_bancaires:      { code: PCM.SERVICES_BANCAIRES,  tva: 10 },  // Commissions bancaires → TVA 10% déductible
   // 6161 « Impôts et taxes directs ». C'était 6313, un compte de charges d'INTÉRÊTS.
   taxe_professionnelle: { code: PCM.IMPOTS_TAXES_DIRECTS,  tva: 0 },   // Taxes → pas de TVA
+  // 61671 « Droits d'enregistrement et de timbre » : un impôt, pas un service bancaire, sans TVA.
+  droits_timbre:        { code: PCM.DROITS_ENREGISTREMENT_TIMBRE,  tva: 0 },
   // Retrait → CAISSE, rubrique 516 du PCM. C'était 5143, qui est la Trésorerie
   // Générale : les espèces sorties du GAB n'alimentaient donc pas le compte que
   // mouvementent les règlements en espèces, et le solde de caisse était faux des
@@ -79,7 +81,7 @@ export function deriveCategorie(libelle: string, type: "credit" | "debit"): { ca
   const u = (libelle || "").toUpperCase();
   if (RX_VIREMENT_INTERNE.test(u))                        return cat("virement_interne");
   if (type === "credit") return cat("encaissement_client");
-  if (/\bCNSS\b|AMO\b/.test(u))                          return cat("cnss_amo");
+  if (/\bCNSS\b|\bAMO\b/.test(u))                        return cat("cnss_amo");
   if (RX_TVA_FRAIS_BANCAIRES.test(u))                     return cat("tva_frais_bancaires");
   if (/\bTVA\b/.test(u))                                  return cat("tva_dgi");
   if (/\bIS\b|IMPOT\s+SUR\s+LES\s+SOCIETES/.test(u))      return cat("acompte_is");
@@ -91,7 +93,8 @@ export function deriveCategorie(libelle: string, type: "credit" | "debit"): { ca
   if (/\bEAU\b|ONEE|ELECTRICITE/.test(u))                return cat("eau_electricite");
   if (/GASOIL|CARBURANT|STATION/.test(u))                 return cat("gasoil");
   if (/ASSURANCE/.test(u))                                return cat("assurance");
-  if (/COMMISSION|FRAIS|AGIOS|TENUE|TIMBRE/.test(u))     return cat("frais_bancaires");
+  if (/TIMBRE/.test(u))                                   return cat("droits_timbre");
+  if (/COMMISSION|FRAIS|AGIOS|TENUE/.test(u))            return cat("frais_bancaires");
   if (/RETRAIT|GAB/.test(u))                              return cat("retrait_especes");
   if (/DOUANE|IMPORT/.test(u))                            return cat("frais_douane");
   if (/TRANSPORT|DEPLACEMENT/.test(u))                    return cat("transport");
