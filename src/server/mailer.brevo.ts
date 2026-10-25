@@ -19,27 +19,10 @@
 
 import { readFile } from "node:fs/promises";
 import type { SendMailInput } from "./mailer";
+// Le proxy TLS du poste de dev casse le fetch global de Node : voir ./proxy-fetch.
+import { proxyFetch } from "./proxy-fetch";
 
 const ENDPOINT = "https://api.brevo.com/v3/smtp/email";
-
-/** Le proxy TLS d'entreprise casse le fetch global de Node : on bascule sur
- *  undici en direct au premier échec (même motif que les autres modules
- *  serveur). Sur Railway le fetch global marche, la bascule ne coûte rien. */
-let PROXY_DIRECT = false;
-async function proxyFetch(url: string, init: RequestInit): Promise<Response> {
-  if (!PROXY_DIRECT) {
-    try {
-      return await fetch(url, init);
-    } catch {
-      PROXY_DIRECT = true;
-    }
-  }
-  const { fetch: uf, Agent } = await import("undici");
-  return (uf as any)(url, {
-    ...init,
-    dispatcher: new Agent({ connect: { rejectUnauthorized: false } }),
-  });
-}
 
 export function brevoApiKey(): string {
   return (process.env.BREVO_API_KEY ?? "").trim();

@@ -86,24 +86,24 @@ describe("écriture d'à-nouveau", () => {
     expect(aco.date_ecriture).toBe("2026-01-01");
   });
 
-  it("reporte la PERTE antérieure au débit du 1169, et s'équilibre seule", () => {
+  it("reporte la PERTE antérieure au débit du 1189 (résultat en instance d'affectation), et s'équilibre seule", () => {
     const plan = lignesANouveaux(soldesCloture(anterieures, "2026-01-01"), OPTS);
     expect(plan.compteReport).toBe(COMPTE_REPORT_DEBITEUR);
     expect(plan.resultatReporte).toBe(26500);
-    const report = plan.lignes.find((x) => x.compte_numero === "1169")!;
+    const report = plan.lignes.find((x) => x.compte_numero === "1189")!;
     expect(report.debit).toBe(26500);
     expect(plan.ecart).toBe(0);
     expect(plan.violations).toEqual([]);
   });
 
-  it("reporte un BÉNÉFICE au crédit du 1161", () => {
+  it("reporte un BÉNÉFICE au crédit du 1181", () => {
     const benefice: LigneSolde[] = [
       l({ date_ecriture: "2025-06-01", compte_numero: "3421", debit: 12000 }),
       l({ date_ecriture: "2025-06-01", compte_numero: "7111", credit: 12000 }),
     ];
     const plan = lignesANouveaux(soldesCloture(benefice, "2026-01-01"), OPTS);
     expect(plan.compteReport).toBe(COMPTE_REPORT_CREDITEUR);
-    expect(plan.lignes.find((x) => x.compte_numero === "1161")!.credit).toBe(12000);
+    expect(plan.lignes.find((x) => x.compte_numero === "1181")!.credit).toBe(12000);
     expect(plan.ecart).toBe(0);
   });
 
@@ -253,9 +253,9 @@ describe("réouverture d'un dossier portant déjà un à-nouveau", () => {
 
   it("le RÉSULTAT ne compte que les exercices écoulés depuis l'ancre", () => {
     const soldes = soldesCloture(baseComplete(), "2027-01-01");
-    // La perte de 26 500 est déjà convertie en 1169 par l'ancre : elle est
+    // La perte de 26 500 est déjà convertie en 1189 par l'ancre : elle est
     // reportée comme un SOLDE de bilan, pas recomptée comme du résultat.
-    expect(soldes.parCompte.get("1169")).toBe(26500);
+    expect(soldes.parCompte.get("1189")).toBe(26500);
     // Seul l'achat de 2026 forme le résultat de l'exercice qu'on clôture.
     expect(soldes.totalGestion).toBe(1200);
   });

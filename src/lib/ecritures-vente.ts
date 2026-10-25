@@ -5,20 +5,20 @@
 // Les trois jeux d'écritures de vente (facture ordinaire, facture d'ACOMPTE,
 // facture de SOLDE) vivaient en clair dans `generateFactureXml`, au milieu de la
 // transmission DGI, de l'archivage GED et de l'envoi d'e-mail. Rien n'y était
-// testable : pour vérifier qu'une facture ordinaire ne crédite pas le 4191, il
+// testable : pour vérifier qu'une facture ordinaire ne crédite pas le 4421, il
 // fallait transmettre une facture à la DGI.
 //
 // Le voici seul, sans base ni réseau. La règle qui suit devient dès lors un
 // INVARIANT vérifiable, et non plus une intention portée par un commentaire.
 //
 // ─── L'invariant ─────────────────────────────────────────────────────────────
-//   4191 « Clients — avances et acomptes reçus » est un compte de PASSIF. Il
+//   4421 « Clients — avances et acomptes reçus » est un compte de PASSIF. Il
 //   constate une dette : l'argent est encaissé, la prestation ne l'est pas.
 //   Il n'est licite QUE sur une facture d'acompte, et il doit être SOLDÉ par la
 //   facture de solde qui l'impute en produit.
 //
 //   Toute autre facture crédite un compte de PRODUIT de classe 7 (cf.
-//   src/lib/compte-vente.ts). Une facture ordinaire qui crédite le 4191 ne fait
+//   src/lib/compte-vente.ts). Une facture ordinaire qui crédite le 4421 ne fait
 //   pas apparaître son chiffre d'affaires : le compte de résultat est amputé du
 //   montant, le bilan porte une dette qui n'existe pas, et le rapprochement CA
 //   HT ⇄ crédits classe 7 échoue de la même somme.
@@ -32,10 +32,18 @@ import { COMPTES_TVA } from "@/services/lettrage";
 import { PCM, controlerComptesPcm, validatePcmAccount } from "@/lib/pcm-referentiel";
 
 /**
- * Compte d'avances et acomptes reçus — passif, jamais un produit.
- * ⚠️ À VALIDER : numérotation française (419) ; le CGNC emploie 4421.
+ * Compte d'avances et acomptes reçus — passif, jamais un produit : 4421
+ * « Clients – avances et acomptes reçus sur commandes en cours » (CGNC).
  */
 export const COMPTE_ACOMPTES_CLIENTS = PCM.CLIENTS_AVANCES_RECUES;
+
+/**
+ * Comptes reconnus comme acomptes clients à la LECTURE : 4421, et l'ancien 4191
+ * (plan français) que l'historique peut encore porter. On n'écrit que le 4421.
+ */
+export const COMPTES_ACOMPTES_CLIENTS: readonly string[] = [COMPTE_ACOMPTES_CLIENTS, PCM.ANCIEN_CLIENTS_AVANCES_RECUES];
+const estAcompteClient = (compte: unknown): boolean =>
+  COMPTES_ACOMPTES_CLIENTS.some((c) => String(compte ?? "").startsWith(c));
 
 /** Nature de la pièce de vente. Tout ce qui n'est pas connu est ORDINAIRE. */
 export type TypeFactureVente = "facture" | "acompte" | "solde";
@@ -84,10 +92,10 @@ const r2 = (n: unknown) => Math.round((Number(n) || 0) * 100) / 100;
  * Les écritures du journal des ventes pour une facture.
  *
  *   ORDINAIRE   D 3421 TTC  /  C 7xxx HT  +  C 4458 TVA
- *   ACOMPTE     D 3421 TTC  /  C 4191 HT  +  C 4458 TVA
+ *   ACOMPTE     D 3421 TTC  /  C 4421 HT  +  C 4458 TVA
  *                 — aucun produit : l'acompte n'est pas du chiffre d'affaires.
  *   SOLDE       les trois lignes ordinaires, PLUS l'OD d'imputation qui solde le
- *               4191 ouvert par l'acompte :  D 4191 HT / C 7xxx HT.
+ *               4421 ouvert par l'acompte :  D 4421 HT / C 7xxx HT.
  *
  * La TVA transite systématiquement par le 4458 : le régime des encaissements ne
  * la rend exigible (44551) qu'au règlement, via l'OD de bascule du lettrage.
@@ -133,8 +141,8 @@ export function lignesEcrituresVente(ctx: ContexteEcrituresVente): LigneVente[] 
   if (ctx.type !== "solde") return venteOrdinaire;
 
   // Facture de SOLDE : la vente est constatée en totalité au produit, puis
-  // l'acompte antérieurement porté au 4191 est imputé sur ce même produit. Le
-  // 4191 revient à zéro ; le produit n'est pas compté deux fois, car le débit et
+  // l'acompte antérieurement porté au 4421 est imputé sur ce même produit. Le
+  // 4421 revient à zéro ; le produit n'est pas compté deux fois, car le débit et
   // le crédit de l'OD se neutralisent sur le résultat.
   venteOrdinaire[0] = { ...venteOrdinaire[0], libelle: `Solde ${ref}` };
   return [
@@ -158,7 +166,7 @@ export interface ControleLignesVente {
  * Contrôle des écritures de vente AVANT insertion.
  *
  * Trois griefs, dans l'ordre de gravité :
- *   1. un CRÉDIT du 4191 sur une facture qui n'est pas un acompte — l'anomalie
+ *   1. un CRÉDIT du 4421 sur une facture qui n'est pas un acompte — l'anomalie
  *      que cette chaîne existe pour empêcher ;
  *   2. l'absence de tout crédit de classe 7 sur une facture ordinaire ou de
  *      solde — le chiffre d'affaires n'apparaîtrait nulle part ;
@@ -171,7 +179,7 @@ export function controlerLignesVente(
   const estAcompte = type === "acompte";
 
   const creditAcompte = lignes.filter(
-    (l) => String(l.compte_numero).startsWith(COMPTE_ACOMPTES_CLIENTS) && Number(l.credit) > 0.005,
+    (l) => estAcompteClient(l.compte_numero) && Number(l.credit) > 0.005,
   );
   if (!estAcompte && creditAcompte.length) {
     violations.push(
@@ -186,7 +194,7 @@ export function controlerLignesVente(
     violations.push("Aucun produit de classe 7 crédité : le chiffre d'affaires de cette facture serait invisible.");
   }
   if (estAcompte && lignes.some((l) => String(l.compte_numero).startsWith("7"))) {
-    violations.push("Une facture d'acompte ne constate aucun produit : le 4191 tient l'avance jusqu'à la facture de solde.");
+    violations.push("Une facture d'acompte ne constate aucun produit : le 4421 tient l'avance jusqu'à la facture de solde.");
   }
 
   const ecart = r2(lignes.reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0));

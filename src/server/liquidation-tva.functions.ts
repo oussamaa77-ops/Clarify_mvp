@@ -38,17 +38,9 @@ import {
   type LiquidationTva,
 } from "@/lib/liquidation-tva";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
+import { proxyFetch } from "./proxy-fetch";
 
-let PROXY_DIRECT = false;
-async function proxyFetch(input: any, init?: any): Promise<Response> {
-  const direct = async () => {
-    const { fetch: uf, Agent } = await import("undici");
-    return (uf as any)(String(input), { ...init, dispatcher: new Agent({ connect: { rejectUnauthorized: false } }) });
-  };
-  if (PROXY_DIRECT) return direct();
-  try { return await fetch(String(input), init); }
-  catch { PROXY_DIRECT = true; return direct(); }
-}
+// fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
 function getSupabase(): SupabaseClient {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_PUBLISHABLE_KEY ?? process.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "";

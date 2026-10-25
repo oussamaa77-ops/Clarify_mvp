@@ -16,9 +16,9 @@
 //
 // ─── Ce qu'il ne fait PAS ────────────────────────────────────────────────────
 // Il ne décide d'aucune imputation nouvelle. Chaque constante ci-dessous est un
-// compte DÉJÀ employé par le code ; ceux dont la conformité CGNC reste à trancher
-// par un expert-comptable portent `aValider` et figurent dans `COMPTES_A_VALIDER`
-// — ils ne sont ni corrigés en silence, ni tenus pour conformes.
+// compte du CGNC vérifié contre la nomenclature. Les anciens numéros hors CGNC
+// que l'historique peut encore porter figurent dans `COMPTES_HISTORIQUES_HORS_CGNC` :
+// lisibles avec un avertissement, jamais produits par le code.
 //
 // ─── Longueur ────────────────────────────────────────────────────────────────
 // Le CGNC n'impose AUCUNE longueur : 4 chiffres (compte principal, 5141), 5
@@ -95,27 +95,44 @@ export const PCM = {
   // Classe 1
   REPORT_A_NOUVEAU_CREDITEUR: "1161",
   REPORT_A_NOUVEAU_DEBITEUR: "1169",
+  /**
+   * 1181 / 1189 « Résultats nets en instance d'affectation ». C'est là que
+   * l'à-nouveau porte le résultat de l'exercice clos : son affectation (réserve
+   * légale 1140, dividendes 4465, report à nouveau 116x) relève de l'AGO et se
+   * passe ensuite par OD. Le verser d'office en 116x sautait la réserve légale.
+   */
+  RESULTAT_INSTANCE_AFFECTATION_CREDITEUR: "1181",
+  RESULTAT_INSTANCE_AFFECTATION_DEBITEUR: "1189",
   // Classe 3
   FOURNISSEURS_AVANCES_VERSEES: "3411",
   CLIENTS: "3421",
+  /** 3453 « Acomptes sur impôts sur les résultats » — acomptes d'IS versés. */
+  ACOMPTES_IS: "3453",
   TVA_RECUPERABLE_CHARGES: "34552",
+  /** 3456 « État – crédit de TVA (suivant déclarations) ». */
+  CREDIT_TVA: "3456",
   /** « État – autres comptes débiteurs », employé comme TVA sur achats EN ATTENTE. */
   TVA_ATTENTE_ACHAT: "3458",
+  /** 3497 « Comptes transitoires ou d'attente – débiteurs ». */
+  ATTENTE_BANQUE_DEBIT: "3497",
   // Classe 4
-  /** Avances et acomptes reçus des clients — voir COMPTES_A_VALIDER. */
-  CLIENTS_AVANCES_RECUES: "4191",
+  /** 4421 « Clients – avances et acomptes reçus sur commandes en cours ». */
+  CLIENTS_AVANCES_RECUES: "4421",
+  /** Ancien compte d'acomptes clients (plan français 419) : LU dans l'historique, jamais écrit. */
+  ANCIEN_CLIENTS_AVANCES_RECUES: "4191",
   FOURNISSEURS: "4411",
   REMUNERATIONS_DUES_PERSONNEL: "4432",
   CNSS: "4441",
-  /** IR retenu sur salaires — voir COMPTES_A_VALIDER. */
-  IR_RETENU_SALAIRES: "4443",
+  /** 4443 « Caisses de retraite » — CIMR. */
+  CAISSES_RETRAITE: "4443",
+  /** 44525 « État, IGR » (sous-compte de 4452) — IR retenu à la source sur salaires. */
+  IR_RETENU_SALAIRES: "44525",
   TVA_FACTUREE_EXIGIBLE: "44551",
   TVA_DUE: "4456",
   /** « État – autres comptes créditeurs », employé comme TVA facturée EN ATTENTE. */
   TVA_ATTENTE_VENTE: "4458",
-  /** Parkings du rapprochement bancaire — voir COMPTES_A_VALIDER. */
-  ATTENTE_BANQUE_DEBIT: "4711",
-  ATTENTE_BANQUE_CREDIT: "4712",
+  /** 4497 « Comptes transitoires ou d'attente – créditeurs ». */
+  ATTENTE_BANQUE_CREDIT: "4497",
   // Classe 5
   VIREMENTS_DE_FONDS: "5115",
   BANQUE: "5141",
@@ -125,20 +142,34 @@ export const PCM = {
   // Classe 6
   ACHATS_MARCHANDISES: "6111",
   ACHATS_MATIERES_PREMIERES: "6121",
+  /** 61223 « Achats de combustibles » — carburant. */
+  ACHATS_COMBUSTIBLES: "61223",
   ACHATS_NON_STOCKES: "6125",
+  /** 61251 « Achats de fournitures non stockables (eau, électricité) ». */
+  EAU_ELECTRICITE: "61251",
   LOCATIONS: "6131",
   ENTRETIEN_REPARATIONS: "6133",
   PRIMES_ASSURANCES: "6134",
   HONORAIRES: "6136",
-  /** Repli historique des achats non catégorisés — voir COMPTES_A_VALIDER. */
-  CHARGE_DEFAUT: "6141",
+  /**
+   * Repli des achats non catégorisés : 6125 « Achats non stockés de matières et
+   * fournitures ». C'était 6141 « Études, recherches et documentation ».
+   */
+  CHARGE_DEFAUT: "6125",
+  ETUDES_RECHERCHES_DOCUMENTATION: "6141",
   TRANSPORTS: "6142",
   DEPLACEMENTS_MISSIONS_RECEPTIONS: "6143",
   PUBLICITE: "6144",
   FRAIS_POSTAUX_TELECOMMUNICATIONS: "6145",
-  SERVICES_BANCAIRES: "6147",
+  /**
+   * 61473 « Frais et commissions sur services bancaires » (rubrique 6147
+   * « Services bancaires »). C'était 6347 — la rubrique 634 n'existe pas au CGNC.
+   */
+  SERVICES_BANCAIRES: "61473",
   IMPOTS_TAXES_DIRECTS: "6161",
   DROITS_ENREGISTREMENT_TIMBRE: "61671",
+  /** 61678 « Autres impôts, taxes et droits assimilés » — droits de douane non incorporés au coût d'achat. */
+  AUTRES_IMPOTS_TAXES: "61678",
   REMUNERATIONS_PERSONNEL: "6171",
   CHARGES_SOCIALES: "6174",
   // Classe 7
@@ -157,34 +188,61 @@ export const RACINES_PCM = {
   TVA_RECUPERABLE: "3455",
   TVA_FACTUREE: "4455",
   TVA_DUE: PCM.TVA_DUE,
+  CREDIT_TVA: PCM.CREDIT_TVA,
   TVA_ATTENTE_ACHAT: PCM.TVA_ATTENTE_ACHAT,
   TVA_ATTENTE_VENTE: PCM.TVA_ATTENTE_VENTE,
   BANQUE: "514",
   CAISSE: "516",
   TRESORERIE_ACTIF: "51",
-  COMPTES_SUSPENS: "47",
   REPORT_A_NOUVEAU: "116",
+  RESULTAT_INSTANCE_AFFECTATION: "118",
   CHARGES: "6",
   PRODUITS: "7",
 } as const;
 
 /**
- * Comptes employés par l'application dont la conformité CGNC n'est PAS acquise.
- * Ils restent en service — les changer réimputerait l'historique — mais ils
- * sont nommés ici, avec la question précise que l'expert doit trancher.
+ * Comptes d'attente (transitoires) du CGNC : 3497 débiteurs, 4497 créditeurs.
+ * Les anciens numéros 4711 / 4712 (plan français) y figurent pour que
+ * l'historique non encore renuméroté reste détecté.
+ */
+export const COMPTES_ATTENTE: readonly string[] = [
+  PCM.ATTENTE_BANQUE_DEBIT, PCM.ATTENTE_BANQUE_CREDIT, "4711", "4712",
+];
+
+/**
+ * Comptes de frais bancaires — 61473 (CGNC) et l'ancien 6347 de l'historique.
+ * Le 6147 nu n'en fait PAS partie : l'historique l'a employé pour la restauration.
+ */
+export const COMPTES_FRAIS_BANCAIRES: readonly string[] = [PCM.SERVICES_BANCAIRES, "6347"];
+
+/** Le compte relève-t-il des frais bancaires (61473, ou l'historique 6347) ? */
+export const estCompteFraisBancaires = (compte: unknown): boolean =>
+  COMPTES_FRAIS_BANCAIRES.some((c) => String(compte ?? "").trim().startsWith(c));
+
+/**
+ * Anciens numéros HORS CGNC que l'application a produits avant correction, avec
+ * leur remplacement. Ils restent lisibles dans l'historique (avertissement), et
+ * la migration `20261024120000_conformite_cgnc.sql` les renumérote.
+ */
+export const COMPTES_HISTORIQUES_HORS_CGNC: Record<string, string> = {
+  "4191": "Numérotation du plan FRANÇAIS (419) : remplacé par 4421 « Clients – avances et "
+    + "acomptes reçus sur commandes en cours ». La rubrique 41 n'existe pas au CGNC.",
+  "4711": "Au CGNC, la rubrique 47 porte les écarts de conversion – passif : remplacé par 3497 "
+    + "« Comptes transitoires ou d'attente – débiteurs ».",
+  "4712": "Remplacé par 4497 « Comptes transitoires ou d'attente – créditeurs ».",
+  "6347": "La rubrique 634 n'existe pas au CGNC : remplacé par 61473 « Frais et commissions "
+    + "sur services bancaires ».",
+  "61241": "6124 est « Variation des stocks de matières et fournitures » : le carburant relève "
+    + "de 61223 « Achats de combustibles ».",
+};
+
+/**
+ * Comptes employés par l'application dont l'usage est admissible mais doit être
+ * documenté dans le manuel de procédures du dossier — plus les anciens numéros
+ * hors CGNC de l'historique.
  */
 export const COMPTES_A_VALIDER: Record<string, string> = {
-  "4191": "Numérotation du plan FRANÇAIS (419). Au CGNC, les avances et acomptes reçus des "
-    + "clients relèvent de 4421 « Clients créditeurs, avances et acomptes reçus ». "
-    + "La rubrique 41 n'existe pas au CGNC.",
-  "4711": "Au CGNC, la rubrique 47 porte les écarts de conversion – passif. Les comptes "
-    + "transitoires ou d'attente relèvent de 3497 (débiteurs) / 4497 (créditeurs).",
-  "4712": "Idem 4711 : 4497 « Comptes transitoires ou d'attente – créditeurs » au CGNC.",
-  "4443": "Au CGNC, 4443 désigne les caisses de retraite ; l'IR retenu à la source relève "
-    + "de l'État créditeur (445x). Le référentiel `pcm_reference` du projet l'intitule "
-    + "pourtant « État – IR » : à arbitrer, référentiel compris.",
-  "6141": "Au CGNC, 6141 est « Études, recherches et documentation » : ce n'est pas un compte "
-    + "d'achats générique. Il sert pourtant de repli à tout achat non catégorisé.",
+  ...COMPTES_HISTORIQUES_HORS_CGNC,
   "3458": "« État – autres comptes débiteurs » employé comme TVA sur achats en attente "
     + "(régime des encaissements) : usage admissible par sous-compte, à documenter.",
   "4458": "« État – autres comptes créditeurs » employé comme TVA facturée en attente : "
@@ -196,9 +254,9 @@ export const COMPTES_A_VALIDER: Record<string, string> = {
 export type UsageCompte =
   | "charge" | "produit"
   | "client" | "fournisseur" | "acompte_client" | "acompte_fournisseur"
-  | "tva_collectee" | "tva_recuperable" | "tva_attente_vente" | "tva_attente_achat" | "tva_due"
+  | "tva_collectee" | "tva_recuperable" | "tva_attente_vente" | "tva_attente_achat" | "tva_due" | "credit_tva"
   | "banque" | "caisse" | "tresorerie" | "virement_fonds" | "attente_bancaire"
-  | "report_a_nouveau" | "personnel" | "organisme_social";
+  | "report_a_nouveau" | "personnel" | "organisme_social" | "impots";
 
 /** Racines admises par usage. Un compte « dans le bon rôle » commence par l'une d'elles. */
 export const RACINES_PAR_USAGE: Record<UsageCompte, readonly string[]> = {
@@ -206,21 +264,24 @@ export const RACINES_PAR_USAGE: Record<UsageCompte, readonly string[]> = {
   produit: [RACINES_PCM.PRODUITS],
   client: [RACINES_PCM.CLIENTS],
   fournisseur: [RACINES_PCM.FOURNISSEURS],
-  acompte_client: [PCM.CLIENTS_AVANCES_RECUES, "4421"],
+  acompte_client: [PCM.CLIENTS_AVANCES_RECUES, PCM.ANCIEN_CLIENTS_AVANCES_RECUES],
   acompte_fournisseur: [PCM.FOURNISSEURS_AVANCES_VERSEES],
   tva_collectee: [RACINES_PCM.TVA_FACTUREE],
   tva_recuperable: [RACINES_PCM.TVA_RECUPERABLE],
   tva_attente_vente: [RACINES_PCM.TVA_ATTENTE_VENTE],
   tva_attente_achat: [RACINES_PCM.TVA_ATTENTE_ACHAT],
   tva_due: [RACINES_PCM.TVA_DUE],
+  credit_tva: [RACINES_PCM.CREDIT_TVA],
   banque: [RACINES_PCM.BANQUE],
   caisse: [RACINES_PCM.CAISSE],
   tresorerie: [RACINES_PCM.BANQUE, RACINES_PCM.CAISSE],
   virement_fonds: [PCM.VIREMENTS_DE_FONDS],
-  attente_bancaire: [PCM.ATTENTE_BANQUE_DEBIT, PCM.ATTENTE_BANQUE_CREDIT, "3497", "4497"],
-  report_a_nouveau: [RACINES_PCM.REPORT_A_NOUVEAU],
+  attente_bancaire: COMPTES_ATTENTE,
+  report_a_nouveau: [RACINES_PCM.REPORT_A_NOUVEAU, RACINES_PCM.RESULTAT_INSTANCE_AFFECTATION],
   personnel: ["443"],
   organisme_social: ["444"],
+  /** Impôts retenus ou versés d'avance : 4452 (État créditeur — IR retenu), 3453 (acomptes d'IS). */
+  impots: ["4452", PCM.ACOMPTES_IS],
 };
 
 // ─── 4. validatePcmAccount ───────────────────────────────────────────────────
@@ -234,7 +295,8 @@ export const LONGUEUR_MAX_PCM = 10;
  * question dans `COMPTES_A_VALIDER`. Une dérogation ne rend PAS le compte
  * conforme : elle le rend recevable, avec un avertissement.
  */
-export const DEROGATIONS_RUBRIQUE: readonly string[] = [PCM.CLIENTS_AVANCES_RECUES];
+/** 4191 : ancien compte d'acomptes clients (plan français), lisible dans l'historique. */
+export const DEROGATIONS_RUBRIQUE: readonly string[] = [PCM.ANCIEN_CLIENTS_AVANCES_RECUES];
 
 export interface VerdictPcm {
   /** `true` si aucune erreur — les avertissements n'empêchent rien. */

@@ -57,12 +57,12 @@ describe("genererEcrituresAchat — TVA d'origine sur 3458", () => {
     expect(controlerLignesAchat(lignes).ok).toBe(true);
   });
 
-  it("retombe sur le collectif 4411 et 6141 sans code ni compte", () => {
+  it("retombe sur le collectif 4411 et 6125 sans code ni compte", () => {
     const l = genererEcrituresAchat({
       dossier_id: D, facture_id: "ff2", date_facture: "2026-03-12",
       montant_ht: 100, montant_tva: 20, montant_ttc: 120,
     });
-    expect(l[0].compte_numero).toBe("6141");
+    expect(l[0].compte_numero).toBe("6125");
     expect(l[2].compte_numero).toBe("4411");
   });
 

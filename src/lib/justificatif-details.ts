@@ -14,6 +14,8 @@
  * type_document + categorie_pcm + compte_pcm.
  */
 
+import { PCM } from "./pcm-referentiel";
+
 export interface JustificatifLike {
   type_document?: string | null;
   categorie_pcm?: string | null;
@@ -128,7 +130,7 @@ export function resolveJustificatifKind(j: JustificatifLike): JustificatifKind {
 
   // Quittances : le compte comptable est le discriminant le plus fiable.
   if (type === "quittance_loyer" || cat === "loyers" || compteCommence(j, "6131")) return "quittance_loyer";
-  if (type === "quittance_cnss" || cat === "cnss_amo" || cat === "charges_sociales" || compteCommence(j, "6174"))
+  if (type === "quittance_cnss" || cat === "cnss_amo" || cat === "charges_sociales" || compteCommence(j, "6174", PCM.CNSS, PCM.CAISSES_RETRAITE))
     return "cnss";
   // Les anciens comptes fautifs (6313, 6132, 6147 pour la restauration) restent
   // RECONNUS en lecture : des justificatifs historiques les portent encore, et
@@ -136,13 +138,17 @@ export function resolveJustificatifKind(j: JustificatifLike): JustificatifKind {
   // désormais les comptes du référentiel (cf. src/lib/pcm-referentiel.ts).
   if (type === "quittance_dgi" || cat === "taxe_professionnelle" || compteCommence(j, "6161", "4456", "6313"))
     return "dgi";
-  if (cat === "eau_electricite" || compteCommence(j, "6125")) return "energie";
+  // 61251 (CGNC) ; 61252 et 6125 nu dans l'historique. 6125 nu n'est plus lu : il
+  // est désormais le compte des achats divers non stockés.
+  if (cat === "eau_electricite" || compteCommence(j, PCM.EAU_ELECTRICITE, "61252")) return "energie";
   if (cat === "gasoil" || compteCommence(j, "61241", "61223")) return "carburant";
   if (cat === "telecom" || compteCommence(j, "6145", "6132")) return "telecom";
   if (cat === "assurance" || compteCommence(j, "6134")) return "assurance";
-  if (cat === "frais_representation" || type === "addition" || compteCommence(j, "6143", "6147")) return "restauration";
+  // Banque AVANT restauration : 6147 est « Services bancaires ». Il n'est lu comme
+  // restauration que pour un justificatif historique sans autre indice.
   if (cat === "droits_timbre" || cat === "frais_bancaires" || type === "avis_debit" || compteCommence(j, "61671", "6347"))
     return "timbre_bancaire";
+  if (cat === "frais_representation" || type === "addition" || compteCommence(j, "6143", "6147")) return "restauration";
 
   if (type === "facture") return "facture";
   return "recu";

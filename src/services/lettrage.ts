@@ -88,7 +88,7 @@ export const RACINES_TVA_TRANSIT = [
  * Tous les comptes de TVA interdits au lettrage — transit ET 4456 « État TVA due ».
  * Aucun ne porte de créance : ils se soldent par la déclaration périodique.
  */
-export const RACINES_TVA_NON_LETTRABLES = [...RACINES_TVA_TRANSIT, RACINES_PCM.TVA_DUE] as const;
+export const RACINES_TVA_NON_LETTRABLES = [...RACINES_TVA_TRANSIT, RACINES_PCM.TVA_DUE, RACINES_PCM.CREDIT_TVA] as const;
 
 export type SensTiers = "client" | "fournisseur";
 export type ComptesTva = Record<SensTiers, { attente: string; exigible: string; racineExigible?: string }>;

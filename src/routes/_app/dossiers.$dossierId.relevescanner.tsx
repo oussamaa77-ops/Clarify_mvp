@@ -479,7 +479,7 @@ function RelEveScanner() {
           nature_confirmee: natureVal,
           document_reference: a.facture_num ?? "",
           debiteur_crediteur: a.tiers_nom ?? "",
-          code_comptable: a.code_pcm ?? nature?.code ?? "6141",
+          code_comptable: a.code_pcm ?? nature?.code ?? PCM.CHARGE_DEFAUT,
           montant_ht: a.montant_ht ?? null, montant_tva: a.montant_tva ?? null,
           taux_tva: a.taux_tva ?? 0, confiance: a.confiance ?? 50,
           valide: (a.confiance ?? 0) >= 90,
@@ -678,7 +678,10 @@ function RelEveScanner() {
       // Le lot est refusé EN ENTIER si une seule estampille manque : mieux vaut
       // un scan à rejouer qu'un grand livre à auditer.
       assertEcrituresTresorerie(ecritures, { origine: "releve" });
-      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+      // Erreur RENDUE par Supabase, pas levée : on s'arrête AVANT de solder les
+      // factures, sinon elles passaient « payées » sans aucune écriture de banque.
+      const { error: eBq } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+      if (eBq) throw new Error(`Écritures de banque refusées : ${eBq.message}`);
 
       // Solder les factures rapprochées via un PAIEMENT (source de vérité) couvrant le
       // reste dû ; le trigger recalcule montant_paye/restant/statut. Ces transactions

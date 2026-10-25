@@ -95,15 +95,49 @@ describe("construireOdDeclaration", () => {
     expect(construireOdDeclaration(liquiderTva(MARS, "2026-03")!)[0].date_ecriture).toBe("2026-03-31");
   });
 
-  it("inverse la troisième ligne en crédit de TVA", () => {
+  it("porte un crédit de TVA au DÉBIT du 3456 « État – crédit de TVA », pas au 4456", () => {
     const liq = liquiderTva([
       { journal_code: "OD", compte_numero: "44551", date_ecriture: "2026-03-05", debit: 0, credit: 1000 },
       { journal_code: "OD", compte_numero: "34552", date_ecriture: "2026-03-05", debit: 4000, credit: 0 },
     ], "2026-03")!;
     const od = construireOdDeclaration(liq);
-    expect(od[2]).toMatchObject({ compte_numero: "4456", debit: 3000, credit: 0 });
+    expect(od[2]).toMatchObject({ compte_numero: "3456", debit: 3000, credit: 0 });
     expect(od[2].libelle).toMatch(/Crédit de TVA reportable/);
+    expect(od.some((l) => l.compte_numero === "4456")).toBe(false);
     expect(controlerPiece(od).ok).toBe(true);
+  });
+
+  it("IMPUTE le crédit antérieur (3456) sur la TVA due de la période suivante", () => {
+    const avril = [
+      { journal_code: "OD", compte_numero: "34552", date_ecriture: "2026-04-05", debit: 3000, credit: 0 },
+    ];
+    const gl = [...avril, ...construireOdDeclaration(liquiderTva(avril, "2026-04")!)];
+    // Mai : 5 000 de TVA nette. Le crédit d'avril (3 000) s'impute : 2 000 restent dus.
+    gl.push(
+      { journal_code: "OD", compte_numero: "44551", date_ecriture: "2026-05-10", debit: 0, credit: 6000 },
+      { journal_code: "OD", compte_numero: "34552", date_ecriture: "2026-05-10", debit: 1000, credit: 0 },
+    );
+    const mai = liquiderTva(gl, "2026-05")!;
+    expect(mai).toMatchObject({ creditAnterieur: 3000, creditImpute: 3000, net: 2000, montant: 2000, dette: true });
+    const od = construireOdDeclaration(mai);
+    expect(od.find((l) => l.compte_numero === "3456")).toMatchObject({ debit: 0, credit: 3000 });
+    expect(od.find((l) => l.compte_numero === "4456")).toMatchObject({ debit: 0, credit: 2000 });
+    expect(controlerPiece(od).ok).toBe(true);
+    // Après déclaration, le 3456 est soldé : plus aucun crédit reporté.
+    const apres = controlerBouclagePeriode([...gl, ...od], "2026-05")!;
+    expect(apres.creditReporte).toBe(0);
+  });
+
+  it("un crédit antérieur SUPÉRIEUR à la TVA de la période n'est imputé qu'à due concurrence", () => {
+    const gl = [
+      { journal_code: "OD", compte_numero: "3456", date_ecriture: "2026-04-30", debit: 5000, credit: 0, reference_piece: "DECL-TVA-2026-04" },
+      { journal_code: "OD", compte_numero: "44551", date_ecriture: "2026-05-10", debit: 0, credit: 1200 },
+    ];
+    const mai = liquiderTva(gl, "2026-05")!;
+    expect(mai).toMatchObject({ creditImpute: 1200, net: 0, montant: 0 });
+    const od = construireOdDeclaration(mai);
+    expect(od.some((l) => l.compte_numero === "4456")).toBe(false);
+    expect(controlerBouclagePeriode([...gl, ...od], "2026-05")!.creditReporte).toBe(3800);
   });
 
   it("ne produit AUCUNE écriture sur une période néant", () => {
@@ -226,11 +260,11 @@ describe("controlerBouclagePeriode", () => {
     { journal_code: "OD", compte_numero: "34552", date_ecriture: "2026-05-04", debit: 240, credit: 0 },
   ];
 
-  it("boucle une période à crédit de TVA : le 4456 débiteur est une CRÉANCE, pas une dette", () => {
+  it("boucle une période à crédit de TVA : le 3456 débiteur est une CRÉANCE, pas une dette", () => {
     const gl = [...CREDIT, ...construireOdDeclaration(liquiderTva(CREDIT, "2026-05")!)];
     const c = controlerBouclagePeriode(gl, "2026-05")!;
     expect(c).toMatchObject({ collectee: 0, deductible: 0, solde: true, creditReporte: 240 });
-    expect(c.due).toBe(-240);
+    expect(c.due).toBe(0);
     expect(c.raison).toMatch(/crédit de TVA de 240\.00 MAD reporté/i);
   });
 

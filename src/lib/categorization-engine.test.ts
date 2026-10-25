@@ -55,15 +55,15 @@ describe("Règle 2 — dictionnaire de mots-clés (codes PCM Maroc)", () => {
     ["Loyer du local commercial", "6131"],
     ["Prime d'assurance RC Pro", "6134"],
     ["Honoraires expert comptable", "6136"],
-    ["Consommation électricité ONEE", "61252"],
+    ["Consommation électricité ONEE", "61251"],
     ["Facture d'eau REDAL", "61251"],
-    ["Plein de gasoil station Afriquia", "61411"],
+    ["Plein de gasoil station Afriquia", "61223"],
     ["Entretien et réparation véhicule", "6133"],
     ["Transport et livraison de marchandises", "6142"],
     ["Note de restaurant - déplacement mission", "6143"],
     ["Campagne publicité marketing", "6144"],
     ["Achat fournitures de bureau et papeterie", "61254"],
-    ["Frais bancaires - agios trimestriels", "6147"],
+    ["Frais bancaires - agios trimestriels", "61473"],
   ];
   it.each(cas)("« %s » → %s", (description, compte) => {
     const s = suggestAccount({ description, sens: "charge" });
@@ -105,10 +105,10 @@ describe("Règle 3 — fallback sectoriel", () => {
 });
 
 describe("Défaut générique — rétro-compatibilité", () => {
-  it("aucune règle → compte de charge historique 6141 (comme l'ancienne saisie)", () => {
+  it("aucune règle → compte de charge générique 6125 (achats non stockés)", () => {
     const s = suggestAccount({ description: "objet non catégorisable xyz" });
     expect(s.compte).toBe(COMPTE_CHARGE_DEFAUT);
-    expect(s.compte).toBe("6141");
+    expect(s.compte).toBe("6125");
     expect(s.source).toBe("defaut");
     expect(s.confiance).toBe("faible");
   });
@@ -121,7 +121,7 @@ describe("Défaut générique — rétro-compatibilité", () => {
 
   it("entrée totalement vide → défaut, jamais null", () => {
     const s = suggestAccount({});
-    expect(s.compte).toBe("6141");
+    expect(s.compte).toBe("6125");
     expect(s.source).toBe("defaut");
   });
 });
@@ -163,7 +163,7 @@ describe("suggestAccountWithAi — fallback IA optionnel", () => {
   it("absorbe une erreur IA et garde la suggestion déterministe", async () => {
     const ai = async () => { throw new Error("timeout"); };
     const s = await suggestAccountWithAi({ description: "objet flou" }, ai);
-    expect(s.compte).toBe("6141");     // défaut conservé
+    expect(s.compte).toBe("6125");     // défaut conservé
   });
 
   it("sans suggesteur IA, renvoie la suggestion déterministe", async () => {

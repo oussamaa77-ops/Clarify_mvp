@@ -10,7 +10,7 @@
 // interdit qu'un total affiché diffère d'un total exporté.
 // ============================================================================
 
-import { PCM, RACINES_PCM } from "./pcm-referentiel";
+import { COMPTES_ATTENTE, PCM, RACINES_PCM } from "./pcm-referentiel";
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
@@ -229,14 +229,15 @@ export function resultatNetBalance(balance: LigneBalance[]): ResultatNet {
 // c'est de ne pas la voir.
 
 /**
- * Racine des comptes d'attente de l'application.
- *
- * ⚠️ À VALIDER (cf. `COMPTES_A_VALIDER` dans pcm-referentiel.ts) : au CGNC, la
- * rubrique 47 porte les écarts de conversion – passif ; les comptes transitoires
- * ou d'attente y relèvent de 3497 / 4497. La racine est conservée tant que
- * l'historique (47120000) n'est pas arbitré.
+ * Racines des comptes transitoires ou d'attente : 3497 (débiteurs) et 4497
+ * (créditeurs) au CGNC, plus 471 pour l'historique produit sous l'ancienne
+ * numérotation française (4711 / 4712), tant qu'il n'est pas renuméroté. La
+ * rubrique 47 entière n'en fait PAS partie : au CGNC elle porte les écarts de
+ * conversion – passif (4701, 4702), qui ne sont pas des comptes d'attente.
  */
-export const RACINE_COMPTES_SUSPENS = RACINES_PCM.COMPTES_SUSPENS;
+export const RACINES_COMPTES_SUSPENS: readonly string[] = [
+  PCM.ATTENTE_BANQUE_DEBIT, PCM.ATTENTE_BANQUE_CREDIT, "471",
+];
 
 /**
  * Comptes d'attente posés automatiquement par le rapprochement bancaire.
@@ -244,7 +245,7 @@ export const RACINE_COMPTES_SUSPENS = RACINES_PCM.COMPTES_SUSPENS;
  * nommés, parce qu'un solde résiduel y désigne un travail inachevé et non un
  * choix de comptabilisation.
  */
-export const COMPTES_ATTENTE_BANQUE = [PCM.ATTENTE_BANQUE_DEBIT, PCM.ATTENTE_BANQUE_CREDIT] as const;
+export const COMPTES_ATTENTE_BANQUE: readonly string[] = COMPTES_ATTENTE;
 
 /** Un compte d'attente qui porte encore un solde à l'arrêté. */
 export interface CompteSuspens {
@@ -253,14 +254,14 @@ export interface CompteSuspens {
   /** Solde, en valeur absolue. */
   solde: number;
   sens: "D" | "C";
-  /** Posé par le rapprochement bancaire (4711 / 4712) ? */
+  /** Posé par le rapprochement bancaire (3497 / 4497, ou 4711 / 4712 historiques) ? */
   attenteBancaire: boolean;
   /** Grief en clair, prêt à afficher. */
   message: string;
 }
 
 /**
- * Comptes d'attente (47*) non apurés, du plus lourd au plus léger.
+ * Comptes d'attente (3497 / 4497, 471* historique) non apurés, du plus lourd au plus léger.
  *
  * Le solde est recalculé depuis les cumuls — jamais lu dans `solde`/`sens`, qui
  * sont dérivés côté appelant (même raison que `ventilerSolde`).
@@ -279,7 +280,7 @@ export function comptesSuspensNonApures(
 
   for (const l of balance ?? []) {
     const compte = String(l.compte ?? "").trim();
-    if (!compte.startsWith(RACINE_COMPTES_SUSPENS)) continue;
+    if (!RACINES_COMPTES_SUSPENS.some((r) => compte.startsWith(r))) continue;
     const delta = round2(n(l.total_debit) - n(l.total_credit));
     if (Math.abs(delta) < seuil) continue;
 
@@ -294,7 +295,7 @@ export function comptesSuspensNonApures(
           + "reçu aucune pièce justificative — la charge ou le produit correspondant "
           + "manque au résultat de l'exercice."
         : `Compte transitoire ${compte} non apuré : ${solde.toFixed(2)} MAD `
-          + `au ${sens === "D" ? "débit" : "crédit"}. Un compte de la classe 47 doit `
+          + `au ${sens === "D" ? "débit" : "crédit"}. Un compte transitoire ou d'attente doit `
           + "être soldé à la clôture ; sinon l'attente est reportée à l'exercice suivant.",
     });
   }

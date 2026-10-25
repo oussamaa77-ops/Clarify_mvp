@@ -18,28 +18,9 @@ import { normaliserNumeroCompte } from "@/lib/numero-compte";
 import { z } from "zod";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { normalizeLibelle } from "@/lib/import-grandlivre";
+import { proxyFetch } from "./proxy-fetch";
 
-let PROXY_DIRECT = false;
-async function proxyFetch(input: any, init?: any): Promise<Response> {
-  const url = String(input);
-  if (PROXY_DIRECT) {
-    const { fetch: uf, Agent } = await import("undici");
-    const agent = new Agent({ connect: { rejectUnauthorized: false } });
-    return (uf as any)(url, { ...init, dispatcher: agent }) as Promise<Response>;
-  }
-  try {
-    return await fetch(url, init);
-  } catch (e: any) {
-    const cause: string = e?.cause?.code ?? e?.cause?.message ?? e?.message ?? "";
-    if (/SELF_SIGNED|CERT_|UNABLE_TO_VERIFY|fetch failed|ECONNRESET|EPROTO/i.test(cause) || /fetch failed/i.test(String(e?.message ?? ""))) {
-      PROXY_DIRECT = true;
-      const { fetch: uf, Agent } = await import("undici");
-      const agent = new Agent({ connect: { rejectUnauthorized: false } });
-      return (uf as any)(url, { ...init, dispatcher: agent }) as Promise<Response>;
-    }
-    throw e;
-  }
-}
+// fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
 
 function getSupabase(): SupabaseClient {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";

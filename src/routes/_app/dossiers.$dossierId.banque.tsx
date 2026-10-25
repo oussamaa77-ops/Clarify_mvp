@@ -17,17 +17,19 @@ import { analyserReleveIA, extraireTransactionsVision } from "@/server/factures.
 import { lettrerDossier, getRapprochementGL, lierTransactionEcriture } from "@/server/lettrage.functions";
 import type { OpenLedgerItem } from "@/server/lettrage.functions";
 import { PCM_MAP, RX_VIREMENT_INTERNE, deriveCategorie, genererLignesBQ } from "@/lib/comptabilite-bq";
+import { PCM, RACINES_PCM, estCompteFraisBancaires } from "@/lib/pcm-referentiel";
 import { extractRibMarocain } from "@/lib/releve-attijari";
 import { identifierBanque, identifierBanqueParNom, maskRib } from "@/lib/bank-identity";
 import { reconcilierPaiements } from "@/lib/paiements";
 import { imputationTresorerie } from "@/lib/comptes-tresorerie";
-import { assertEcrituresTresorerie } from "@/lib/integrite-tresorerie";
+import { assertEcrituresTresorerie, transactionsDejaEnTresorerie } from "@/lib/integrite-tresorerie";
 import { controlerCoherenceReleve, resumerCoherence } from "@/lib/releve-coherence";
 import { encoderCanvasPourOcr, preparerImageBanquePourOcr, cumulerMesures, journaliserMesure, type MesureGrayscale } from "@/lib/bank-grayscale";
 import { BankLogo } from "@/components/BankLogo";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
+import { quotePartReglement } from "@/lib/releve-deductions";
 // NB : pdfjs-dist n'est PAS importé statiquement — il tire `canvas` (binaire natif)
 // qui polluerait le bundle SERVEUR (SSR) et casserait le déploiement serverless.
 // On le charge donc UNIQUEMENT côté client, à la demande, via import() dynamique.
@@ -1027,7 +1029,7 @@ function BanquePage() {
         reference:tx.reference??"", libelle:tx.libelle??"Transaction",
         type:(tx.montant_credit?"credit":"debit") as "credit"|"debit",
         montant:tx.montant_credit??tx.montant_debit??0,
-        categorie:"autre", compte_comptable:"6141",
+        categorie:"autre", compte_comptable:PCM_MAP.autre.code,
         reference_facture:null, confiance:0,
         facture_id:null, justificatif_id:null,
         alerte:null, tiers_nom:null, etape_rapprochement:"en_cours",
@@ -1055,7 +1057,7 @@ function BanquePage() {
       const txFinal:TxExtracted[]=txBrutes.map((tx:any,idx:number)=>{
         const a=result.analyses.find((x:any)=>x.i===idx)??result.analyses[idx]??{};
         const cat=a.categorie??"autre";
-        const pcm=PCM_MAP[cat]??{code:"6141",tva:0};
+        const pcm=PCM_MAP[cat]??PCM_MAP.autre;
         const montant=tx.montant_credit??tx.montant_debit??0;
         const ht=pcm.tva>0?Math.round(montant/(1+pcm.tva/100)*100)/100:montant;
         const tva=pcm.tva>0?Math.round((montant-ht)*100)/100:0;
@@ -1140,7 +1142,7 @@ function BanquePage() {
       if(i!==idx) return tx;
       const updated={...tx,...updates};
       if(updates.categorie){
-        const pcm=PCM_MAP[updates.categorie]??{code:"6141",tva:0};
+        const pcm=PCM_MAP[updates.categorie]??PCM_MAP.autre;
         updated.compte_comptable=pcm.code;
       }
       // Si on choisit manuellement une facture
@@ -1236,7 +1238,7 @@ function BanquePage() {
       };
 
       const txToInsert=txExtraites.map(tx=>{
-        const pcm=PCM_MAP[tx.categorie]??{code:"6141",tva:0};
+        const pcm=PCM_MAP[tx.categorie]??PCM_MAP.autre;
         const isClient=tx.facture_id?(facturesClient as any[]).some((f:any)=>f.id===tx.facture_id):false;
         const isFourn=tx.facture_id?(facturesFourn as any[]).some((f:any)=>f.id===tx.facture_id):false;
         const docType=isClient?"facture_client":isFourn?"facture_fournisseur":tx.justificatif_id?"justificatif":null;
@@ -1249,7 +1251,7 @@ function BanquePage() {
           rapproche:!!(tx.facture_id||tx.justificatif_id),
           statut:(tx.facture_id||tx.justificatif_id)?'ferme':'ouvert',
           categorie:tx.categorie||"autre",
-          compte_comptable:pcm.code||"6141",
+          compte_comptable:pcm.code||PCM_MAP.autre.code,
           facture_id:tx.facture_id||null,
           justificatif_id:tx.justificatif_id||null,
           document_type:docType,
@@ -1411,7 +1413,12 @@ function BanquePage() {
       // EN ENTIER s'il manque une seule estampille — n'en insérer qu'une partie
       // déséquilibrerait le journal.
       assertEcrituresTresorerie(ecritures,{origine:"releve"});
-      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+      // Erreur RENDUE par Supabase, pas levée : sans ce contrôle, les lignes
+      // passaient « clôturées » sans écriture BQ, et plus aucune clôture ne les
+      // reprenait — le journal de banque divergeait du relevé en silence. On
+      // s'arrête AVANT la clôture : les lignes restent à clôturer.
+      const{error:eBq}=await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+      if(eBq) throw new Error(`Écritures de banque refusées, relevé non clôturé : ${eBq.message}`);
 
       if(txInsertedIds.length){
         await (supabase.from("transactions_bancaires") as any).update({statut:"cloture"}).in("id",txInsertedIds);
@@ -1441,10 +1448,11 @@ function BanquePage() {
   };
   const _toDisplayDate=_toDateStr;
   // ── Détection HT/TVA des frais bancaires — GÉNÉRIQUE, basée sur les COMPTES PCM ──
-  // (aucune règle sur le libellé). Pour une transaction de frais (compte 6347), on
-  // cherche dans le même lot une transaction de TVA distincte (compte 4456) partageant
+  // (aucune règle sur le libellé). Pour une transaction de frais (compte 61473), on
+  // cherche dans le même lot une transaction de TVA distincte (compte 34552 — 4456
+  // dans l'historique) partageant
   // la même clé de corrélation (référence d'opération) :
-  //  • couple trouvé → M_HT = montant du frais, M_TVA = montant de la ligne 4456,
+  //  • couple trouvé → M_HT = montant du frais, M_TVA = montant de la ligne de TVA,
   //    M_TTC = M_HT + M_TVA (la banque édite deux écritures distinctes) ;
   //  • aucun couple → la TVA est incluse dans le montant → montant = TTC,
   //    M_HT = TTC/(1+taux), M_TVA = TTC − M_HT.
@@ -1456,7 +1464,7 @@ function BanquePage() {
     tauxPcm:number,
   ):{ht:number;tva:number;ttc:number;taux:number}=>{
     const key=_refKey(fee.reference);
-    const tvaLine=key?lot.find(t=>(t.compte_comptable==="4456"||t.categorie==="tva_dgi")&&_refKey(t.reference)===key):undefined;
+    const tvaLine=key?lot.find(t=>_estLigneTvaIsolee(t)&&_refKey(t.reference)===key):undefined;
     if(tvaLine){
       const ht=Math.abs(Math.round(fee.montant*100)/100);
       const tva=Math.abs(Math.round(tvaLine.montant*100)/100);
@@ -1464,11 +1472,18 @@ function BanquePage() {
     }
     const ttc=Math.abs(Math.round(fee.montant*100)/100);
     // Droit de timbre : TVA NON récupérable → pas de division par (1+taux), aucune ligne
-    // de TVA. Le montant reste à 100 % sur le compte 6347 (HT = montant, TVA = 0).
+    // de TVA. Le montant reste à 100 % sur le compte de frais (HT = montant, TVA = 0).
     if(/TIMBRE/i.test(fee.libelle||"")) return {ht:ttc,tva:0,ttc,taux:0};
     const t=(tauxPcm||0)/100;
     const ht=t>0?Math.round(ttc/(1+t)*100)/100:ttc;
     return {ht,tva:Math.round((ttc-ht)*100)/100,ttc,taux:tauxPcm};
+  };
+  // Ligne de TVA isolée du relevé (TVA sur commissions) : 34552, ou 4456 / tva_dgi
+  // dans l'historique. Elle ne se déclare jamais seule : sa TVA rejoint la ligne de frais.
+  const _estLigneTvaIsolee=(t:{compte_comptable?:string|null;categorie?:string|null}):boolean=>{
+    const c=(t.compte_comptable||"").trim();
+    return t.categorie==="tva_frais_bancaires"||t.categorie==="tva_dgi"
+      ||c.startsWith(RACINES_PCM.TVA_RECUPERABLE)||c.startsWith(PCM.TVA_DUE);
   };
   // Compte PCM effectif d'une transaction (compte stocké prioritaire, sinon mapping catégorie).
   const _comptePcm=(t:{compte_comptable?:string|null;categorie?:string|null}):string=>
@@ -1514,21 +1529,19 @@ function BanquePage() {
   };
 
   const genererEDI=async()=>{
-    const COMPTES_TVA_DEDUCTIBLE=["4411","6122","6125","6131","6132","6133","6141","6142","6145","6146","6347"];
+    // Art. 101 CGI : pas de déduction sans facture. Sans pièce, seuls les frais
+    // bancaires sont éligibles — l'avis de débit de la banque en tient lieu.
     const txEligibles=txExtraites.filter(tx=>{
       if(tx.type!=="debit") return false;
       if(tx.justificatif_id){
         const jus=(allJustificatifs.length?allJustificatifs:justificatifs).find((j:any)=>j.id===tx.justificatif_id);
         if(jus&&jus.eligible_edi===false) return false;
       }
-      const code=_comptePcm(tx);
-      // Frais bancaires (6347) : éligibles MÊME sans facture (exception générique).
-      if(code==="6347") return true;
-      // Les lignes de TVA isolées (4456) ne se déclarent jamais seules : leur TVA est
+      // Les lignes de TVA isolées ne se déclarent jamais seules : leur TVA est
       // rattachée à la ligne de frais corrélée → exclues ici (basé sur le COMPTE, pas le libellé).
-      if(code==="4456") return false;
-      const pcm=PCM_MAP[tx.categorie]??{code:"6141",tva:0};
-      return pcm.tva>0 && COMPTES_TVA_DEDUCTIBLE.includes(code||pcm.code);
+      if(_estLigneTvaIsolee(tx)) return false;
+      if(tx.facture_id||tx.justificatif_id) return true;
+      return estCompteFraisBancaires(_comptePcm(tx));
     });
     if(!txEligibles.length){ toast.warning("Aucune transaction éligible à la déduction TVA"); return; }
 
@@ -1542,27 +1555,35 @@ function BanquePage() {
     let totalHT=0,totalTVA=0,totalTTC=0;
 
     txEligibles.forEach((tx,i)=>{
-      const pcm=PCM_MAP[tx.categorie]??{code:"6141",tva:20};
+      const pcm=PCM_MAP[tx.categorie]??PCM_MAP.autre;
       const facFourn=tx.facture_id?(allFF as any[]).find((f:any)=>f.id===tx.facture_id):null;
       const facClient=tx.facture_id?(allFC as any[]).find((f:any)=>f.id===tx.facture_id):null;
       const justi=tx.justificatif_id?(allJus as any[]).find((j:any)=>j.id===tx.justificatif_id):null;
       const fourn=facFourn?.fournisseur_id?(fournisseurs as any[]).find((f:any)=>f.id===facFourn.fournisseur_id)
         :facFourn?.fournisseur_nom?(fournisseurs as any[]).find((f:any)=>f.nom===facFourn.fournisseur_nom):null;
 
-      // Montants depuis le document OCR — JAMAIS recalculés depuis le montant bancaire
+      // Montants et taux depuis le document OCR — jamais DÉDUITS du montant
+      // bancaire ; celui-ci ne fixe que la quote-part réglée (voir plus bas).
       const hasDoc = !!(facFourn||facClient||justi);
-      // Sans document (frais bancaires 6347) → reconstitution HT/TVA/TTC GÉNÉRIQUE :
-      // couple frais(6347)/TVA(4456) corrélé par référence, sinon TVA incluse (TTC).
+      // Sans document (frais bancaires 61473) → reconstitution HT/TVA/TTC GÉNÉRIQUE :
+      // couple frais(61473)/TVA(34552) corrélé par référence, sinon TVA incluse (TTC).
       const frais = hasDoc ? null : _detailFraisBancaires(tx, txExtraites as FraisLot[], pcm.tva);
-      const ht  = facFourn ? Math.round(Number(facFourn.montant_ht )*100)/100
-                : facClient ? Math.round(Number(facClient.montant_ht)*100)/100
-                : justi     ? Math.round(Number(justi.montant_ht    )*100)/100 : frais!.ht;
-      const ttc = facFourn ? Math.round(Number(facFourn.montant_ttc)*100)/100
-                : facClient ? Math.round(Number(facClient.montant_ttc)*100)/100
-                : justi     ? Math.round(Number(justi.montant_ttc   )*100)/100 : frais!.ttc;
-      const tva = facFourn ? Math.round(Number(facFourn.montant_tva)*100)/100
-                : facClient ? Math.round(Number(facClient.montant_tva)*100)/100
-                : justi     ? Math.round((ttc - ht)*100)/100 : frais!.tva;
+      const htDoc  = facFourn ? Math.round(Number(facFourn.montant_ht )*100)/100
+                   : facClient ? Math.round(Number(facClient.montant_ht)*100)/100
+                   : justi     ? Math.round(Number(justi.montant_ht    )*100)/100 : frais!.ht;
+      const ttcDoc = facFourn ? Math.round(Number(facFourn.montant_ttc)*100)/100
+                   : facClient ? Math.round(Number(facClient.montant_ttc)*100)/100
+                   : justi     ? Math.round(Number(justi.montant_ttc   )*100)/100 : frais!.ttc;
+      const tvaDoc = facFourn ? Math.round(Number(facFourn.montant_tva)*100)/100
+                   : facClient ? Math.round(Number(facClient.montant_tva)*100)/100
+                   : justi     ? Math.round((ttcDoc - htDoc)*100)/100 : frais!.tva;
+      // Régime de l'ENCAISSEMENT (REGIME 1 en en-tête) : la ligne est un
+      // RÈGLEMENT, pas une facture. Une facture réglée en deux virements donne
+      // deux lignes, chacune avec SA quote-part — et non la TVA entière deux fois.
+      // Les taux restent ceux du document ; seul le prorata vient de la banque.
+      const {ht,tva,ttc} = hasDoc
+        ? quotePartReglement({ht:htDoc,tva:tvaDoc,ttc:ttcDoc}, Number(tx.montant))
+        : {ht:htDoc,tva:tvaDoc,ttc:ttcDoc};
       const taux= frais ? frais.taux : ht>0&&tva>0 ? Math.round(tva/ht*100) : justi ? (Number(justi.taux_tva)||pcm.tva) : pcm.tva;
 
       // FACT_NUM — n° de pièce du document, sinon référence bancaire, sinon « RELEVE »
@@ -1707,7 +1728,7 @@ function BanquePage() {
   // ── Clôturer depuis DB (modèle Odoo / Grand Livre continu) ───────────────────
   // Génère une écriture pour TOUTES les transactions sélectionnées non encore
   // clôturées — lettrées (compte tiers/PCM) comme orphelines (compte d'attente
-  // 4711/4712). Chaque écriture porte transaction_id → le trigger SQL pourra
+  // 3497/4497). Chaque écriture porte transaction_id → le trigger SQL pourra
   // substituer le compte d'attente lors d'un lettrage tardif.
   const handleCloturerFromDB = async () => {
     if (!selectedId) return;
@@ -1718,8 +1739,15 @@ function BanquePage() {
     setCloturerLoading(true);
     try {
       const allJus = allJustificatifs.length ? allJustificatifs : justificatifs;
+      // Transactions déjà passées en banque (paiement TVA DGI saisi depuis le
+      // panneau TVA, par exemple) : on les clôture sans écriture de plus.
+      const { data: dejaBq, error: eDeja } = await (supabase.from("ecritures_comptables") as any)
+        .select("transaction_id,journal_code").in("transaction_id", txAcloturer.map(t => t.id));
+      if (eDeja) throw eDeja;
+      const deja = transactionsDejaEnTresorerie(dejaBq ?? []);
       const ecritures: any[] = [];
       for (const tx of txAcloturer) {
+        if (deja.has(tx.id)) continue;
         // Utiliser la catégorie stockée en DB si dispo, sinon dériver du libellé
         const storedCat = (tx as any).categorie as string | undefined;
         const cat = storedCat && PCM_MAP[storedCat]
@@ -1739,7 +1767,11 @@ function BanquePage() {
 
       // Origine « relevé » : chaque ligne porte le transaction_id de sa transaction.
       assertEcrituresTresorerie(ecritures, { origine: "releve" });
-      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+      // Même garde que handleCloturerReleve : pas de clôture sans écriture BQ.
+      if (ecritures.length) {
+        const { error: eBq } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecritures));
+        if (eBq) throw new Error(`Écritures de banque refusées, transactions non clôturées : ${eBq.message}`);
+      }
       await (supabase.from("transactions_bancaires") as any)
         .update({ statut: "cloture" })
         .in("id", txAcloturer.map(t => t.id));
@@ -1776,18 +1808,15 @@ function BanquePage() {
 
     // Transactions sélectionnées éligibles à la déduction TVA (débit uniquement) :
     //  • avec document lié (facture/justificatif), OU
-    //  • frais bancaires (compte 6347) sans document — exception générique, HT/TVA/TTC
-    //    reconstitués par corrélation de comptes PCM (6347 ↔ 4456 même référence).
-    // Les lignes de TVA isolées (compte 4456) ne se déclarent jamais seules (exclues).
-    const COMPTES_TVA_DEDUCTIBLE=["4411","6122","6125","6131","6132","6133","6141","6142","6145","6146","6347"];
+    //  • frais bancaires (compte 61473) sans document — exception générique, HT/TVA/TTC
+    //    reconstitués par corrélation de comptes PCM (61473 ↔ 34552 même référence).
+    // Les lignes de TVA isolées ne se déclarent jamais seules (exclues).
     const txEligibles = transactions.filter(tx => {
       if (!selectedTxIds.has(tx.id) || tx.type !== "debit") return false;
-      const code=_comptePcm(tx as any);
-      if (tx.facture_id || tx.justificatif_id) return code!=="4456";
-      if (code==="6347") return true;
-      if (code==="4456") return false;
-      const pcm = PCM_MAP[(tx as any).categorie] ?? null;
-      return !!pcm && pcm.tva > 0 && COMPTES_TVA_DEDUCTIBLE.includes(code||pcm.code);
+      if (_estLigneTvaIsolee(tx as any)) return false;
+      if (tx.facture_id || tx.justificatif_id) return true;
+      // Art. 101 CGI : sans facture, seuls les frais bancaires (avis de débit).
+      return estCompteFraisBancaires(_comptePcm(tx as any));
     });
     if (!txEligibles.length) { toast.warning("Aucune transaction éligible (document lié ou frais bancaires)"); return; }
 
@@ -1831,9 +1860,9 @@ function BanquePage() {
       const fourn:any=ff?.fournisseurs||(jus?.nom_tiers?foByNom[jus.nom_tiers.toLowerCase().trim()]:null);
 
       // ── M_HT / TVA / M_TTC ──
-      // Document lié → montants OCR. Sans document (frais bancaires 6347) → reconstitution
-      // GÉNÉRIQUE par corrélation de comptes PCM (6347 ↔ 4456 même référence), sinon TTC.
-      const pcm = PCM_MAP[(tx as any).categorie] ?? {code:"6347",tva:10};
+      // Document lié → montants OCR. Sans document (frais bancaires 61473) → reconstitution
+      // GÉNÉRIQUE par corrélation de comptes PCM (61473 ↔ 34552 même référence), sinon TTC.
+      const pcm = PCM_MAP[(tx as any).categorie] ?? PCM_MAP.frais_bancaires;
       const frais = (!ff && !jus) ? _detailFraisBancaires(tx as any, transactions as any as FraisLot[], pcm.tva) : null;
       const ht  = ff ? Math.round(Number(ff.montant_ht )*100)/100
                      : jus ? Math.round(Number(jus.montant_ht)*100)/100 : frais!.ht;
@@ -1842,8 +1871,8 @@ function BanquePage() {
       const tva = ff ? Math.round(Number(ff.montant_tva)*100)/100
                      : jus ? Math.round((ttc-ht)*100)/100 : frais!.tva;
       const taux= frais ? frais.taux
-                     : ff ? (ht>0&&tva>0?Math.round(tva/ht*100):20)
-                     : jus ? (Number(jus.taux_tva)||20) : pcm.tva;
+                     : ff ? (ht>0&&tva>0?Math.round(tva/ht*100):0)
+                     : jus ? (Number(jus.taux_tva)||(ht>0&&tva>0?Math.round(tva/ht*100):0)) : pcm.tva;
 
       // ── FACT_NUM — n° de pièce, sinon référence bancaire, sinon « RELEVE » ──
       const factNum = ff?.numero || jus?.numero_piece || (tx as any).reference || (frais ? "RELEVE" : "—");
@@ -1940,14 +1969,28 @@ function BanquePage() {
       // recherche exacte. La référence saisie reste conservée sur l'encaissement.
       const factureId=formEnc.facture_id||null;
       const refPiece=formEnc.facture_id||formEnc.facture_fournisseur_id||formEnc.reference||null;
+      // SENS de l'écriture. Régler une facture FOURNISSEUR est une SORTIE de
+      // trésorerie : D 4411 (la dette s'éteint) / C banque-caisse. L'ancien code
+      // passait toujours D trésorerie / C contrepartie — juste pour un client
+      // (D 5141 / C 3421), mais à l'envers pour un fournisseur : la banque
+      // MONTAIT et la dette fournisseur DOUBLAIT au lieu de s'éteindre.
+      const sortie=!formEnc.facture_id&&!!formEnc.facture_fournisseur_id;
+      const m=formEnc.montant;
       const ecrituresEnc=[
-        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteDebit,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||`Encaissement ${formEnc.type}`,debit:formEnc.montant,credit:0,facture_id:factureId,reference_piece:refPiece,valide:true},
-        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteContre,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||"Règlement",debit:0,credit:formEnc.montant,facture_id:factureId,reference_piece:refPiece,valide:true},
+        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteDebit,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||(sortie?`Règlement fournisseur ${formEnc.type}`:`Encaissement ${formEnc.type}`),debit:sortie?0:m,credit:sortie?m:0,facture_id:factureId,reference_piece:refPiece,valide:true},
+        {dossier_id:dossierId,journal_code:journalCode,compte_numero:compteContre,date_ecriture:formEnc.date_encaissement,libelle:formEnc.libelle||"Règlement",debit:sortie?m:0,credit:sortie?0:m,facture_id:factureId,reference_piece:refPiece,valide:true},
       ];
       // Origine « saisie manuelle formelle » — justifiée par l'encaissement
       // qu'on vient d'insérer, dont l'id sert de pièce.
       assertEcrituresTresorerie(ecrituresEnc,{origine:"saisie_manuelle",piece:encInsere?.id??refPiece});
-      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresEnc));
+      // Supabase REND l'erreur au lieu de la lever : sans ce contrôle, un refus
+      // (RLS, trigger, contrainte) laissait un encaissement sans écriture, et
+      // le message annonçait « écriture créée ».
+      const{error:eEcr}=await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresEnc));
+      if(eEcr){
+        await (supabase as any).from("encaissements").delete().eq("id",encInsere?.id);
+        throw new Error(`Écriture refusée, encaissement annulé : ${eEcr.message}`);
+      }
       // Imputation du règlement sur la facture. Deux corrections par rapport à l'ancien
       // code, qui posait `statut_paiement:'payee'` en dur :
       //  • les colonnes « Payé » / « Restant » de l'UI viennent de montant_paye /

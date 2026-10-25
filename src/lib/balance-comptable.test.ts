@@ -3,7 +3,7 @@ import {
   sousTotauxParClasse, totalGeneralBalance, resultatNetBalance, synthetiserBalance,
   ventilerSolde, CLASSES_CGNC, type LigneBalance,
   comptesSuspensNonApures, auditComptesSuspens,
-  RACINE_COMPTES_SUSPENS, COMPTES_ATTENTE_BANQUE,
+  RACINES_COMPTES_SUSPENS, COMPTES_ATTENTE_BANQUE,
 } from "./balance-comptable";
 
 /** Ligne de balance ; le solde/sens sont dérivés comme dans l'écran. */
@@ -284,8 +284,14 @@ describe("auditComptesSuspens", () => {
   });
 
   it("les constantes exposées sont celles du PCM marocain", () => {
-    expect(RACINE_COMPTES_SUSPENS).toBe("47");
-    expect(COMPTES_ATTENTE_BANQUE).toEqual(["4711", "4712"]);
+    // 3497 / 4497 au CGNC ; 471 pour l'historique (4711 / 4712) non renuméroté.
+    expect(RACINES_COMPTES_SUSPENS).toEqual(["3497", "4497", "471"]);
+    expect(COMPTES_ATTENTE_BANQUE).toEqual(["3497", "4497", "4711", "4712"]);
+  });
+
+  it("un écart de conversion (rubrique 47 du CGNC) n'est PAS un compte d'attente", () => {
+    expect(auditComptesSuspens([l("47010000", 1500, 0)]).comptes).toEqual([]);
+    expect(auditComptesSuspens([l("44970000", 0, 900)]).comptes).toHaveLength(1);
   });
 });
 

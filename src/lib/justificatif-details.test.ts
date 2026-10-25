@@ -37,7 +37,7 @@ describe("resolveJustificatifKind", () => {
   });
 
   it("classe eau/électricité, carburant et restauration", () => {
-    expect(resolveJustificatifKind({ type_document: "recu", compte_pcm: "6125" })).toBe("energie");
+    expect(resolveJustificatifKind({ type_document: "recu", compte_pcm: "61251" })).toBe("energie");
     expect(resolveJustificatifKind({ type_document: "recu", categorie_pcm: "gasoil" })).toBe("carburant");
     expect(resolveJustificatifKind({ type_document: "addition" })).toBe("restauration");
   });

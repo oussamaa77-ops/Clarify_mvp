@@ -66,16 +66,20 @@ const TYPE_DOCUMENT_GROUPS = [
 const TYPE_DOCUMENT = TYPE_DOCUMENT_GROUPS.flatMap(g => g.items);
 
 // Compte PCM et TVA par défaut selon le type de document
+// Taux 2026 (CGI) : électricité 20 %, eau non domestique 10 %. Le taux IMPRIMÉ
+// sur la pièce l'emporte toujours (une facture 2025 porte 18 % d'électricité).
 const TYPE_PCM_DEFAULTS: Record<string, { compte: string; tva: number }> = {
-  ticket_carburant: { compte: "61241", tva: 0  },
-  quittance_cnss:   { compte: "6174",  tva: 0  },
+  ticket_carburant: { compte: PCM.ACHATS_COMBUSTIBLES, tva: 0  }, // 61223 — 61241 est une variation de stocks
+  // Bordereau CNSS : paiement de la dette sociale (4441) ; la charge 6174 est
+  // constatée au journal des salaires — la reprendre ici la doublerait.
+  quittance_cnss:   { compte: PCM.CNSS,  tva: 0  },
   quittance_dgi:    { compte: "4456",  tva: 0  },
-  quittance_eau:    { compte: "6125",  tva: 7  },
-  quittance_elec:   { compte: "6125",  tva: 14 },
+  quittance_eau:    { compte: "61251", tva: 10 },
+  quittance_elec:   { compte: "61251", tva: 20 },
   quittance_loyer:  { compte: "6131",  tva: 0  },
   addition:         { compte: PCM.DEPLACEMENTS_MISSIONS_RECEPTIONS, tva: 0  }, // 6143 — 6147 est « Services bancaires »
-  dum:              { compte: "6146",  tva: 0  },
-  avis_debit:       { compte: "6347",  tva: 10 },
+  dum:              { compte: PCM_MAP.frais_douane.code,  tva: 0  },     // 61678 — 6146 est « Cotisations et dons »
+  avis_debit:       { compte: PCM_MAP.frais_bancaires.code,  tva: 10 }, // 61473 — la rubrique 634 n'existe pas
 };
 
 // Types autorisés dans la contrainte CHECK DB actuelle (avant migration complète).
@@ -97,27 +101,27 @@ const CATEGORIES_PCM = [
   { value: "paiement_fournisseur",  label: "Achat fournisseur",                    code: "4411"  },
   { value: "acompte_fournisseur",   label: "Acompte / Avance fournisseur (BC)",    code: "3411"  },
   { value: "encaissement_client",   label: "Encaissement client",                  code: "3421"  },
-  { value: "salaires",              label: "Salaires",                             code: "6171"  },
-  { value: "cnss_amo",              label: "CNSS / AMO",                           code: "6174"  },
-  { value: "charges_sociales",      label: "Charges Sociales",                     code: "6174"  },
+  // Paiements : on solde la dette constatée au journal des salaires (4432 / 4441).
+  { value: "salaires",              label: "Salaires (virement de paie)",          code: PCM_MAP.salaires.code },
+  { value: "cnss_amo",              label: "CNSS / AMO",                           code: PCM_MAP.cnss_amo.code },
+  { value: "charges_sociales",      label: "Charges Sociales (CNSS, CIMR)",        code: PCM_MAP.cnss_amo.code },
   // Comptes LUS dans PCM_MAP (table de la banque) pour toute nature commune aux
   // deux écrans : un loyer ne peut plus partir en 6131 depuis la banque et en
-  // 61311 (terrains) depuis les justificatifs. `gasoil` reste propre à cet écran
-  // tant que l'imputation du carburant n'est pas arbitrée (cf. comptabilite-bq.ts).
+  // 61311 (terrains) depuis les justificatifs.
   { value: "loyers",                label: "Loyer / Location",                     code: PCM_MAP.loyers.code },
   { value: "eau_electricite",       label: "Eau / Électricité",                    code: PCM_MAP.eau_electricite.code },
   { value: "telecom",               label: "Téléphone / Internet",                 code: PCM_MAP.telecom.code },
-  { value: "gasoil",                label: "Carburant (TVA non déductible)",       code: "61223" },
+  { value: "gasoil",                label: "Carburant (TVA non déductible)",       code: PCM_MAP.gasoil.code },
   { value: "assurance",             label: "Assurance",                            code: PCM_MAP.assurance.code },
   { value: "entretien",             label: "Entretien / Réparation",               code: PCM_MAP.entretien.code },
   { value: "frais_bancaires",       label: "Frais bancaires",                      code: PCM_MAP.frais_bancaires.code },
   { value: "frais_representation",  label: "Restaurant / Réception (Art. 106)",   code: PCM_MAP.frais_representation.code },
   { value: "transport",             label: "Transport / Déplacements",             code: "6142"  },
   { value: "tva_import",            label: "TVA récupérable sur import (DUM)",     code: "34552" },
-  { value: "frais_douane",          label: "Droits de douane",                     code: "6146"  },
+  { value: "frais_douane",          label: "Droits de douane",                     code: PCM_MAP.frais_douane.code },
   { value: "taxe_professionnelle",  label: "Taxe professionnelle",                 code: PCM_MAP.taxe_professionnelle.code },
   { value: "droits_timbre",         label: "Droits de timbre fiscaux",             code: "61671" },
-  { value: "autre",                 label: "Autre",                                code: "6141"  },
+  { value: "autre",                 label: "Autre",                                code: PCM_MAP.autre.code },
 ];
 
 const PCM_CODE: Record<string, string> = Object.fromEntries(
@@ -139,7 +143,7 @@ const FISCAL_RULES: Partial<Record<string, FiscalRule>> = {
     tva_non_deductible: true,
     edi_bloque:         true,
     tva_zero_doc:       false,
-    alerte: "⚠️ Art. 106 CGI — TVA non déductible sur frais de bouche et de réception. Montant TTC intégral imputé au débit du 6147.",
+    alerte: "⚠️ Art. 106 CGI — TVA non déductible sur frais de bouche et de réception. Montant TTC intégral imputé au débit du 6143.",
   },
   gasoil: {
     tva_non_deductible: true,
@@ -699,13 +703,14 @@ function JustificatifsPage() {
         (typeof aiCompte === "string" && /^\d{4,6}$/.test(aiCompte.trim()) ? aiCompte.trim() : null) ??
         pcmDef?.compte ??
         PCM_CODE[cat] ??
-        "6141";
+        PCM.CHARGE_DEFAUT;
       const tauxTva = result.taux_tva != null ? result.taux_tva : (pcmDef?.tva ?? 0);
 
-      // Cotisations sociales : le compte reste dans le 617x quoi qu'ait proposé l'IA.
-      // L'AMO ("Assurance Maladie Obligatoire") est régulièrement confondue avec une
-      // assurance privée (6134 / 6161), ce qui fausse l'imputation des charges sociales.
-      if (cat === "charges_sociales" && !comptePcm.startsWith(PCM.CHARGES_SOCIALES)) comptePcm = PCM.CHARGES_SOCIALES;
+      // Cotisations sociales : le bordereau solde une dette envers un organisme
+      // social (444x : 4441 CNSS/AMO, 4443 CIMR) quoi qu'ait proposé l'IA. L'AMO
+      // ("Assurance Maladie Obligatoire") est régulièrement confondue avec une
+      // assurance privée (6134 / 6161), ce qui fausse l'imputation.
+      if (cat === "charges_sociales" && !comptePcm.startsWith("444")) comptePcm = PCM.CNSS;
       // Taxe professionnelle : 6161 « Impôts et taxes directs » (ou 4456 pour la TVA).
       // C'était 6313, un compte de charges d'intérêts.
       if (cat === "taxe_professionnelle" && !comptePcm.startsWith(PCM.IMPOTS_TAXES_DIRECTS) && !comptePcm.startsWith(PCM.TVA_DUE)) {
@@ -717,7 +722,7 @@ function JustificatifsPage() {
       if (comptePcm === "61312") finalType = "quittance_loyer";
       // 6174 = cotisations aux caisses de retraite et de prévoyance sociale (jamais
       // 6171 « salaires », qui n'est pas une quittance d'organisme).
-      if (comptePcm.startsWith("6174")) finalType = "quittance_cnss";
+      if (comptePcm.startsWith("6174") || comptePcm.startsWith("444")) finalType = "quittance_cnss";
 
       setForm({
         ...EMPTY_FORM,
@@ -1472,7 +1477,7 @@ function JustificatifsPage() {
                 onValueChange={v => setForm({
                   ...form,
                   categorie_pcm: v,
-                  compte_pcm:    PCM_CODE[v] ?? "6141",
+                  compte_pcm:    PCM_CODE[v] ?? PCM.CHARGE_DEFAUT,
                   ...applyFiscalRules(v, form.type_document, form.montant_ttc, form),
                 })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>

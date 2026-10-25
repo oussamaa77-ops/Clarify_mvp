@@ -3,8 +3,20 @@
 // côté client (UI d'édition des lignes). La source de vérité interne du modèle
 // reste le PRIX UNITAIRE HT ; le TTC est toujours dérivé, jamais stocké.
 
-/** Taux de TVA marocains reconnus (%). Hors de cette liste → on retombe sur 20. */
-export const TVA_RATES_MA = [0, 7, 10, 14, 20] as const;
+/**
+ * Taux de TVA en vigueur depuis le 01/01/2026 (CGI, réforme de la LF 2024) :
+ * taux normal 20 %, taux réduit 10 %. Les taux de 7 % et 14 % ont disparu.
+ */
+export const TVA_TAUX_EN_VIGUEUR = [0, 10, 20] as const;
+
+/**
+ * Taux de TVA marocains RECONNUS (%) sur une pièce, historique compris : une
+ * facture d'achat de 2024 ou 2025 porte légitimement un taux de transition
+ * (électricité 16 / 18 %, transport 13 / 12 %, sucre 8 / 9 %, location de
+ * compteurs 11 / 15 %), et les pièces antérieures 7 % ou 14 %. Les refuser
+ * ferait passer une facture juste pour un montant faux.
+ */
+export const TVA_RATES_MA = [0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20] as const;
 
 /** Arrondi comptable au centime. */
 function round2(n: number): number {

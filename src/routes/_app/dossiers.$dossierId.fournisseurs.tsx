@@ -42,7 +42,8 @@ import { EcheancesInput, buildEcheancesPayload, type Echeance } from "@/componen
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { DocumentsAssocies } from "@/components/DocumentsAssocies";
 import { logAudit } from "@/lib/audit";
-import { puHtToTtc } from "@/lib/tva";
+import { puHtToTtc, TVA_RATES_MA } from "@/lib/tva";
+import { PCM } from "@/lib/pcm-referentiel";
 import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { FacturesFiltres } from "@/components/FacturesFiltres";
@@ -228,7 +229,7 @@ function FournisseursPage() {
   // Compte de charge PCM de la facture — proposé par le moteur de catégorisation,
   // éditable. `touche` passe à true dès que l'utilisateur le corrige à la main :
   // on cesse alors de le réécrire automatiquement (il reste maître de son choix).
-  const [compteCharge, setCompteCharge] = useState("6141");
+  const [compteCharge, setCompteCharge] = useState<string>(PCM.CHARGE_DEFAUT);
   // Compte rappelé par la mémoire tiers au dernier scan (clé ICE puis libellé).
   const [compteMemoireIce, setCompteMemoireIce] = useState<string | null>(null);
   const [compteChargeTouche, setCompteChargeTouche] = useState(false);
@@ -751,7 +752,7 @@ function FournisseursPage() {
         montant_tva: montantTva,
         montant_ttc: montantTtc,
         // Compte de charge issu du moteur de catégorisation (Règle tiers/mots-clés/
-        // secteur), éditable par l'utilisateur. Repli sur 6141 par sécurité.
+        // secteur), éditable par l'utilisateur. Repli sur 6125 par sécurité.
         compte_charge: compteCharge,
         fournisseur_nom: nomFourn,
         // Compte AUXILIAIRE du fournisseur quand il a un code (F0005 → 44110005),
@@ -760,18 +761,26 @@ function FournisseursPage() {
         code_auxiliaire: fournAux,
       });
       assertLignesAchat(ecrituresAchat);
-      await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresAchat));
+      // Supabase REND l'erreur au lieu de la lever : sans ce contrôle, une
+      // facture refusée au journal ACH (RLS, trigger, contrainte) restait
+      // affichée comme enregistrée, sans charge, sans TVA ni dette fournisseur.
+      // On la retire : mieux vaut une saisie à refaire qu'une pièce hors livres.
+      const { error: eAch } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresAchat));
+      if (eAch) {
+        await (supabase.from("factures_fournisseurs") as any).delete().eq("id", factureId);
+        throw new Error(`Écritures d'achat refusées, facture non enregistrée : ${eAch.message}`);
+      }
 
       toast.success("Facture fournisseur enregistrée ✅");
 
       // ── POC MÉMOIRE (point 1) : apprendre la classification de ce fournisseur ──
-      // À CHAQUE validation, on mémorise {ICE/libellé → compte 6141 + taux TVA},
+      // À CHAQUE validation, on mémorise {ICE/libellé → compte de charge + taux TVA},
       // occurrences++. Prochain scan du même fournisseur → rappel avant le LLM.
       const tauxDominant = Number(lignes[0]?.taux_tva ?? 20);
       memoriserFn({ data: {
         dossier_id: dossierId, sens: "fournisseur",
         ice: fournisseurIce || null, nom: nomFourn,
-        fournisseur_id: fId || null, compte_pcm: compteCharge || "6141",
+        fournisseur_id: fId || null, compte_pcm: compteCharge || PCM.CHARGE_DEFAUT,
         categorie_pcm: null, taux_tva: tauxDominant,
       }}).then((res) => {
         if (res.ok) console.log(`[mémoire] ${nomFourn} → ${res.occurrences} usage(s)`);
@@ -928,7 +937,7 @@ function FournisseursPage() {
     setEcheances([]);
     setNotesManuscrites(null);
     // Le moteur reprendra la main sur le compte (touche remis à false).
-    setCompteCharge("6141");
+    setCompteCharge(PCM.CHARGE_DEFAUT);
     setCompteChargeTouche(false);
     setCompteChargeSug(null);
     setCompteMemoireIce(null);
@@ -1524,7 +1533,7 @@ function FournisseursPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {[0, 7, 10, 14, 20].map((t) => (
+                          {TVA_RATES_MA.map((t) => (
                             <SelectItem key={t} value={String(t)}>{t}%</SelectItem>
                           ))}
                         </SelectContent>
@@ -1566,7 +1575,7 @@ function FournisseursPage() {
                     className="font-mono w-32"
                     value={compteCharge}
                     onChange={(e) => { setCompteCharge(e.target.value); setCompteChargeTouche(true); }}
-                    placeholder="6141"
+                    placeholder={PCM.CHARGE_DEFAUT}
                   />
                   {compteChargeTouche && (
                     <Button size="sm" variant="ghost" className="h-8 text-xs"

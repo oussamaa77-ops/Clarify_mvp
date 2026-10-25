@@ -3,35 +3,14 @@
 //
 // Deux choses que tout appel serveur doit faire et qu'on ne veut pas
 // re-écrire dans chaque module :
-//   • proxyFetch : le fetch global de Node meurt derrière le proxy TLS
-//     d'entreprise (`TypeError: fetch failed`) → repli undici sans vérif TLS.
-//     Sans ça, TOUTE requête serveur vers Supabase échoue en silence.
+//   • proxyFetch : le fetch global de Node meurt derrière le proxy TLS du
+//     poste de dev (`TypeError: fetch failed`) → voir ./proxy-fetch.
 //   • createClient en singleton paresseux (une connexion, pas une par appel).
 // ============================================================================
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { proxyFetch } from "./proxy-fetch";
 
-let PROXY_DIRECT = false;
-
-export async function proxyFetch(input: any, init?: any): Promise<Response> {
-  const url = String(input);
-  if (PROXY_DIRECT) return undiciFetch(url, init);
-  try {
-    return await fetch(url, init);
-  } catch (e: any) {
-    const cause: string = e?.cause?.code ?? e?.cause?.message ?? e?.message ?? "";
-    if (/SELF_SIGNED|CERT_|UNABLE_TO_VERIFY|fetch failed|ECONNRESET|EPROTO/i.test(cause)) {
-      PROXY_DIRECT = true;
-      return undiciFetch(url, init);
-    }
-    throw e;
-  }
-}
-
-async function undiciFetch(url: string, init?: any): Promise<Response> {
-  const { fetch: uf, Agent } = await import("undici");
-  const agent = new Agent({ connect: { rejectUnauthorized: false } });
-  return (uf as any)(url, { ...init, dispatcher: agent }) as Promise<Response>;
-}
+export { proxyFetch };
 
 let _client: SupabaseClient | undefined;
 

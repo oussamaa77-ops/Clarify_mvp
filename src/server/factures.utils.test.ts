@@ -236,8 +236,8 @@ describe("correctMontants — dérivation TTC depuis HT + taux", () => {
     expect(r.montant_ttc).toBe(550);
   });
 
-  it("utilise 20% si le taux fourni n'est pas dans les taux marocains valides", () => {
-    const r = correctMontants({ montant_ht: 1000, montant_tva: 0, montant_ttc: 0, taux_tva: 15 });
+  it("utilise 20% si le taux fourni n'est pas dans les taux marocains valides (17 % n.a jamais existé)", () => {
+    const r = correctMontants({ montant_ht: 1000, montant_tva: 0, montant_ttc: 0, taux_tva: 17 });
     expect(r.taux_tva).toBe(20);
   });
 });
@@ -385,8 +385,12 @@ describe("buildOcrPrompt — règles présentes (intégration)", () => {
     expect(promptText).toContain("NE PAS prendre l'assiette");
   });
 
-  it("impose le compte 6174 et interdit les comptes d'assurance pour CNSS / AMO", () => {
-    expect(promptText).toContain('categorie_pcm = "charges_sociales" ET compte_pcm =\n     "6174"');
+  it("impose le compte de DETTE 4441 (pas la charge 6174) et interdit les comptes d'assurance pour CNSS / AMO", () => {
+    expect(promptText).toContain('CNSS / AMO → categorie_pcm = "charges_sociales" ET compte_pcm = "4441"');
+    expect(promptText).toContain('CIMR → categorie_pcm = "charges_sociales" ET compte_pcm = "4443"');
+    // Eau / électricité : 61251, jamais 61252 (fournitures d'entretien) ; carburant 61223.
+    expect(promptText).toContain('compte_pcm = "61251"');
+    expect(promptText).toContain('compte_pcm = "61223"');
     expect(promptText).toContain("INTERDIT pour la CNSS et l'AMO");
     expect(promptText).toContain("L'AMO est une cotisation sociale, PAS une assurance privée");
   });

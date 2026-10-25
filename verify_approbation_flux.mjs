@@ -101,7 +101,16 @@ verifier(!!(await trouverUser(email)), "GET (préchargement mail) n'a RIEN suppr
 
 // ── 5. Approbation ───────────────────────────────────────────────────────────
 console.log("\n4) Bouton « Approuver »");
-const app = await uf(`${APP}/api/approve-user?userId=${userId}&token=${jeton}`, { dispatcher, redirect: "manual" });
+// Le GET (ce que fait un préchargement de client mail) ne doit RIEN approuver.
+const conf = await uf(`${APP}/api/approve-user?userId=${userId}&token=${jeton}`, { dispatcher, redirect: "manual" });
+verifier(conf.status === 200, "le GET affiche la confirmation", `→ HTTP ${conf.status}`);
+const p1b = await (await uf(`${SB}/rest/v1/profiles?id=eq.${userId}&select=is_approved`, { headers: admin, dispatcher })).json();
+verifier(p1b[0]?.is_approved === false, "le GET seul n'approuve pas");
+
+const app = await uf(`${APP}/api/approve-user`, {
+  dispatcher, redirect: "manual", method: "POST",
+  body: new URLSearchParams({ userId, token: jeton }),
+});
 verifier(app.status === 303 && (app.headers.get("location") ?? "").includes("approbation=ok"), "approbation acceptée", `→ ${app.headers.get("location")}`);
 const p2 = await (await uf(`${SB}/rest/v1/profiles?id=eq.${userId}&select=is_approved`, { headers: admin, dispatcher })).json();
 verifier(p2[0]?.is_approved === true, "is_approved passé à true");

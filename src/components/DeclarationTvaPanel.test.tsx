@@ -120,7 +120,7 @@ describe("Liquidation de la TVA (modale de confirmation)", () => {
     monter({ liquidation: liquidationCredit });
     fireEvent.click(screen.getByRole("button", { name: /Déclarer la TVA/i }));
     const modale = screen.getByRole("dialog");
-    expect(within(modale).getByText(/Crédit de TVA reportable \(4456\)/)).toBeDefined();
+    expect(within(modale).getByText(/Crédit de TVA reportable \(3456\)/)).toBeDefined();
     expect(within(modale).queryByText(/TVA à payer/)).toBeNull();
   });
 
@@ -424,7 +424,7 @@ describe("États de bord", () => {
 });
 
 // ─── Bouclage : dette soldée vs crédit reporté ───────────────────────────────
-// Un crédit reportable laisse le 4456 DÉBITEUR. La période est close, mais la
+// Un crédit reportable laisse le 3456 DÉBITEUR. La période est close, mais la
 // carte ne doit pas pour autant annoncer « tous à 0,00 » : ce serait faux, et
 // c'est exactement le genre de phrase qu'un contrôleur relit.
 describe("Carte de bouclage", () => {

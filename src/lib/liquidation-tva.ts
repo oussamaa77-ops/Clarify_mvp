@@ -27,9 +27,22 @@
 //
 // ─── Le cas du CRÉDIT DE TVA ─────────────────────────────────────────────────
 // Quand la TVA déductible dépasse la collectée, il n'y a pas de dette mais un
-// crédit reportable. Le sens de la troisième ligne s'inverse (D 4456), et rien
-// n'est prélevé. Traiter ce cas comme une dette négative produirait une écriture
-// à montant négatif, que ni Sage ni la DGI n'acceptent.
+// crédit reportable. Le CGNC le porte au 3456 « État – crédit de TVA (suivant
+// déclarations) », un compte d'ACTIF — et non en solde débiteur du 4456, qui
+// est un compte de passif :
+//
+//   D 44551   Σ TVA collectée
+//   D 3456    crédit de la période
+//   C 34552   Σ TVA déductible
+//
+// Ce crédit s'IMPUTE sur la déclaration suivante (ligne « crédit du mois
+// précédent » de l'imprimé) : la dette de la période suivante en est diminuée,
+//
+//   D 44551 / C 34552 / C 3456 (crédit imputé) / C 4456 (reste dû)
+//
+// et rien n'est prélevé tant que le crédit couvre la dette. Traiter ce cas comme
+// une dette négative produirait une écriture à montant négatif, que ni Sage ni
+// la DGI n'acceptent.
 //
 // Logique pure : l'écran, l'écriture générée et le contrôle de cohérence
 // consomment le MÊME calcul.
@@ -48,6 +61,8 @@ const txt = (v: unknown) => String(v ?? "").trim();
 export const COMPTE_TVA_COLLECTEE = PCM.TVA_FACTUREE_EXIGIBLE;
 export const COMPTE_TVA_DEDUCTIBLE = PCM.TVA_RECUPERABLE_CHARGES;
 export const COMPTE_TVA_DUE = PCM.TVA_DUE;
+/** 3456 « État – crédit de TVA (suivant déclarations) ». */
+export const COMPTE_CREDIT_TVA = PCM.CREDIT_TVA;
 /** Racines de détection, pour ramasser les sous-comptes (44551 ⊂ 4455). */
 export const RACINE_COLLECTEE = RACINES_PCM.TVA_FACTUREE;
 export const RACINE_DEDUCTIBLE = RACINES_PCM.TVA_RECUPERABLE;
@@ -74,6 +89,7 @@ export interface LigneTva {
  */
 export const LIBELLE_TVA_DUE = "TVA due";
 export const LIBELLE_CREDIT_REPORTABLE = "Crédit de TVA reportable";
+export const LIBELLE_IMPUTATION_CREDIT = "Imputation du crédit de TVA antérieur";
 export const LIBELLE_PAIEMENT_DGI = "Paiement TVA DGI";
 
 /** Référence portée par l'OD de déclaration — la rend retrouvable et idempotente. */
@@ -167,9 +183,19 @@ export interface LiquidationTva {
   collectee: number;
   /** Σ des débits nets du 34552 sur la période. */
   deductible: number;
-  /** collectée − déductible. Positif = dette, négatif = crédit reportable. */
+  /**
+   * Crédit de TVA disponible au 3456 à l'ouverture de la période (crédits des
+   * déclarations antérieures non encore imputés), en positif.
+   */
+  creditAnterieur: number;
+  /** Part du crédit antérieur imputée sur la TVA de la période, en positif. */
+  creditImpute: number;
+  /**
+   * collectée − déductible − crédit imputé. Positif = dette, négatif = crédit
+   * reportable NOUVEAU de la période.
+   */
   net: number;
-  /** Montant à porter au 4456, toujours positif. */
+  /** Montant à porter au 4456 (dette) ou au 3456 (crédit nouveau), toujours positif. */
   montant: number;
   /** `true` quand l'État doit être payé, `false` en crédit de TVA. */
   dette: boolean;
@@ -198,9 +224,17 @@ export function liquiderTva(lignes: LigneTva[], periode: string): LiquidationTva
     .filter((l) => txt(l.compte_numero).startsWith(RACINE_DEDUCTIBLE))
     .reduce((s, l) => s + nb(l.debit) - nb(l.credit), 0));
 
-  const net = round2(collectee - deductible);
+  // Crédit antérieur : solde débiteur du 3456 avant la période. Il ne s'impute
+  // que sur une TVA nette positive, et jamais au-delà.
+  const creditAnterieur = Math.max(0, round2(lignes
+    .filter((l) => txt(l.compte_numero).startsWith(COMPTE_CREDIT_TVA)
+      && txt(l.date_ecriture).slice(0, 10) < bornes.debut)
+    .reduce((s, l) => s + nb(l.debit) - nb(l.credit), 0)));
+  const brut = round2(collectee - deductible);
+  const creditImpute = brut > 0 ? round2(Math.min(brut, creditAnterieur)) : 0;
+  const net = round2(brut - creditImpute);
   return {
-    periode: bornes.label, bornes, collectee, deductible, net,
+    periode: bornes.label, bornes, collectee, deductible, creditAnterieur, creditImpute, net,
     montant: Math.abs(net), dette: net >= 0,
     // « Néant » au sens de la DGI : aucune opération taxable ni déductible.
     neant: Math.abs(collectee) < 0.005 && Math.abs(deductible) < 0.005,
@@ -224,7 +258,8 @@ export interface LigneDeclaration {
 }
 
 /**
- * OD de déclaration : solde les deux comptes de la période et constate le 4456.
+ * OD de déclaration : solde les deux comptes de la période, impute le crédit
+ * antérieur (3456) et constate la dette (4456) ou le crédit nouveau (3456).
  *
  * Rend un tableau VIDE sur une période néant — une écriture à zéro ne prouve
  * rien et pollue le journal. Les lignes à montant nul sont également écartées :
@@ -255,10 +290,18 @@ export function construireOdDeclaration(liq: LiquidationTva): LigneDeclaration[]
       debit: Math.max(0, -liq.deductible), credit: Math.max(0, liq.deductible),
     });
   }
-  // 3) La différence : dette (crédit 4456) ou crédit de TVA reportable (débit).
+  // 3) Le crédit antérieur imputé sur la TVA de la période : il quitte le 3456.
+  if (liq.creditImpute > 0.005) {
+    lignes.push({
+      ...commun, compte_numero: COMPTE_CREDIT_TVA,
+      debit: 0, credit: liq.creditImpute,
+      libelle: `${LIBELLE_IMPUTATION_CREDIT} - ${liq.periode}`.slice(0, 200),
+    });
+  }
+  // 4) La différence : dette (crédit 4456) ou crédit de TVA reportable (débit 3456).
   if (Math.abs(liq.net) > 0.005) {
     lignes.push({
-      ...commun, compte_numero: COMPTE_TVA_DUE,
+      ...commun, compte_numero: liq.dette ? COMPTE_TVA_DUE : COMPTE_CREDIT_TVA,
       debit: liq.dette ? 0 : liq.montant,
       credit: liq.dette ? liq.montant : 0,
       libelle: (liq.dette
@@ -435,7 +478,11 @@ export function reglementsDgiPeriode(lignes: LigneTva[], periode: string): Regle
   const regle = round2(paiements.reduce((s, l) => s + nb(l.debit), 0));
 
   return {
-    declaree: cycle.length > 0,
+    // Déclarée dès que l'OD existe, QUEL QUE SOIT le compte : une période en
+    // crédit (3456) ou dont la dette est couverte par un crédit antérieur ne
+    // porte aucune ligne au 4456. S'en tenir au 4456 la dirait non déclarée —
+    // et l'idempotence laisserait la redéclarer.
+    declaree: lignes.some((l) => txt(l.reference_piece) === ref),
     detteConstatee, regle,
     reste: round2(detteConstatee - regle),
     dernierReglement: paiements.map((l) => txt(l.date_ecriture).slice(0, 10))
@@ -557,9 +604,10 @@ export function controlerBouclagePeriode(
   const collectee = solde(RACINE_COLLECTEE, "C");
   const deductible = solde(RACINE_DEDUCTIBLE, "D");
   const due = solde(COMPTE_TVA_DUE, "C");
-  // `due` est compté au CRÉDIT : positif = dette envers l'État, négatif =
-  // crédit de TVA reportable. On ne retient comme bloquante que la dette.
-  const creditReporte = due < -0.005 ? round2(-due) : 0;
+  // Le crédit reportable vit au 3456 (débiteur). Un 4456 débiteur — historique
+  // antérieur au transfert sur 3456 — en est un aussi. Seule la dette bloque.
+  const credit3456 = Math.max(0, solde(COMPTE_CREDIT_TVA, "D"));
+  const creditReporte = round2(credit3456 + (due < -0.005 ? -due : 0));
 
   const ouverts: string[] = [];
   if (Math.abs(collectee) > 0.005) ouverts.push(`44551 = ${collectee.toFixed(2)}`);

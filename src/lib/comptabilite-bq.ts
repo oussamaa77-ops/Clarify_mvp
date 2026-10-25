@@ -4,7 +4,8 @@
 // Logique partagée entre la liste des relevés (banque.tsx) et le détail d'un
 // relevé (banque.$releveId.tsx) pour la clôture « modèle Odoo / Grand Livre
 // continu » : toute transaction non clôturée est comptabilisée, les orphelines
-// étant parquées sur le compte d'attente PCM 4711 (débit) / 4712 (crédit).
+// étant parquées sur les comptes transitoires ou d'attente du CGNC 3497
+// (débiteurs) / 4497 (créditeurs).
 //
 // Source de vérité UNIQUE — ne pas dupliquer ces règles dans les composants.
 // ============================================================================
@@ -14,35 +15,36 @@ import {
 } from "@/lib/comptes-tresorerie";
 import { PCM, validatePcmAccount } from "@/lib/pcm-referentiel";
 
-/**
- * Comptes dont l'imputation reste À VALIDER par l'expert-comptable : conservés
- * tels quels (données historiques), mais nommés pour ne pas passer pour acquis.
- *   61241 carburant — le code emploie 5 comptes pour la même dépense (61241,
- *         61223, 6122, 61251, 61411) ; 6124 n'est pas un compte d'achats.
- *   6347  frais bancaires — `pcm_reference` l'intitule « frais d'escompte » ;
- *         les services bancaires sont en 6147. La déclaration EDI en dépend.
- *   6146  droits de douane — 6146 est « Cotisations et dons ».
- */
-export const COMPTE_CARBURANT_A_VALIDER = "61241";
-export const COMPTE_FRAIS_BANCAIRES_A_VALIDER = "6347";
-export const COMPTE_DOUANE_A_VALIDER = "6146";
-
-// PCM_MAP selon CGI Art.106 — TVA déductible ou non au Maroc
+// PCM_MAP — compte CGNC et taux de TVA par défaut (CGI 2026 : 20 % / 10 %),
+// déductibilité selon l'art. 106 CGI. Le taux ne sert qu'à défaut de pièce :
+// dès qu'un document est lié, ce sont SES montants qui font foi.
 export const PCM_MAP: Record<string, { code: string; tva: number }> = {
   encaissement_client:  { code: PCM.CLIENTS,  tva: 0 },   // Encaissement → pas de TVA
-  paiement_fournisseur: { code: PCM.FOURNISSEURS,  tva: 20 },  // Achats fournisseur → TVA 20% déductible
-  salaires:             { code: PCM.REMUNERATIONS_PERSONNEL,  tva: 0 },   // Salaires → hors champ TVA
+  // Règlement fournisseur : on solde le 4411 au TTC. La TVA est portée par la
+  // facture (journal ACH), jamais reconstituée sur le relevé.
+  paiement_fournisseur: { code: PCM.FOURNISSEURS,  tva: 0 },
+  salaires:             { code: PCM.REMUNERATIONS_DUES_PERSONNEL,  tva: 0 },   // Virement de paie → solde 4432 (la charge 6171 est au journal des salaires)
   cnss_amo:             { code: PCM.CNSS,  tva: 0 },   // CNSS/AMO → solde la dette sociale 4441 (la charge 6174 est au journal des salaires)
-  tva_dgi:              { code: PCM.TVA_DUE,  tva: 0 },   // Impôts → solde la dette fiscale, pas de TVA sur TVA
+  tva_dgi:              { code: PCM.TVA_DUE,  tva: 0 },   // Paiement TVA → solde 4456, pas de TVA sur TVA
+  // TVA prélevée par la banque sur ses commissions : TVA RÉCUPÉRABLE sur
+  // charges, pas une dette envers l'État (4456).
+  tva_frais_bancaires:  { code: PCM.TVA_RECUPERABLE_CHARGES,  tva: 0 },
+  ir_salaires:          { code: PCM.IR_RETENU_SALAIRES,  tva: 0 },   // Versement de l'IR retenu → solde 44525
+  acompte_is:           { code: PCM.ACOMPTES_IS,  tva: 0 },   // Acompte d'IS → 3453, une créance jusqu'à la liquidation
   loyers:               { code: PCM.LOCATIONS,  tva: 0 },   // Local nu = exonéré; local meublé → modifier manuellement
-  eau_electricite:      { code: PCM.ACHATS_NON_STOCKES,  tva: 14 },  // Électricité 14%, eau 7% → déductible
+  // Électricité 20 % depuis le 01/01/2026 (14 % jusqu'en 2023, 16 % en 2024,
+  // 18 % en 2025) ; eau non domestique 10 %, domestique exonérée.
+  eau_electricite:      { code: PCM.EAU_ELECTRICITE,  tva: 20 },
   telecom:              { code: PCM.FRAIS_POSTAUX_TELECOMMUNICATIONS,  tva: 20 },  // 6145 Frais postaux et télécom, TVA 20% déductible
-  gasoil:               { code: COMPTE_CARBURANT_A_VALIDER, tva: 0 },   // Gasoil véhicules → NON déductible (CGI Art.106)
+  // 61223 « Achats de combustibles ». C'était 61241, « Variation des stocks de
+  // matières premières ». TVA non déductible sur le carburant des véhicules (art. 106 CGI).
+  gasoil:               { code: PCM.ACHATS_COMBUSTIBLES, tva: 0 },
   // 6134 « Primes d'assurances ». C'était 6161, qui est « Impôts et taxes directs ».
-  assurance:            { code: PCM.PRIMES_ASSURANCES,  tva: 0 },   // Assurance → exonérée TVA
+  assurance:            { code: PCM.PRIMES_ASSURANCES,  tva: 0 },   // Assurance → hors champ TVA (taxe sur les contrats d'assurance)
   // 6133 « Entretien et réparations ». C'était 6141 « Études, recherches et documentation ».
   entretien:            { code: PCM.ENTRETIEN_REPARATIONS,  tva: 20 },  // Réparations → TVA 20% déductible
-  frais_bancaires:      { code: COMPTE_FRAIS_BANCAIRES_A_VALIDER,  tva: 10 },  // Commissions bancaires → TVA 10% déductible
+  // 61473 « Frais et commissions sur services bancaires ». C'était 6347 : la rubrique 634 n'existe pas au CGNC.
+  frais_bancaires:      { code: PCM.SERVICES_BANCAIRES,  tva: 10 },  // Commissions bancaires → TVA 10% déductible
   // 6161 « Impôts et taxes directs ». C'était 6313, un compte de charges d'INTÉRÊTS.
   taxe_professionnelle: { code: PCM.IMPOTS_TAXES_DIRECTS,  tva: 0 },   // Taxes → pas de TVA
   // Retrait → CAISSE, rubrique 516 du PCM. C'était 5143, qui est la Trésorerie
@@ -55,14 +57,20 @@ export const PCM_MAP: Record<string, { code: string; tva: number }> = {
   interets_crediteurs:  { code: PCM.INTERETS_PRODUITS_ASSIMILES,  tva: 0 },   // Intérêts → hors champ TVA
   // 6143 « Déplacements, missions et réceptions ». C'était 6147, « Services bancaires ».
   frais_representation: { code: PCM.DEPLACEMENTS_MISSIONS_RECEPTIONS,  tva: 0 },   // Restaurant/réception → NON déductible (CGI Art.106)
-  frais_douane:         { code: COMPTE_DOUANE_A_VALIDER,  tva: 0 },   // Droits douane → pas de TVA récupérable
-  transport:            { code: PCM.TRANSPORTS,  tva: 14 },  // Transport marchandises → 6142 Transports, TVA 14% déductible
+  // 61678 « Autres impôts, taxes et droits assimilés ». C'était 6146, « Cotisations
+  // et dons ». Droits liés à des marchandises stockées : à incorporer au coût d'achat (611x/612x).
+  frais_douane:         { code: PCM.AUTRES_IMPOTS_TAXES,  tva: 0 },
+  // 10 % depuis le 01/01/2026 pour le transport urbain et routier (14 % jusqu'en
+  // 2023, 13 % en 2024, 12 % en 2025) ; les autres transports sont à 20 %.
+  transport:            { code: PCM.TRANSPORTS,  tva: 10 },
   autre:                { code: PCM.CHARGE_DEFAUT,  tva: 0 },   // Divers → par défaut sans TVA
 };
 
 // ─── Dérive une catégorie PCM depuis le libellé bancaire (fallback sans IA) ──
 // Mouvements de fonds internes : VIR AG EMIS, VERS/VERSEMENT (cf. analyse-regles-pcm.md règle 4)
 export const RX_VIREMENT_INTERNE = /VIR\.?\s*AG\.?\s*EMIS|VIREMENT\s+INTERNE|^VERS(EMENT)?\b/;
+// TVA facturée par la banque sur ses commissions (« TVA S/COMMISSION », « TVA/FRAIS »…).
+export const RX_TVA_FRAIS_BANCAIRES = /\bT\.?V\.?A\b.*(COMM|FRAIS|AGIOS|TENUE|INTER|CARTE|PACK|ABONN)|(COMM|FRAIS|AGIOS|TENUE).*\bT\.?V\.?A\b/;
 
 /** La catégorie et SON compte, lu dans PCM_MAP : une seule table, jamais deux. */
 const cat = (categorie: string) => ({ categorie, code: PCM_MAP[categorie].code, tva: PCM_MAP[categorie].tva });
@@ -72,7 +80,11 @@ export function deriveCategorie(libelle: string, type: "credit" | "debit"): { ca
   if (RX_VIREMENT_INTERNE.test(u))                        return cat("virement_interne");
   if (type === "credit") return cat("encaissement_client");
   if (/\bCNSS\b|AMO\b/.test(u))                          return cat("cnss_amo");
-  if (/\bTVA\b|\bDGI\b|\bIR\b|\bIS\b|IMPOT/.test(u))    return cat("tva_dgi");
+  if (RX_TVA_FRAIS_BANCAIRES.test(u))                     return cat("tva_frais_bancaires");
+  if (/\bTVA\b/.test(u))                                  return cat("tva_dgi");
+  if (/\bIS\b|IMPOT\s+SUR\s+LES\s+SOCIETES/.test(u))      return cat("acompte_is");
+  if (/\bIR\b|\bIGR\b/.test(u))                           return cat("ir_salaires");
+  if (/\bDGI\b|IMPOT/.test(u))                            return cat("tva_dgi");
   if (/SALAIRE|PAIE|REMUNERATION/.test(u))                return cat("salaires");
   if (/\bIAM\b|ORANGE|INWI|TELECOM|INTERNET/.test(u))    return cat("telecom");
   if (/LOYER|LOCATION/.test(u))                           return cat("loyers");
@@ -87,14 +99,16 @@ export function deriveCategorie(libelle: string, type: "credit" | "debit"): { ca
 }
 
 // ─── Lignes d'écriture Journal de Banque (BQ) — règles PCM (cf. analyse-regles-pcm.md) ──
-// 1. Sans document lié → compte d'attente 4711 (débit) / 4712 (crédit), jamais de compte de charge deviné
+// 1. Sans document lié → compte d'attente 3497 (débit) / 4497 (crédit), jamais de compte de charge deviné
 // 2. Facture fournisseur liée → Débit 4411 TTC / Crédit 5141 TTC (la TVA est gérée au journal d'achats)
 // 3. Justificatif lié → Débit compte charge HT + Débit 34552 TVA si eligible_edi=true et taux > 0, sinon TTC intégral
 // 4. Virement interne (VIR AG EMIS / VERS) → 5115 Virements de fonds, pas de TVA
 // 5. Retrait espèces → CAISSE, rubrique 516 (51610000 par défaut, ou le
 //    sous-compte de caisse du dossier). PAS 5143, qui est la Trésorerie Générale.
-// 6. CNSS → 4441 (dette sociale) ; TVA/IS/DGI → 4456 — on solde la dette, pas de charge directe
+// 6. On solde la dette, jamais de charge directe : CNSS → 4441 ; TVA → 4456 ;
+//    IR retenu → 44525 ; acompte d'IS → 3453 (créance)
 // 7. Facture client liée (crédit) → Débit 5141 / Crédit 3421
+// 8. TVA prélevée par la banque sur ses commissions → 34552 (TVA récupérable)
 export type LigneBQ = { compte: string; libelle: string; debit: number; credit: number; categorie: string };
 
 export function genererLignesBQ(p: {
@@ -104,7 +118,7 @@ export function genererLignesBQ(p: {
   categorie?: string | null;
   // Compte PCM affiché dans l'UI pour la transaction. NON UTILISÉ pour choisir la
   // contrepartie : depuis le modèle « bank suspense », une transaction sans pièce va
-  // toujours en 4711/4712, jamais sur un compte de charge deviné. Conservé car des
+  // toujours en 3497/4497, jamais sur un compte de charge deviné. Conservé car des
   // appelants le passent encore.
   compteComptable?: string | null;
   factureLiee?: boolean;
@@ -155,8 +169,16 @@ export function genererLignesBQ(p: {
   } else if (cat === "cnss_amo" || /\bCNSS\b|\bAMO\b/.test(u)) {
     catEff = "cnss_amo";
     cp(PCM.CNSS, m);
+  } else if (cat === "tva_frais_bancaires" || (!isCr && RX_TVA_FRAIS_BANCAIRES.test(u))) {
+    // Règle 8 — la TVA des commissions bancaires est récupérable, pas due.
+    catEff = "tva_frais_bancaires";
+    cp(PCM.TVA_RECUPERABLE_CHARGES, m);
   } else if (cat === "tva_dgi") {
     cp(PCM.TVA_DUE, m);
+  } else if (cat === "ir_salaires") {
+    cp(PCM.IR_RETENU_SALAIRES, m);
+  } else if (cat === "acompte_is") {
+    cp(PCM.ACOMPTES_IS, m);
   } else if (cat === "retrait_especes" || /RETRAIT|\bGAB\b/.test(u)) {
     catEff = "retrait_especes";
     // Contrepartie d'un retrait : la CAISSE est débitée de ce que la banque perd.
@@ -170,7 +192,7 @@ export function genererLignesBQ(p: {
   } else {
     // Règle 1 (modèle Odoo / Bank Suspense) — transaction orpheline (aucune pièce
     // liée et hors catégories déterministes ci-dessus) : on la parque sur le compte
-    // d'attente PCM 4711 (débit) / 4712 (crédit). Le Grand Livre reste équilibré ;
+    // d'attente CGNC 3497 (débit) / 4497 (crédit). Le Grand Livre reste équilibré ;
     // le compte définitif sera substitué automatiquement (trigger SQL) dès qu'un
     // justificatif/facture sera associé, même après clôture.
     catEff = "en_attente";

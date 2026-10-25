@@ -1,3 +1,10 @@
+> **⚠️ ERRATUM (2026-10-24) — ce document contient deux erreurs vis-à-vis du CGNC, corrigées dans le code :**
+>
+> - **Comptes d'attente** : `4711` / `4712` sont des numéros du plan comptable FRANÇAIS. Au CGNC, la rubrique 47 porte les *écarts de conversion – passif*. Les comptes transitoires ou d'attente sont **`3497`** (débiteurs) et **`4497`** (créditeurs).
+> - **Caisse** : `5161` **est** le compte « Caisses » du CGNC. `5143` est la *Trésorerie Générale* — ne jamais y imputer les espèces.
+>
+> Les autres règles (5115 virements de fonds, 4441 CNSS, 4411 au TTC, pas de TVA en banque sur un règlement lettré) sont conformes et appliquées. Référentiel de l'application : `src/lib/pcm-referentiel.ts`.
+
 Aïe, là aussi ton moteur de génération d'écritures comptables (pour le **Journal de Banque - BQ**) s'est emmêlé les pinceaux. **Ce fichier n'est pas correct** et aucun comptable ne pourra l'importer dans Sage en l'état.
 
 Tu as corrigé l'EDI DGI (qui filtre uniquement les achats validés), mais ici, pour le journal de banque, ton application doit traiter **toutes les lignes du relevé**. C'est là que le modèle a halluciné sur plusieurs règles fondamentales du Plan Comptable Marocain (PCM).

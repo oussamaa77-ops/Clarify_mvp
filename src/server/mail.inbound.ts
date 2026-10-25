@@ -130,13 +130,16 @@ export const envoyerMail = createServerFn({ method: "POST" })
       html: z.string(),
       text: z.string().optional(),
       replyTo: z.string().email().optional(),
-      // Une PJ = base64 (`content`) OU une URL / un chemin (`path`). Le Buffer
-      // binaire n'est pas transportable en JSON → réservé aux appels serveur→serveur
-      // qui passent par `sendMail` directement (ex. envoyerRelance).
+      // Une PJ venue du navigateur = base64 (`content`) UNIQUEMENT. `path`
+      // (fichier local ou URL, que nodemailer et Resend vont lire eux-mêmes)
+      // reste réservé aux appels serveur→serveur qui passent par `sendMail`
+      // directement (ex. envoyerRelance) : exposé ici, il permettait à
+      // n'importe quel utilisateur de se faire envoyer `/app/.env` — clé
+      // service_role comprise — ou de faire sonder le réseau interne (SSRF).
+      // zod retire la clé inconnue : un `path` envoyé quand même est ignoré.
       attachments: z.array(z.object({
         name: z.string(),
         content: z.string().optional(), // base64
-        path: z.string().optional(),    // URL http(s) ou chemin fichier
         type: z.string().optional(),
       })).optional(),
     }).parse(input)
