@@ -31,6 +31,9 @@ interface Bulletin {
   salaire_base: number; net_a_payer: number; cout_employeur: number;
   ir_net: number; cnss_salarie: number; amo_salarie: number;
   cnss_patronal: number; amo_patronal: number; ecriture_creee: boolean;
+  montant_heures_sup?: number | null; primes?: number | null; indemnites?: number | null;
+  avantages_nature?: number | null; cimr_salarie?: number | null; cimr_patronal?: number | null;
+  taxe_formation_pro?: number | null;
 }
 
 const TYPE_CONTRAT_LABEL: Record<string, string> = {
@@ -502,7 +505,12 @@ function PaiePage() {
                 <p className="font-bold text-xs uppercase text-muted-foreground mb-2">Rémunération brute</p>
                 {[
                   ["Salaire de base", fmtMAD(Number(viewBulletin.salaire_base))],
-                  ["Total brut", fmtMAD(Number(viewBulletin.salaire_base))],
+                  ["Heures supplémentaires", fmtMAD(Number(viewBulletin.montant_heures_sup ?? 0))],
+                  ["Primes", fmtMAD(Number(viewBulletin.primes ?? 0))],
+                  ["Indemnités exonérées", fmtMAD(Number(viewBulletin.indemnites ?? 0))],
+                  ["Avantages en nature", fmtMAD(Number(viewBulletin.avantages_nature ?? 0))],
+                  ["Total brut", fmtMAD(Number(viewBulletin.salaire_base) + Number(viewBulletin.montant_heures_sup ?? 0)
+                    + Number(viewBulletin.primes ?? 0) + Number(viewBulletin.indemnites ?? 0) + Number(viewBulletin.avantages_nature ?? 0))],
                 ].map(([l,v]) => <div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span className="font-mono">{v}</span></div>)}
               </div>
               <div className="p-3 bg-red-50 dark:bg-red-950/20 rounded-lg space-y-1">
@@ -510,6 +518,7 @@ function PaiePage() {
                 {[
                   ["CNSS salarial (4.48%)", fmtMAD(Number(viewBulletin.cnss_salarie))],
                   ["AMO salariale (2.26%)", fmtMAD(Number(viewBulletin.amo_salarie))],
+                  ["CIMR salariale", fmtMAD(Number(viewBulletin.cimr_salarie ?? 0))],
                   ["IR net", fmtMAD(Number(viewBulletin.ir_net))],
                 ].map(([l,v]) => <div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span className="font-mono text-red-600">{v}</span></div>)}
               </div>
@@ -522,8 +531,10 @@ function PaiePage() {
               <div className="p-3 bg-orange-50 dark:bg-orange-950/20 rounded-lg space-y-1">
                 <p className="font-bold text-xs uppercase text-muted-foreground mb-2">Charges patronales</p>
                 {[
-                  ["CNSS patronal (8.98%)", fmtMAD(Number(viewBulletin.cnss_patronal))],
+                  ["CNSS patronal (8.98% + AF 6.40%)", fmtMAD(Number(viewBulletin.cnss_patronal))],
                   ["AMO patronale (4.11%)", fmtMAD(Number(viewBulletin.amo_patronal))],
+                  ["CIMR patronale", fmtMAD(Number(viewBulletin.cimr_patronal ?? 0))],
+                  ["Taxe de formation professionnelle (1.6%)", fmtMAD(Number(viewBulletin.taxe_formation_pro ?? 0))],
                   ["Coût total employeur", fmtMAD(Number(viewBulletin.cout_employeur))],
                 ].map(([l,v]) => <div key={l} className="flex justify-between"><span className="text-muted-foreground">{l}</span><span className="font-mono text-orange-600">{v}</span></div>)}
               </div>
