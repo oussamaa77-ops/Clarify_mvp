@@ -40,7 +40,7 @@ import { normaliserComptesLignes } from "@/lib/numero-compte";
 import { validerDateReglement } from "@/lib/date-reglement";
 import { proxyFetch as proxyFetchServeur } from "./proxy-fetch";
 import { modele } from "./ai-models";
-import { callDatalabOcr, datalabDisponible } from "./datalab-ocr";
+import { callChandraOcr, chandraDisponible } from "./chandra-ocr";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -221,22 +221,24 @@ async function callMistralOcr(base64: string, mimeType: string): Promise<string>
   return parts.join("\n\n");
 }
 
-// ─── OCR document : Datalab principal, Mistral OCR en secours ───────────────
+// ─── OCR document : Chandra (auto-hébergé) principal, Mistral OCR en secours ─
 // Les deux rendent du Markdown : l'aval (parsing, extraction LLM, contrôle
-// d'équilibre) ne sait pas lequel a lu le document. Datalab n'est essayé que si
-// DATALAB_API_KEY est définie ; son échec retombe sur Mistral OCR.
+// d'équilibre) ne sait pas lequel a lu le document. Chandra n'est essayé que si
+// CHANDRA_API_BASE est définie, et seulement sur une IMAGE (il ne lit pas de
+// PDF) ; son échec retombe sur Mistral OCR.
 const ocrDocumentDisponible = (): boolean =>
-  datalabDisponible() || !!process.env.MISTRAL_API_KEY;
+  chandraDisponible() || !!process.env.MISTRAL_API_KEY;
 
 async function callOcrDocument(base64: string, mimeType: string): Promise<string> {
-  if (datalabDisponible()) {
+  if (chandraDisponible() && !/pdf/i.test(mimeType)) {
     try {
-      return await callDatalabOcr(base64, mimeType, { fetchImpl: proxyFetch });
+      return await callChandraOcr(base64, mimeType, { fetchImpl: proxyFetch });
     } catch (e: any) {
       if (!process.env.MISTRAL_API_KEY) throw e;
-      console.warn("[OCR] Datalab échoué → secours Mistral OCR:", String(e?.message ?? e).slice(0, 200));
+      console.warn("[OCR] Chandra échoué → secours Mistral OCR:", String(e?.message ?? e).slice(0, 200));
     }
   }
+  if (!process.env.MISTRAL_API_KEY) throw new Error("Aucun OCR document disponible pour ce format");
   return callMistralOcr(base64, mimeType);
 }
 
@@ -343,7 +345,7 @@ async function extraireFactureIA(args: {
 
   if (process.env.MISTRAL_API_KEY) {
     try {
-      // Un scan sans couche texte passe d'abord par l'OCR document (Datalab ou Mistral).
+      // Un scan sans couche texte passe d'abord par l'OCR document (Chandra ou Mistral).
       let contenu = text;
       if (useVision && imageBase64) {
         contenu = await callOcrDocument(imageBase64, mimeType);
@@ -1901,7 +1903,7 @@ export const ocrReleve = createServerFn({ method: "POST" })
     let ocrUsedLlm = false;      // relecture mistral-large réellement appelée
     let ocrAiCalled = false;     // un appel OCR IA a bien eu lieu (Mistral OCR ou Groq vision)
 
-    // ── OPTION PRINCIPALE : OCR document (Datalab, sinon Mistral OCR) ─────────
+    // ── OPTION PRINCIPALE : OCR document (Chandra, sinon Mistral OCR) ─────────
     // Appelé EN PREMIER. S'il renvoie des transactions, on s'arrête là. Sinon
     // (clé absente, échec réseau, 0 transaction) → secours Groq vision.
     if (ocrDocumentDisponible()) {
@@ -2267,8 +2269,9 @@ export const extraireTransactionsVision = createServerFn({ method: "POST" })
     const { images } = data;
     const nbPages = images.length;
 
-    // ── OPTION PRINCIPALE : OCR document (Datalab, sinon Mistral OCR) ─────────
-    // PDF complet en un appel si fourni, sinon OCR de chaque image. On parse le
+    // ── OPTION PRINCIPALE : OCR document (Chandra, sinon Mistral OCR) ─────────
+    // PDF complet en un appel si fourni (Mistral), sinon OCR de chaque image —
+    // toujours page par page avec Chandra, qui ne lit que des images. On parse le
     // Markdown → transactions. Secours sur Vision Groq seulement si l'OCR
     // document est absent, échoue, ou ne renvoie aucune transaction.
     if (ocrDocumentDisponible()) {
@@ -2276,7 +2279,7 @@ export const extraireTransactionsVision = createServerFn({ method: "POST" })
         // OCR → on accumule le Markdown COMPLET (toutes pages) pour permettre
         // l'extraction sur l'ensemble du relevé.
         let fullMarkdown = "";
-        if (data.pdf_base64) {
+        if (data.pdf_base64 && !(chandraDisponible() && images.length > 0)) {
           fullMarkdown = await callOcrDocument(data.pdf_base64, "application/pdf");
         } else {
           for (const img of images) {
