@@ -56,7 +56,8 @@ environnement — tout doit être présent :
 **Selon les fonctionnalités utilisées**
 - OCR : `MISTRAL_API_KEY`, `GROQ_API_KEY` ; `CHANDRA_API_BASE` (facultatif, +
   `CHANDRA_API_KEY`) fait du modèle open source Chandra, auto-hébergé sur un serveur
-  GPU avec vLLM, l'OCR principal — Mistral OCR devenant le secours. Les noms de modèles se
+  GPU avec vLLM, l'OCR principal — Mistral OCR devenant le secours. Déploiement
+  serverless prêt pour Modal : voir l'en-tête de `gpu/chandra_modal.py`. Les noms de modèles se
   surchargent par variable (`MISTRAL_VISION_MODEL`, `GROQ_VISION_MODEL`…, liste dans
   `src/server/ai-models.ts`) : un modèle retiré se remplace sans redéploiement.
 - E-mail : `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_SECURE`,
