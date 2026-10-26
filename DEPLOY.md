@@ -54,7 +54,10 @@ environnement — tout doit être présent :
 - `SUPABASE_SERVICE_ROLE_KEY` — **secret** (fonctions serveur : quotas, audit, admin)
 
 **Selon les fonctionnalités utilisées**
-- OCR : `MISTRAL_API_KEY`, `GROQ_API_KEY`
+- OCR : `MISTRAL_API_KEY`, `GROQ_API_KEY` ; `DATALAB_API_KEY` (facultatif) fait de
+  Datalab l'OCR principal, Mistral OCR devenant le secours. Les noms de modèles se
+  surchargent par variable (`MISTRAL_VISION_MODEL`, `GROQ_VISION_MODEL`…, liste dans
+  `src/server/ai-models.ts`) : un modèle retiré se remplace sans redéploiement.
 - E-mail : `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_SECURE`,
   `FROM_EMAIL`, `FROM_NAME` (`SMTP_TLS_REJECT_UNAUTHORIZED` si besoin)
 - File asynchrone BullMQ : `REDIS_URL` (+ worker `npm run worker` en process séparé)

@@ -23,7 +23,7 @@ import { validerXmlUBL } from "./dgi_validator";
 import { parseInvoiceRegex, correctMontants, buildOcrPrompt } from "./factures.utils";
 import { compteTiersAuxiliaire } from "../lib/comptes-auxiliaires";
 import { imputationTresorerie, COMPTE_CAISSE_DEFAUT } from "../lib/comptes-tresorerie";
-import { PCM_MAP } from "../lib/comptabilite-bq";
+import { PCM_MAP, deriveCategorie } from "../lib/comptabilite-bq";
 // TVA au régime des encaissements : la vente crédite le compte d'ATTENTE, la
 // bascule vers la TVA collectée exigible se fait au lettrage du règlement.
 import { COMPTES_TVA } from "../services/lettrage";
@@ -39,6 +39,8 @@ import { assertEcrituresRegime, bornesExerciceActif } from "@/lib/genererEcritur
 import { normaliserComptesLignes } from "@/lib/numero-compte";
 import { validerDateReglement } from "@/lib/date-reglement";
 import { proxyFetch as proxyFetchServeur } from "./proxy-fetch";
+import { modele } from "./ai-models";
+import { callDatalabOcr, datalabDisponible } from "./datalab-ocr";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
@@ -97,8 +99,9 @@ async function proxyFetch(url: string, opts: any): Promise<Response> {
 // ─── Appel IA (Groq — SECOURS) ───────────────────────────────────────────────
 // Groq n'est plus le moteur principal : il prend le relais quand Mistral est
 // indisponible (clé absente, 429, panne, réponse inexploitable).
-// Texte : openai/gpt-oss-120b. Vision : llama-4-scout — gpt-oss-120b est
-// TEXT-ONLY, il ne peut pas remplacer le modèle vision.
+// Texte : openai/gpt-oss-120b. Vision : qwen3.8-27b (llama-4-scout est retiré
+// depuis le 17/07/2026) — gpt-oss-120b est TEXT-ONLY, il ne peut pas remplacer
+// le modèle vision. Noms surchargeables, cf. ./ai-models.
 async function callAI(
   prompt: string,
   imageBase64?: string,
@@ -110,8 +113,8 @@ async function callAI(
   if (!groqKey) throw new Error("GROQ_API_KEY manquante");
 
   const model = imageBase64
-    ? (visionModel ?? "meta-llama/llama-4-scout-17b-16e-instruct")
-    : "openai/gpt-oss-120b";
+    ? (visionModel ?? modele("groqVision"))
+    : modele("groqTexte");
 
   const userContent: any = imageBase64
     ? [
@@ -165,7 +168,7 @@ async function callAI(
     .trim();
 }
 
-// ─── Mistral OCR (mistral-ocr-latest) ────────────────────────────────────────
+// ─── Mistral OCR (modele("mistralOcr"), défaut mistral-ocr-latest) ──────────
 // OCR document dédié : renvoie le relevé en Markdown (un objet par page). On
 // concatène le Markdown de toutes les pages DANS L'ORDRE puis on le parse via
 // parseReleveMarkdown(). Journalise pour chaque page le Markdown brut et le
@@ -181,7 +184,7 @@ async function callMistralOcr(base64: string, mimeType: string): Promise<string>
     : { type: "image_url", image_url: dataUrl };
 
   const body = JSON.stringify({
-    model: "mistral-ocr-latest",
+    model: modele("mistralOcr"),
     document,
     include_image_base64: false,
   });
@@ -218,11 +221,30 @@ async function callMistralOcr(base64: string, mimeType: string): Promise<string>
   return parts.join("\n\n");
 }
 
+// ─── OCR document : Datalab principal, Mistral OCR en secours ───────────────
+// Les deux rendent du Markdown : l'aval (parsing, extraction LLM, contrôle
+// d'équilibre) ne sait pas lequel a lu le document. Datalab n'est essayé que si
+// DATALAB_API_KEY est définie ; son échec retombe sur Mistral OCR.
+const ocrDocumentDisponible = (): boolean =>
+  datalabDisponible() || !!process.env.MISTRAL_API_KEY;
+
+async function callOcrDocument(base64: string, mimeType: string): Promise<string> {
+  if (datalabDisponible()) {
+    try {
+      return await callDatalabOcr(base64, mimeType, { fetchImpl: proxyFetch });
+    } catch (e: any) {
+      if (!process.env.MISTRAL_API_KEY) throw e;
+      console.warn("[OCR] Datalab échoué → secours Mistral OCR:", String(e?.message ?? e).slice(0, 200));
+    }
+  }
+  return callMistralOcr(base64, mimeType);
+}
+
 // ─── Mistral chat (mistral-large-latest) — raisonnement texte / JSON ─────────
 // Utilisé pour la catégorisation comptable et le rapprochement facture/
 // justificatif des transactions du relevé (équivalent du callAI texte Groq,
 // mais sur Mistral). Mode JSON strict. Gère le proxy SSL d'entreprise.
-async function callMistralChat(prompt: string, maxTokens?: number, model: string = "mistral-large-latest"): Promise<string> {
+async function callMistralChat(prompt: string, maxTokens?: number, model: string = modele("mistralChat")): Promise<string> {
   const key = process.env.MISTRAL_API_KEY;
   if (!key) throw new Error("MISTRAL_API_KEY manquante");
 
@@ -252,12 +274,13 @@ async function callMistralChat(prompt: string, maxTokens?: number, model: string
   return content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
 }
 
-// ─── Mistral vision (pixtral) — lecture d'IMAGE ──────────────────────────────
+// ─── Mistral vision — lecture d'IMAGE ────────────────────────────────────────
 // callMistralChat est TEXTE seul. Ici on envoie l'IMAGE à un modèle Mistral
-// multimodal (pixtral) qui la REGARDE vraiment. Sert à lire ce que l'OCR
+// multimodal qui la REGARDE vraiment. Sert à lire ce que l'OCR
 // document (mistral-ocr) laisse de côté — typiquement l'écriture À LA MAIN.
 // Reste 100 % sur le moteur Mistral (ni Groq ni Gemini). Modèle surchargeable
-// par MISTRAL_VISION_MODEL (défaut pixtral-large-latest). Gère le proxy SSL.
+// par MISTRAL_VISION_MODEL (défaut mistral-medium-latest : pixtral-large est
+// retiré depuis le 31/05/2026). Gère le proxy SSL.
 async function callMistralVision(
   prompt: string,
   imageBase64: string,
@@ -266,7 +289,7 @@ async function callMistralVision(
 ): Promise<string> {
   const key = process.env.MISTRAL_API_KEY;
   if (!key) throw new Error("MISTRAL_API_KEY manquante");
-  const model = (process.env.MISTRAL_VISION_MODEL || "pixtral-large-latest").trim();
+  const model = modele("mistralVision");
 
   const body = JSON.stringify({
     model,
@@ -303,7 +326,7 @@ async function callMistralVision(
 //   • document scanné (pas de couche texte) → mistral-ocr-latest rend le
 //     Markdown, puis mistral-large-latest en extrait le JSON métier ;
 //   • PDF avec couche texte → un seul appel mistral-large sur le texte.
-// Secours Groq (vision llama-4-scout / texte gpt-oss-120b) si Mistral est
+// Secours Groq (vision qwen3.8 / texte gpt-oss-120b, cf. ./ai-models) si Mistral est
 // indisponible ou rend un JSON inexploitable. Retourne aussi le fournisseur
 // réellement utilisé, pour la journalisation.
 type FactureExtraction = { ai: any; provider: "mistral" | "groq" };
@@ -320,12 +343,12 @@ async function extraireFactureIA(args: {
 
   if (process.env.MISTRAL_API_KEY) {
     try {
-      // Un scan sans couche texte passe d'abord par l'OCR document Mistral.
+      // Un scan sans couche texte passe d'abord par l'OCR document (Datalab ou Mistral).
       let contenu = text;
       if (useVision && imageBase64) {
-        contenu = await callMistralOcr(imageBase64, mimeType);
-        if (!contenu.trim()) throw new Error("Mistral OCR : Markdown vide");
-        console.log(`[OCR FACTURE] mistral-ocr → ${contenu.length} chars de Markdown`);
+        contenu = await callOcrDocument(imageBase64, mimeType);
+        if (!contenu.trim()) throw new Error("OCR document : Markdown vide");
+        console.log(`[OCR FACTURE] OCR document → ${contenu.length} chars de Markdown`);
       }
       const raw = await callMistralChat(buildOcrPrompt(dossierNom, dossierIce, contenu), 4000);
       return { ai: JSON.parse(raw), provider: "mistral" };
@@ -362,8 +385,8 @@ RÈGLES :
 - Si tu ne vois AUCUNE écriture manuscrite → renvoie null.
 Réponds STRICTEMENT en JSON, sans aucun texte autour : {"notes_manuscrites": "<texte manuscrit lu>"} ou {"notes_manuscrites": null}`;
   try {
-    // Modèle VISION Mistral (pixtral) : c'est le même moteur que le reste du scan.
-    // Pas de response_format imposé sur pixtral → extraction JSON tolérante ci-dessous.
+    // Modèle VISION Mistral : c'est le même moteur que le reste du scan.
+    // Pas de response_format imposé en vision → extraction JSON tolérante ci-dessous.
     const raw = await callMistralVision(prompt, imageBase64, mimeType, 700);
     const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     const n = typeof parsed?.notes_manuscrites === "string" ? parsed.notes_manuscrites.trim() : "";
@@ -1615,7 +1638,26 @@ type PreMatch = {
   facture_num: string | null;
   justificatif_id: string | null;
   confiance: number;
+  /** Critère qui a emporté le lien : numéro de pièce, ou nom du tiers. */
+  etape?: "numero_facture" | "nom_tiers" | "justificatif_tiers";
 };
+
+const alnum = (s: unknown): string => String(s ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+/**
+ * Le numéro de la pièce figure-t-il dans le libellé bancaire ? Deux lectures :
+ * le numéro complet (« FAC-2026-0012 » ⊂ « VIR FAC20260012 ACME »), puis sa
+ * seule partie chiffrée quand elle est assez longue pour ne pas être un hasard
+ * (« FAC-2026-0012 » ⊂ « VIREMENT FACT 2026/0012 »). Un numéro court (« 12 »)
+ * ne prouve rien : il se retrouve dans n'importe quelle date ou montant.
+ */
+export function numeroDansLibelle(numero: unknown, libelle: unknown): boolean {
+  const lib = alnum(libelle);
+  const ref = alnum(numero);
+  if (ref.length >= 4 && /\d/.test(ref) && lib.includes(ref)) return true;
+  const chiffres = ref.replace(/\D/g, "");
+  return chiffres.length >= 5 && lib.includes(chiffres);
+}
 
 export function preMatchTransactions(
   transactions: any[],
@@ -1628,6 +1670,15 @@ export function preMatchTransactions(
     const montant = (tx.montant_debit ?? 0) || (tx.montant_credit ?? 0);
     const tiers   = extractTiersFromLibelle(libelle);
 
+    // Numéro de facture cité dans le libellé + montant ±2 MAD — priorité 0 :
+    // c'est la preuve la plus forte, elle ne dépend pas de l'orthographe du tiers.
+    const parNumero = (tx.montant_debit ? facturesFourn : tx.montant_credit ? facturesClient : [])
+      .find((fac) => numeroDansLibelle(fac.numero, libelle)
+        && Math.abs(montant - Number(fac.montant_restant ?? fac.montant_ttc)) <= 2);
+    if (parNumero) {
+      return { facture_id: parNumero.id, facture_num: parNumero.numero ?? null, justificatif_id: null, confiance: 97, etape: "numero_facture" };
+    }
+
     // Factures fournisseurs (débits) — priorité 1
     if (tx.montant_debit) {
       for (const fac of facturesFourn) {
@@ -1635,7 +1686,7 @@ export function preMatchTransactions(
         const restant = Number(fac.montant_restant ?? fac.montant_ttc);
         const sim     = nameSimilarity(tiers, nom);
         if (sim >= 0.70 && Math.abs(montant - restant) <= 2) {
-          return { facture_id: fac.id, facture_num: fac.numero ?? null, justificatif_id: null, confiance: Math.round(sim * 95) };
+          return { facture_id: fac.id, facture_num: fac.numero ?? null, justificatif_id: null, confiance: Math.round(sim * 95), etape: "nom_tiers" };
         }
       }
     }
@@ -1647,7 +1698,7 @@ export function preMatchTransactions(
         const restant = Number(fac.montant_restant ?? fac.montant_ttc);
         const sim     = nameSimilarity(tiers, nom);
         if (sim >= 0.70 && Math.abs(montant - restant) <= 2) {
-          return { facture_id: fac.id, facture_num: fac.numero ?? null, justificatif_id: null, confiance: Math.round(sim * 95) };
+          return { facture_id: fac.id, facture_num: fac.numero ?? null, justificatif_id: null, confiance: Math.round(sim * 95), etape: "nom_tiers" };
         }
       }
     }
@@ -1668,6 +1719,7 @@ export function preMatchTransactions(
             facture_num: leafNum,
             justificatif_id: leafId,
             confiance: Math.round(sim * 88),
+            etape: "justificatif_tiers",
           };
         }
       }
@@ -1849,13 +1901,13 @@ export const ocrReleve = createServerFn({ method: "POST" })
     let ocrUsedLlm = false;      // relecture mistral-large réellement appelée
     let ocrAiCalled = false;     // un appel OCR IA a bien eu lieu (Mistral OCR ou Groq vision)
 
-    // ── OPTION PRINCIPALE : Mistral OCR (mistral-ocr-latest) — rapide & direct ─
+    // ── OPTION PRINCIPALE : OCR document (Datalab, sinon Mistral OCR) ─────────
     // Appelé EN PREMIER. S'il renvoie des transactions, on s'arrête là. Sinon
     // (clé absente, échec réseau, 0 transaction) → secours Groq vision.
-    if (process.env.MISTRAL_API_KEY) {
+    if (ocrDocumentDisponible()) {
       try {
-        const markdown = await callMistralOcr(data.image_base64, data.mime_type);
-        ocrAiCalled = true;   // appel Mistral OCR effectué
+        const markdown = await callOcrDocument(data.image_base64, data.mime_type);
+        ocrAiCalled = true;   // appel OCR document effectué
         // Extraction LÉGÈRE : regex pour l'en-tête + 1 appel LLM si des montants
         // manquent (robuste aux changements de format de mistral-ocr). Rapide.
         const { info: mdInfo, txs: mdTxs, usedLlm } = await extractReleveLean(markdown);
@@ -2097,7 +2149,7 @@ export const ocrReleve = createServerFn({ method: "POST" })
 // ─── extraireTransactionsPage ───────────────────────────────────────────────────
 // Fallback LLM page par page : reçoit le TEXTE d'une page de relevé reconstruit
 // ligne par ligne (tri géométrique X/Y côté client) et ré-extrait les transactions
-// via Groq (llama-3.3-70b) en JSON Mode. Utilisé quand le parser regex échoue sur
+// via Groq (modèle texte, cf. ./ai-models) en JSON Mode. Utilisé quand le parser regex échoue sur
 // une page (scan CamScanner corrompu). Retourne un tableau d'objets
 // { date_operation, date_valeur, reference, libelle, montant_debit, montant_credit }
 // avec montants en number | null.
@@ -2168,7 +2220,7 @@ ${data.pageText}`;
       }))
       .filter((t: any) => t.montant_debit != null || t.montant_credit != null);
 
-    console.log(`[EXTRAIRE-PAGE] ${txs.length} transactions extraites par Groq (llama-3.3-70b)`);
+    console.log(`[EXTRAIRE-PAGE] ${txs.length} transactions extraites par Groq`);
     return txs;
   });
 
@@ -2215,20 +2267,20 @@ export const extraireTransactionsVision = createServerFn({ method: "POST" })
     const { images } = data;
     const nbPages = images.length;
 
-    // ── OPTION PRINCIPALE : Mistral OCR (mistral-ocr-latest) — rapide & direct ─
+    // ── OPTION PRINCIPALE : OCR document (Datalab, sinon Mistral OCR) ─────────
     // PDF complet en un appel si fourni, sinon OCR de chaque image. On parse le
-    // Markdown → transactions. Secours sur Vision Groq seulement si Mistral
-    // est absent, échoue, ou ne renvoie aucune transaction.
-    if (process.env.MISTRAL_API_KEY) {
+    // Markdown → transactions. Secours sur Vision Groq seulement si l'OCR
+    // document est absent, échoue, ou ne renvoie aucune transaction.
+    if (ocrDocumentDisponible()) {
       try {
         // OCR → on accumule le Markdown COMPLET (toutes pages) pour permettre
         // l'extraction sur l'ensemble du relevé.
         let fullMarkdown = "";
         if (data.pdf_base64) {
-          fullMarkdown = await callMistralOcr(data.pdf_base64, "application/pdf");
+          fullMarkdown = await callOcrDocument(data.pdf_base64, "application/pdf");
         } else {
           for (const img of images) {
-            fullMarkdown += (await callMistralOcr(img.base64, img.mime_type)) + "\n\n";
+            fullMarkdown += (await callOcrDocument(img.base64, img.mime_type)) + "\n\n";
           }
         }
         // Markdown OCR COMPLET (toutes pages) tel que renvoyé par Mistral, AVANT
@@ -2261,9 +2313,6 @@ export const extraireTransactionsVision = createServerFn({ method: "POST" })
       }
     }
 
-    // Modèle vision Groq. Alternative plus légère : "llama-3.2-11b-vision-preview".
-    // Repli automatique sur llama-4-scout si le modèle preview est indisponible.
-    const VISION_MODEL = "llama-3.2-90b-vision-preview";
 
     const prompt =
 `Tu lis l'image d'un relevé bancaire marocain. Extrais TOUTES les transactions du tableau, ligne par ligne de haut en bas.
@@ -2279,17 +2328,10 @@ Réponds UNIQUEMENT avec un tableau JSON valide (aucun texte avant ni après), u
 Si la page ne contient aucune transaction, retourne [].`;
 
     // ── Vision : Groq (secours quand Mistral OCR n'a rien renvoyé) ────────────
-    // Repli modèle preview → scout si le modèle vision principal est indisponible.
-    const callGroqVision = async (base64: string, mimeType: string): Promise<string> => {
-      try {
-        return await callAI(prompt, base64, mimeType, 4096, VISION_MODEL);
-      } catch (modelErr: any) {
-        if (/decommission|not\s*found|does not exist|400|model/i.test(modelErr?.message ?? "")) {
-          return await callAI(prompt, base64, mimeType, 4096);
-        }
-        throw modelErr;
-      }
-    };
+    // Modèle vision : modele("groqVision"). Les modèles « preview » llama-3.2 et
+    // llama-4-scout, essayés ici l'un après l'autre, sont tous deux retirés.
+    const callGroqVision = (base64: string, mimeType: string): Promise<string> =>
+      callAI(prompt, base64, mimeType, 4096);
 
     const allTxs: any[] = [];
     for (let i = 0; i < images.length; i++) {
@@ -2675,7 +2717,7 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
           // (comparer noms + montants, scoring, unicité). mistral-small bâclait → liens
           // ratés OU faux (lie sur la catégorie sans vérifier montant/nom). La vitesse
           // vient des petits lots PARALLÈLES, pas d'un modèle plus faible.
-          return await callMistralChat(p, maxOut, "mistral-large-latest");
+          return await callMistralChat(p, maxOut);
         } catch (e: any) {
           console.warn("[RELEVE AI] Mistral chat échoué — fallback Groq:", e?.message ?? e);
         }
@@ -2723,27 +2765,39 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
       }
     }
 
-    // FIX 3 : Analyse par défaut pour les transactions manquantes
+    // FIX 3 : Analyse par défaut pour les transactions que l'IA n'a pas rendues
+    // (IA indisponible, lot en échec, JSON invalide). Plutôt qu'un « autre » à
+    // 40 %, on applique les RÈGLES de catégorisation du journal de banque
+    // (deriveCategorie : CNSS, TVA, frais bancaires, télécom, loyers…) — les
+    // mêmes que l'écran Banque. Le rapprochement facture/justificatif, lui, est
+    // repris du pré-matching déterministe à la Passe 0 ci-dessous.
     const analyseDefaut = (idx: number): any => {
       const tx = data.transactions_brutes[idx];
       const montant =
         (tx?.montant_debit ?? 0) || (tx?.montant_credit ?? 0);
       const isCredit = (tx?.montant_credit ?? 0) > 0;
+      const regle = deriveCategorie(tx?.libelle ?? tx?.nature_operation ?? "", isCredit ? "credit" : "debit");
+      // Les catégories « par défaut » (encaissement client / paiement fournisseur)
+      // ne disent rien de la nature : elles restent à vérifier.
+      const reconnue = !["encaissement_client", "paiement_fournisseur"].includes(regle.categorie);
+      const ht = regle.tva > 0 && montant > 0 ? Math.round((montant / (1 + regle.tva / 100)) * 100) / 100 : montant;
       return {
         _idx: idx,
-        categorie: isCredit ? "encaissement_client" : "paiement_fournisseur",
-        code_pcm: isCredit ? "3421" : "4411",
+        categorie: regle.categorie,
+        code_pcm: regle.code,
         tiers_nom: null,
         facture_num: null,
         facture_id: null,
-        montant_ht: montant,
-        montant_tva: 0,
-        taux_tva: 0,
-        confiance: 40,
-        etape_rapprochement: "direction",
-        alerte: "Non analysé par l'IA — vérification manuelle requise",
-        necessite_remarque: true,
-        message_pour_comptable: "Transaction non couverte par l'analyse IA",
+        montant_ht: ht,
+        montant_tva: Math.round((montant - ht) * 100) / 100,
+        taux_tva: regle.tva,
+        confiance: reconnue ? 70 : 40,
+        etape_rapprochement: reconnue ? "mots_cles" : "direction",
+        alerte: reconnue ? null : "Non analysé par l'IA — vérification manuelle requise",
+        necessite_remarque: !reconnue,
+        message_pour_comptable: reconnue
+          ? "Catégorisé par règles (analyse IA indisponible pour cette ligne)."
+          : "Transaction non couverte par l'analyse IA",
       };
     };
 
@@ -2796,13 +2850,28 @@ Catégories valides: encaissement_client|paiement_fournisseur|salaires|cnss_amo|
       const groqHasMatch = !!(a.facture_id || a.justificatif_id);
       // Forcer le pré-match si Groq n'a rien trouvé ou a une confiance plus faible
       if (!groqHasMatch || (pm.confiance > (a.confiance ?? 0))) {
+        // Sans réponse de l'IA, la catégorie vient des mots-clés ; une FACTURE
+        // liée en fait un règlement de tiers (4411 au débit, 3421 au crédit).
+        const tx = data.transactions_brutes[idx];
+        const reglementTiers = pm.facture_id && !skipIdx.has(idx) && !analyseByIdx.has(idx)
+          ? {
+              ...((tx?.montant_credit ?? 0) > 0
+                ? { categorie: "encaissement_client", code_pcm: "3421" }
+                : { categorie: "paiement_fournisseur", code_pcm: "4411" }),
+              // Le règlement solde le tiers TTC : la TVA est portée par la facture.
+              montant_ht: (tx?.montant_debit ?? 0) || (tx?.montant_credit ?? 0),
+              montant_tva: 0,
+              taux_tva: 0,
+            }
+          : {};
         analyseFinale[idx] = {
           ...a,
+          ...reglementTiers,
           facture_id:      pm.facture_id,
           facture_num:     pm.facture_num,
           justificatif_id: pm.justificatif_id,
           confiance:       pm.confiance,
-          etape_rapprochement: pm.justificatif_id ? "justificatif_tiers" : "nom_tiers",
+          etape_rapprochement: pm.etape ?? (pm.justificatif_id ? "justificatif_tiers" : "nom_tiers"),
           alerte: null,
           necessite_remarque: false,
         };

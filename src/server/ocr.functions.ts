@@ -3,6 +3,7 @@ import { PCM } from "@/lib/pcm-referentiel";
 import { z } from "zod";
 import { createHash } from "crypto";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { modele } from "./ai-models";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -132,7 +133,7 @@ function scoreConfidence(result: Partial<OcrResult>): "high" | "medium" | "low" 
   return "low";
 }
 
-// ─── AI fallback (Groq llama-3.1-8b-instant — fast, text-only) ───────────────
+// ─── AI fallback (Groq, modèle texte léger — fast, text-only) ────────────────
 
 async function callAIOcr(
   _imageBase64: string,
@@ -140,7 +141,8 @@ async function callAIOcr(
   text: string,
   apiKey: string,
 ): Promise<Partial<OcrResult>> {
-  // llama-3.1-8b-instant is text-only; always send extracted text (never image).
+  // Modèle texte léger (gpt-oss-20b ; llama-3.1-8b-instant est retiré depuis le
+  // 16/08/2026). Texte seul : on envoie le texte extrait, jamais l'image.
   const prompt = `Tu es un expert OCR de factures marocaines.
 Voici le texte extrait de la facture :
 <texte>${text.slice(0, 3000)}</texte>
@@ -165,8 +167,12 @@ Extrais et retourne UNIQUEMENT ce JSON (sans markdown, sans explication) :
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "llama-3.1-8b-instant",
-      max_tokens: 1024,
+      model: modele("groqTexteLeger"),
+      // gpt-oss est un modèle à raisonnement : ses tokens de réflexion passent
+      // AVANT le JSON. Effort bas + budget large, sinon la réponse est tronquée.
+      max_tokens: 3000,
+      reasoning_effort: "low",
+      response_format: { type: "json_object" },
       messages: [{ role: "user", content: prompt }],
     }),
   });

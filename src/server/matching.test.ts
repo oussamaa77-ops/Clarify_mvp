@@ -6,6 +6,7 @@ import {
   nameSimilarity,
   normalizeTelecom,
   preMatchTransactions,
+  numeroDansLibelle,
 } from "./factures.functions";
 import { COMPTE_CAISSE_DEFAUT } from "@/lib/comptes-tresorerie";
 
@@ -408,5 +409,44 @@ describe("preMatchTransactions", () => {
   it("tableau vide → tous null", () => {
     const result = preMatchTransactions([], [], []);
     expect(result).toEqual([]);
+  });
+
+  it("numéro de facture cité dans le libellé + montant → match, même si le tiers est illisible", () => {
+    const txs = [{ libelle: "VIR RECU X7 REF FACT 2026/00124", montant_credit: 3600, montant_debit: null }];
+    const clients = [
+      { ...factureClient("cli-a", "SOCIETE ALPHA", 3600), numero: "FAC-2026-00123" },
+      { ...factureClient("cli-b", "SOCIETE BETA", 3600), numero: "FAC-2026-00124" },
+    ];
+    const result = preMatchTransactions(txs, [], clients);
+    expect(result[0]!.facture_id).toBe("cli-b");
+    expect(result[0]!.confiance).toBe(97);
+    expect(result[0]!.etape).toBe("numero_facture");
+  });
+
+  it("numéro cité mais montant différent → pas de lien par le numéro", () => {
+    const txs = [{ libelle: "VIR FAC-2026-00124 PARTIEL", montant_credit: 1000, montant_debit: null }];
+    const clients = [{ ...factureClient("cli-b", "SOCIETE BETA", 3600), numero: "FAC-2026-00124" }];
+    expect(preMatchTransactions(txs, [], clients)[0]).toBeNull();
+  });
+
+  it("un débit ne se lie jamais par numéro à une facture CLIENT", () => {
+    const txs = [{ libelle: "PRLV FAC-2026-00124", montant_debit: 3600, montant_credit: null }];
+    const clients = [{ ...factureClient("cli-b", "SOCIETE BETA", 3600), numero: "FAC-2026-00124" }];
+    expect(preMatchTransactions(txs, [], clients)[0]).toBeNull();
+  });
+});
+
+describe("numeroDansLibelle", () => {
+  it("retrouve le numéro complet ou sa partie chiffrée longue", () => {
+    expect(numeroDansLibelle("FAC-2026-0012", "VIR FAC20260012 ACME")).toBe(true);
+    expect(numeroDansLibelle("FAC-2026-0012", "VIREMENT FACT 2026/0012")).toBe(true);
+    expect(numeroDansLibelle("F/45871", "PAIEMENT 45871 FOURNISSEUR")).toBe(true);
+  });
+
+  it("un numéro court ou sans chiffre ne prouve rien", () => {
+    expect(numeroDansLibelle("12", "PAIEMENT CB 12 03 26")).toBe(false);
+    expect(numeroDansLibelle("ACME", "VIR ACME")).toBe(false);
+    expect(numeroDansLibelle("F-0012", "VIR 26 03 26 ACME")).toBe(false);
+    expect(numeroDansLibelle(null, "VIR ACME")).toBe(false);
   });
 });
