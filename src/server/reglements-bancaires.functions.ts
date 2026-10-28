@@ -79,8 +79,11 @@ export async function comptabiliserReglementsBancaires(
   const aujourdhui = opts.aujourdhui ?? new Date().toISOString().slice(0, 10);
 
   // ── Paiements et ventilations du dossier ─────────────────────────────────
+  // Pas de `ventilation_id` ici : la colonne n'existe qu'après 20261028120000,
+  // et la lire bloquait TOUTE la passe (lettrage, TVA) tant que la migration
+  // n'était pas appliquée — alors que rien ci-dessous ne s'en sert.
   const { data: pai, error: ePai } = await sb.from("paiements")
-    .select("id,facture_id,facture_fournisseur_id,montant,date_paiement,origine,transaction_id,ventilation_id")
+    .select("id,facture_id,facture_fournisseur_id,montant,date_paiement,origine,transaction_id")
     .eq("dossier_id", dossierId);
   if (ePai) { res.avertissements.push(`Paiements illisibles : ${ePai.message}`); return res; }
   const paiements = (pai ?? []) as any[];
