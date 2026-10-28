@@ -3076,7 +3076,7 @@ export const matcherDocumentAvecTransactions = createServerFn({ method: "POST" }
 
     const { data: txs } = await sb
       .from("transactions_bancaires")
-      .select("id, date_operation, libelle, type, montant")
+      .select("id, date_operation, libelle, type, montant, releve_id")
       .eq("dossier_id", data.dossier_id)
       .eq("statut", "ouvert");
 
@@ -3180,7 +3180,13 @@ export const matcherDocumentAvecTransactions = createServerFn({ method: "POST" }
       }
 
       console.log(`[MATCH] tx ${tx.date_operation} "${(tx.libelle || "").slice(0, 40)}" ${montantTx} MAD → score ${score} (numéro:${numeroMatch ? "✓" : "✗"})`);
-      if (score > bestScore) { bestScore = score; bestTx = tx; }
+      // À score égal, la ligne qui appartient à un RELEVÉ l'emporte : une ligne
+      // sans relevé (reliquat d'un relevé supprimé, doublon d'import) ne sera
+      // jamais clôturée, donc jamais passée en BQ — la facture serait « payée »
+      // sans écriture de banque, ni lettrage, ni TVA (FA-2024-0078, 29/10/2026).
+      if (score > bestScore || (score === bestScore && bestTx && !bestTx.releve_id && tx.releve_id)) {
+        bestScore = score; bestTx = tx;
+      }
     }
 
     console.log(`[MATCH] doc ${data.document_type} ${data.montant_ttc} MAD pièce="${data.numero_piece}" | ${txs.length} tx ouvertes | meilleur score: ${bestScore}/80${bestTx ? ` → "${(bestTx.libelle || "").slice(0, 40)}"` : ""}`);
