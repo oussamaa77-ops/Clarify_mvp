@@ -759,8 +759,24 @@ export const generateFactureXml = createServerFn({ method: "POST" })
         .eq("dossier_id", facture.dossier_id)
         .eq("reference_piece", String(ref));
 
+      // DÉROGATION TEMPORAIRE (test rapprochement tardif, Smart Water, 28/10/2026) :
+      // les factures listées dans CUTOFF_DEROGATION_FACTURES (UUID ou numéros de
+      // facture séparés par des virgules — le numéro survit à une suppression
+      // suivie d'un nouveau scan, l'UUID non) sont contrôlées sur l'exercice
+      // de LEUR date — « rouvrir l'exercice N » — et non sur celui de l'horloge. Le cut-off et l'unicité
+      // restent actifs. À RETIRER après le test (vider la variable suffit).
+      const derogations = String(process.env.CUTOFF_DEROGATION_FACTURES ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const anneePiece = Number(String(facture.date_facture ?? "").slice(0, 4));
+      const exerciceDeroge = (derogations.includes(facture.id) || derogations.includes(String(facture.numero ?? "").trim())) && Number.isFinite(anneePiece) && anneePiece > 1900
+        ? anneePiece
+        : null;
+      if (exerciceDeroge) {
+        console.warn(`[cut-off] DÉROGATION facture ${facture.id} (${ref}) : contrôlée sur l'exercice ${exerciceDeroge}`);
+      }
+
       assertEcrituresRegime(ecrituresVente, {
-        bornes: bornesExerciceActif((facture as any).dossiers ?? null),
+        bornes: bornesExerciceActif((facture as any).dossiers ?? null, new Date(), exerciceDeroge),
         existantes: (refsExistantes ?? []) as any[],
       });
     }
