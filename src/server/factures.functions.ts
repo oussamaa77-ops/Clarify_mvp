@@ -807,6 +807,26 @@ export const generateFactureXml = createServerFn({ method: "POST" })
       // était archivée et réputée comptabilisée sans aucune écriture VTE.
       const { error: eVte } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresVente));
       if (eVte) throw new Error(`Écritures de vente refusées : ${eVte.message}`);
+
+      // Règlement DÉJÀ constaté : la validation du scan rapproche la facture
+      // d'une ligne de relevé alors qu'elle n'est encore qu'un brouillon, sans
+      // aucune écriture VTE. La passe comptable du rapprochement n'avait donc
+      // rien à lettrer, et personne ne la relançait après l'émission : facture
+      // « payée », 342x jamais soldé, ligne BQ en attente, TVA jamais basculée
+      // (FA-2024-0078, 28/10/2026). Les écritures VTE existent désormais : on
+      // rattache, on lettre, on rend la TVA exigible. Best-effort — la facture
+      // est émise, un échec ici se rattrape par « Lettrage auto » en Banque.
+      try {
+        const { comptabiliserReglementsBancaires } = await import("./reglements-bancaires.functions");
+        const r = await comptabiliserReglementsBancaires(supabase, facture.dossier_id);
+        if (r.codes.length || r.lignesVentilees || r.tvaBasculee) {
+          const { synchroniserApresLettrage } = await import("./factures-gl.functions");
+          await synchroniserApresLettrage(supabase, facture.dossier_id).catch(() => null);
+        }
+        if (r.avertissements.length) console.warn("[efacture] règlements :", r.avertissements.join(" | "));
+      } catch (e) {
+        console.warn("[efacture] passe règlements ignorée :", (e as any)?.message ?? e);
+      }
       await supabase.from("ged_documents").insert({
         dossier_id: facture.dossier_id,
         facture_id: facture.id,
