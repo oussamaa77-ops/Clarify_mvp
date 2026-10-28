@@ -242,7 +242,7 @@ export const getPostesTiers = createServerFn({ method: "POST" })
  * versement ne basculerait que 50 (la moitié du reste) au lieu de 100, et 50 de
  * TVA resteraient éternellement en attente sur une facture pourtant soldée.
  */
-async function tvaEnAttenteDeLaPiece(
+export async function tvaEnAttenteDeLaPiece(
   sb: any, dossierId: string, reference: string, sens: SensTiers,
 ): Promise<{ tvaAttente: number; tvaTotale: number; ttcPiece: number }> {
   // `referencesPiece` ajoute la référence du RECLASSEMENT (RECLASS-TVA-<ref>) :

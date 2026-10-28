@@ -16,6 +16,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { analyserReleveIA, extraireTransactionsVision } from "@/server/factures.functions";
 import { lettrerDossier, getRapprochementGL, lierTransactionEcriture } from "@/server/lettrage.functions";
 import type { OpenLedgerItem } from "@/server/lettrage.functions";
+import { finaliserReglementsBancaires, ventilerTransaction, proposerVentilationTransaction } from "@/server/reglements-bancaires.functions";
 import { PCM_MAP, RX_VIREMENT_INTERNE, deriveCategorie, genererLignesBQ } from "@/lib/comptabilite-bq";
 import { PCM, RACINES_PCM, estCompteFraisBancaires } from "@/lib/pcm-referentiel";
 import { extractRibMarocain } from "@/lib/releve-attijari";
@@ -597,6 +598,9 @@ function BanquePage() {
   const { dossierId } = Route.useParams();
   const analyserFn = useServerFn(analyserReleveIA);
   const lettrerFn = useServerFn(lettrerDossier);
+  const finaliserFn = useServerFn(finaliserReglementsBancaires);
+  const ventilerFn = useServerFn(ventilerTransaction);
+  const proposerVentilFn = useServerFn(proposerVentilationTransaction);
   // Si une sous-route (détail d'un relevé /banque/$releveId) est active, on lui cède
   // entièrement l'affichage via <Outlet/> (cf. early-return avant le rendu principal).
   const childMatches = useChildMatches();
@@ -617,6 +621,9 @@ function BanquePage() {
   const [liaisonDocId, setLiaisonDocId] = useState("");
   const [liaisonLibelle, setLiaisonLibelle] = useState("");
   const [liaisonMontant, setLiaisonMontant] = useState(0);
+  // Répartition d'une ligne sur plusieurs factures : { facture_id → montant réglé }.
+  const [ventilMode, setVentilMode] = useState(false);
+  const [ventilParts, setVentilParts] = useState<Record<string, number>>({});
   const [rematchLoading, setRematchLoading] = useState(false);
   const [cloturerLoading, setCloturerLoading] = useState(false);
   const [selectedTxIds, setSelectedTxIds] = useState<Set<string>>(new Set());
@@ -1425,6 +1432,7 @@ function BanquePage() {
       }
 
       toast.success(`Écritures Sage générées — ${txExtraites.length} transactions clôturées`);
+      await comptabiliserApresCloture();
       setScanStep("done");
       load();
       if(releveCompteId){setSelectedId(releveCompteId);loadTx(releveCompteId);}
@@ -1625,6 +1633,62 @@ function BanquePage() {
     toast.success("Bilan Sage généré");
   };
 
+  const fermerLiaison = () => {
+    setLiaisonTx(null); setLiaisonDocType(""); setLiaisonDocId("");
+    setVentilMode(false); setVentilParts({});
+  };
+
+  // ── Une ligne de relevé, plusieurs factures (ou une tranche) ────────────────
+  const facturesVentilables = (liaisonDocType === "facture_fournisseur" ? facturesFourn : facturesClient) as any[];
+  const totalVentil = Math.round(Object.values(ventilParts).reduce((s, m) => s + (Number(m) || 0), 0) * 100) / 100;
+
+  const proposerVentil = async () => {
+    if (!liaisonTx) return;
+    try {
+      const r = await proposerVentilFn({ data: { dossierId, transactionId: liaisonTx.id } });
+      if (r.parts?.length) {
+        setVentilParts(Object.fromEntries(r.parts.map((p) => [p.facture_id, p.montant])));
+        toast.info(`Répartition proposée sur ${r.parts.length} facture(s) — vérifiez avant d'enregistrer`);
+      }
+    } catch { /* pas de proposition : saisie libre */ }
+  };
+
+  const handleVentiler = async () => {
+    if (!liaisonTx) return;
+    const parts = Object.entries(ventilParts)
+      .filter(([, m]) => Number(m) > 0)
+      .map(([facture_id, montant]) => ({ facture_id, montant: Math.round(Number(montant) * 100) / 100 }));
+    if (!parts.length) return toast.error("Saisissez le montant réglé sur au moins une facture");
+    if (totalVentil > Math.abs(liaisonTx.montant) + 0.01) return toast.error("La répartition dépasse le montant de la ligne");
+    for (const p of parts) {
+      const f = facturesVentilables.find((x) => x.id === p.facture_id);
+      const restant = Number(f?.montant_restant ?? f?.montant_ttc ?? 0);
+      if (f && p.montant > restant + 1) return toast.error(`${f.numero || "Facture"} : ${fmt(p.montant)} dépasse le restant dû (${fmt(restant)})`);
+    }
+    const res = await ventilerFn({ data: { dossierId, transactionId: liaisonTx.id, parts } });
+    if (!res.ok) return toast.error(res.reason ?? "Répartition refusée");
+    const c = res.compta;
+    toast.success(`Ligne répartie sur ${parts.length} facture(s)`
+      + (c?.codes.length ? ` — lettrage ${c.codes.join(", ")}` : "")
+      + (c?.tvaBasculee ? ` — TVA exigible ${fmt(c.tvaBasculee)}` : ""));
+    (c?.avertissements ?? []).forEach((a) => toast.warning(a));
+    fermerLiaison();
+    load();
+    if (selectedId) loadTx(selectedId);
+  };
+
+  // Après une clôture : les lignes BQ existent enfin, on peut les rattacher à
+  // leurs factures, lettrer et rendre exigible la TVA des encaissements.
+  const comptabiliserApresCloture = async () => {
+    try {
+      const r = await finaliserFn({ data: { dossierId } });
+      if (r.codes.length || r.tvaBasculee) {
+        toast.success(`Lettrage ${r.codes.join(", ") || "—"} · TVA rendue exigible ${fmt(r.tvaBasculee)}`);
+      }
+      r.avertissements.forEach((a) => toast.warning(a));
+    } catch { /* relevé clôturé quand même ; la passe se rejoue au prochain lettrage */ }
+  };
+
   const handleSauvegarderLiaison = async () => {
     if (!liaisonTx) return;
     const ferme = liaisonStatut === "ferme";
@@ -1645,6 +1709,10 @@ function BanquePage() {
     } else if (!ferme) {
       txUpd.facture_id = null; txUpd.justificatif_id = null; txUpd.document_type = null;
     }
+    // Une liaison saisie ici REMPLACE toute répartition antérieure de la ligne :
+    // sans cela, synchroniser_paiements_dossier continuerait de lire l'ancienne
+    // ventilation et ignorerait le document qu'on vient de choisir.
+    await (supabase.from("ventilations_transaction" as any) as any).delete().eq("transaction_id", liaisonTx.id);
     await (supabase.from("transactions_bancaires") as any)
       .update(txUpd)
       .eq("id", liaisonTx.id);
@@ -1652,6 +1720,9 @@ function BanquePage() {
     // Paiements dérivés reconstruits depuis le nouvel état du lien (le trigger recalcule
     // la facture). `recLiaison=false` avant migration → repli sur l'ancien calcul direct.
     const recLiaison = await reconcilierPaiements(supabase, dossierId);
+    // Grand livre : ligne BQ rattachée à sa pièce, lettrage, TVA des encaissements
+    // partiels (ou contrepassation si la ligne vient d'être déliée).
+    await finaliserFn({ data: { dossierId } }).catch(() => null);
 
     // Détachement (fermé → ouvert) : restituer l'état du document précédemment lié,
     // sinon le justificatif reste "rapproché" en base et disparaît des listes de liaison
@@ -1777,7 +1848,8 @@ function BanquePage() {
         .in("id", txAcloturer.map(t => t.id));
 
       const nbOrphelines = txAcloturer.filter(t => !t.facture_id && !t.justificatif_id).length;
-      toast.success(`${txAcloturer.length} transactions clôturées — ${ecritures.length} écritures générées${nbOrphelines ? ` (dont ${nbOrphelines} en compte d'attente 471)` : ""}`);
+      toast.success(`${txAcloturer.length} transactions clôturées — ${ecritures.length} écritures générées${nbOrphelines ? ` (dont ${nbOrphelines} en compte d'attente 3497/4497)` : ""}`);
+      await comptabiliserApresCloture();
       loadTx(selectedId);
     } catch (e: any) { toast.error(e.message); }
     finally { setCloturerLoading(false); }
@@ -2375,8 +2447,8 @@ function BanquePage() {
             </>
           )}
         {/* Dialog modifier liaison */}
-        <Dialog open={!!liaisonTx} onOpenChange={o=>{if(!o){setLiaisonTx(null);setLiaisonDocType("");setLiaisonDocId("");}}}>
-          <DialogContent className="max-w-md">
+        <Dialog open={!!liaisonTx} onOpenChange={o=>{if(!o)fermerLiaison();}}>
+          <DialogContent className={ventilMode?"max-w-xl":"max-w-md"}>
             <DialogHeader><DialogTitle>Modifier la transaction</DialogTitle></DialogHeader>
             <div className="space-y-4 py-2">
               <div className="space-y-2">
@@ -2404,7 +2476,7 @@ function BanquePage() {
                   <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Lier à un document (optionnel)</Label>
                   <div className="space-y-2">
                     <Label className="text-sm">Type</Label>
-                    <Select value={liaisonDocType||"none"} onValueChange={v=>{setLiaisonDocType((v==="none"?"":v) as any);setLiaisonDocId("");}}>
+                    <Select value={liaisonDocType||"none"} onValueChange={v=>{setLiaisonDocType((v==="none"?"":v) as any);setLiaisonDocId("");setVentilMode(false);setVentilParts({});}}>
                       <SelectTrigger><SelectValue placeholder="— aucun document —"/></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="none">— aucun document —</SelectItem>
@@ -2414,7 +2486,49 @@ function BanquePage() {
                       </SelectContent>
                     </Select>
                   </div>
-                  {liaisonDocType==="facture_client"&&(
+                  {(liaisonDocType==="facture_client"||liaisonDocType==="facture_fournisseur")&&(
+                    <label className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input type="checkbox" checked={ventilMode}
+                        onChange={e=>{setVentilMode(e.target.checked);setVentilParts({});if(e.target.checked)proposerVentil();}}/>
+                      Cette ligne règle plusieurs factures, ou une tranche
+                    </label>
+                  )}
+                  {ventilMode&&(liaisonDocType==="facture_client"||liaisonDocType==="facture_fournisseur")&&(
+                    <div className="space-y-2">
+                      <div className="max-h-60 overflow-y-auto border rounded-md bg-background divide-y">
+                        {facturesVentilables.length===0&&(
+                          <p className="text-xs text-muted-foreground p-2">Aucune facture ouverte.</p>
+                        )}
+                        {facturesVentilables.map((f:any)=>{
+                          const restant=Number(f.montant_restant??f.montant_ttc);
+                          return (
+                            <div key={f.id} className="flex items-center gap-2 px-2 py-1.5 text-xs">
+                              <div className="flex-1 min-w-0">
+                                <div className="font-medium truncate">{f.numero||f.id.slice(0,8)} — {f.clients?.nom||f.fournisseur_nom||"Tiers"}</div>
+                                <div className="text-muted-foreground">TTC {fmt(Number(f.montant_ttc))} · reste {fmt(restant)}</div>
+                              </div>
+                              <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs"
+                                onClick={()=>setVentilParts(p=>({...p,[f.id]:Math.min(restant,Math.max(0,Math.round((Math.abs(liaisonMontant)-totalVentil+(p[f.id]||0))*100)/100))}))}
+                                title="Imputer le reste de la ligne sur cette facture">Reste</Button>
+                              <Input type="number" step="0.01" min="0" className="h-7 w-28 text-right"
+                                value={ventilParts[f.id]??""} placeholder="0,00"
+                                onChange={e=>setVentilParts(p=>({...p,[f.id]:parseFloat(e.target.value)||0}))}/>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="flex justify-between text-xs font-medium">
+                        <span>Réparti</span>
+                        <span className={totalVentil>Math.abs(liaisonMontant)+0.01?"text-red-600":Math.abs(totalVentil-Math.abs(liaisonMontant))<=0.01?"text-green-700":"text-amber-600"}>
+                          {fmt(totalVentil)} / {fmt(Math.abs(liaisonMontant))}
+                        </span>
+                      </div>
+                      {totalVentil>0.01&&totalVentil<Math.abs(liaisonMontant)-0.01&&(
+                        <p className="text-xs text-muted-foreground">Le reliquat de {fmt(Math.abs(liaisonMontant)-totalVentil)} restera au compte d'attente.</p>
+                      )}
+                    </div>
+                  )}
+                  {!ventilMode&&liaisonDocType==="facture_client"&&(
                     <div className="space-y-2">
                       <Label className="text-sm">Facture client</Label>
                       <Select value={liaisonDocId} onValueChange={setLiaisonDocId}>
@@ -2429,7 +2543,7 @@ function BanquePage() {
                       </Select>
                     </div>
                   )}
-                  {liaisonDocType==="facture_fournisseur"&&(
+                  {!ventilMode&&liaisonDocType==="facture_fournisseur"&&(
                     <div className="space-y-2">
                       <Label className="text-sm">Facture fournisseur</Label>
                       <Select value={liaisonDocId} onValueChange={setLiaisonDocId}>
@@ -2463,8 +2577,10 @@ function BanquePage() {
               )}
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={()=>{setLiaisonTx(null);setLiaisonDocType("");setLiaisonDocId("");}}>Annuler</Button>
-              <Button onClick={handleSauvegarderLiaison}>Enregistrer</Button>
+              <Button variant="outline" onClick={fermerLiaison}>Annuler</Button>
+              {ventilMode
+                ? <Button onClick={handleVentiler}>Enregistrer la répartition</Button>
+                : <Button onClick={handleSauvegarderLiaison}>Enregistrer</Button>}
             </DialogFooter>
           </DialogContent>
         </Dialog>

@@ -11,6 +11,7 @@ import { ArrowLeft, Loader2, RefreshCw, TrendingUp, TrendingDown, FileText, Exte
 import { toast } from "sonner";
 import { useServerFn } from "@tanstack/react-start";
 import { lettrerDossier } from "@/server/lettrage.functions";
+import { finaliserReglementsBancaires } from "@/server/reglements-bancaires.functions";
 import { deriveCategorie, genererLignesBQ, PCM_MAP } from "@/lib/comptabilite-bq";
 import { assertEcrituresTresorerie, transactionsDejaEnTresorerie } from "@/lib/integrite-tresorerie";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
@@ -71,6 +72,7 @@ const TYPE_DOC_LBL: Record<string, string> = {
 function ReleveDetailPage() {
   const { dossierId, releveId } = Route.useParams();
   const lettrerFn = useServerFn(lettrerDossier);
+  const finaliserFn = useServerFn(finaliserReglementsBancaires);
 
   const [releve, setReleve] = useState<Releve | null>(null);
   const [txs, setTxs] = useState<Tx[]>([]);
@@ -239,7 +241,13 @@ function ReleveDetailPage() {
       await (supabase.from("releves_bancaires") as any).update({ statut: "cloture" }).eq("id", releveId);
 
       const nbOrphelines = txAcloturer.filter((t) => !t.facture_id && !t.justificatif_id).length;
-      toast.success(`${txAcloturer.length} transaction(s) clôturée(s) — ${ecritures.length} écriture(s) générée(s)${nbOrphelines ? ` (dont ${nbOrphelines} en compte d'attente 471)` : ""}`);
+      toast.success(`${txAcloturer.length} transaction(s) clôturée(s) — ${ecritures.length} écriture(s) générée(s)${nbOrphelines ? ` (dont ${nbOrphelines} en compte d'attente 3497/4497)` : ""}`);
+      // Les lignes BQ existent enfin : rattachement aux factures, lettrage, TVA.
+      try {
+        const r = await finaliserFn({ data: { dossierId } });
+        if (r.codes.length || r.tvaBasculee) toast.success(`Lettrage ${r.codes.join(", ") || "—"} · TVA rendue exigible ${r.tvaBasculee.toFixed(2)} MAD`);
+        r.avertissements.forEach((a) => toast.warning(a));
+      } catch { /* la passe se rejoue au prochain lettrage */ }
       await load();
     } catch (e: any) { toast.error(e.message); }
     finally { setCloturerLoading(false); }

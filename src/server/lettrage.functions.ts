@@ -15,6 +15,7 @@ import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { CLIENT_PREFIXES, FOURNISSEUR_PREFIXES } from "@/lib/import-grandlivre";
 import { proxyFetch } from "./proxy-fetch";
+import { proposerVentilation, type FactureOuverte } from "@/lib/ventilation";
 
 // fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
 
@@ -313,10 +314,48 @@ export const lettrerDossier = createServerFn({ method: "POST" })
     const used = { fc: new Set<string>(), ff: new Set<string>(), j: new Set<string>(), e: new Set<string>() };
     const details: Array<{ txId: string; kind: DocKind; docId: string }> = [];
 
-    for (const tx of txCibles) {
+    // Ordre CHRONOLOGIQUE : la tranche de septembre doit être imputée avant le
+    // virement d'octobre qui solde la même facture, sinon le restant dû que lit
+    // la ventilation est faux.
+    const txTries = [...txCibles].sort((a: any, b: any) =>
+      String(a.date_operation ?? "").localeCompare(String(b.date_operation ?? "")));
+
+    for (const tx of txTries) {
       // Arbitrage passé/présent injecté au matcher (réordonne les sources de candidats).
       const m = matchTransactionDeterministe({ ...tx, estPasse: estPasse(tx.date_operation) }, cand, used);
-      if (!m) continue;
+      if (!m) {
+        // Pas de facture « un pour un » : la ligne règle-t-elle une TRANCHE d'une
+        // facture citée, ou PLUSIEURS factures ? (cf. src/lib/ventilation.ts)
+        if (tx.rapproche || estPasse(tx.date_operation)) continue;
+        const isCr = tx.type === "credit";
+        const source = isCr ? cand.facturesClient : cand.facturesFourn;
+        const ouvertes: FactureOuverte[] = source.map((f: any) => ({
+          id: f.id, numero: f.numero, date_facture: f.date_facture,
+          restant: Math.round(Number(f.montant_restant ?? f.montant_ttc) * 100) / 100,
+          tiers: isCr ? f.clients?.nom : f.fournisseur_nom,
+        })).filter((f) => f.restant > 0.005 && (!f.date_facture || !tx.date_operation || f.date_facture <= tx.date_operation));
+        const parts = proposerVentilation(tx, ouvertes);
+        if (!parts) continue;
+        const kind = isCr ? "facture_client" : "facture_fournisseur";
+        if (parts.length === 1) {
+          const { data: ok, error } = await (supabase as any).rpc("lier_transaction", {
+            p_tx_id: tx.id, p_doc_id: parts[0].facture_id, p_doc_kind: kind,
+          });
+          if (error || ok !== true) continue;
+        } else {
+          const { error } = await (supabase as any).rpc("ventiler_transaction", {
+            p_tx_id: tx.id, p_kind: isCr ? "client" : "fournisseur", p_lignes: parts,
+          });
+          if (error) { console.warn("[LETTRAGE] ventilation refusée :", error.message); continue; }
+        }
+        // Restants mis à jour pour les lignes suivantes du lot.
+        for (const p of parts) {
+          const f = source.find((x: any) => x.id === p.facture_id);
+          if (f) f.montant_restant = Math.round((Number(f.montant_restant ?? f.montant_ttc) - p.montant) * 100) / 100;
+        }
+        for (const p of parts) details.push({ txId: tx.id, kind, docId: p.facture_id });
+        continue;
+      }
 
       // Poste ouvert du Grand Livre : lettrage par estampillage de transaction_id
       // sur les écritures du groupe (WHERE transaction_id IS NULL → idempotent).
@@ -349,6 +388,11 @@ export const lettrerDossier = createServerFn({ method: "POST" })
         if (m.kind === "facture_client") used.fc.add(m.id);
         else if (m.kind === "facture_fournisseur") used.ff.add(m.id);
         else used.j.add(m.id);
+        if (m.kind !== "justificatif") {
+          const src = m.kind === "facture_client" ? cand.facturesClient : cand.facturesFourn;
+          const f = src.find((x: any) => x.id === m.id);
+          if (f) f.montant_restant = Math.round((Number(f.montant_restant ?? f.montant_ttc) - Number(tx.montant)) * 100) / 100;
+        }
         details.push({ txId: tx.id, kind: m.kind, docId: m.id });
       }
     }
@@ -364,9 +408,11 @@ export const lettrerDossier = createServerFn({ method: "POST" })
       try {
         // Appel DIRECT au cœur : la server function ne rendrait rien à un
         // appelant serveur, et les codes posés seraient perdus.
-        const { executerLettrageAuto } = await import("./lettrage-compta.functions");
-        const r = await executerLettrageAuto(supabase, { dossierId: data.dossierId });
-        if (r.ok) lettresComptables = r.codes;
+        // Rattachement des lignes BQ à leurs pièces (découpage des lignes
+        // ventilées), lettrage, puis TVA des encaissements partiels.
+        const { comptabiliserReglementsBancaires } = await import("./reglements-bancaires.functions");
+        const r = await comptabiliserReglementsBancaires(supabase, data.dossierId);
+        lettresComptables = r.codes;
       } catch (e) {
         console.warn("[LETTRAGE] passe comptable ignorée :", (e as any)?.message ?? e);
       }

@@ -830,11 +830,23 @@ export function apparierAutomatiquement(lignes: LigneLettrable[]): LigneLettrabl
   }
 
   // 2) Montant exact et unique en face.
+  //
+  // Les références peuvent différer — une ligne de banque porte souvent le
+  // libellé du relevé, pas le numéro de facture. Mais une ligne qui porte la
+  // référence d'une AUTRE pièce du compte lui est rattachée : un versement
+  // partiel de FA-0102 ne doit pas solder FA-0107 au seul motif du montant.
+  const refDe = (l: LigneLettrable) => String(l.reference_piece ?? "").trim();
+  const refsDebit = new Set(debits.map(refDe).filter(Boolean));
+  const refsCredit = new Set(credits.map(refDe).filter(Boolean));
+  const rattacheeAilleurs = (d: LigneLettrable, c: LigneLettrable) => {
+    const rd = refDe(d), rc = refDe(c);
+    return !!rd && !!rc && rd !== rc && (refsDebit.has(rc) || refsCredit.has(rd));
+  };
   for (const d of debits) {
     if (consommees.has(d.id)) continue;
     const montant = n(d.debit);
     const enFace = credits.filter((c) =>
-      !consommees.has(c.id) && Math.abs(n(c.credit) - montant) <= TOLERANCE_LETTRAGE);
+      !consommees.has(c.id) && Math.abs(n(c.credit) - montant) <= TOLERANCE_LETTRAGE && !rattacheeAilleurs(d, c));
     if (enFace.length !== 1) continue;      // ambigu → laissé au comptable
     const paire = [d, enFace[0]];
     if (!controlerEquilibre(paire).ok) continue;

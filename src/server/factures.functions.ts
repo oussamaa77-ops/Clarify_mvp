@@ -665,28 +665,17 @@ export const generateFactureXml = createServerFn({ method: "POST" })
       clefSecreteFacturation(),
     );
 
-    const transmission = await moteurEfacture.transmettre(data.facture_id);
-    const conforme = transmission.succes;
-    const dgi_uuid = transmission.dgi_uuid;
-    const hash = transmission.hash_sha256 ?? "";
-    const erreurs = (transmission.erreurs as { message: string }[]).map((e) => e.message);
-    const dgi_response = {
-      statut: transmission.statut,
-      message: transmission.message,
-      erreurs: transmission.erreurs,
-      avertissements: transmission.avertissements,
-    };
-
-    // Le XML est relu plutôt que reconstruit : c'est l'octet EXACT qui vient
-    // d'être scellé et transmis qui doit être rendu à l'appelant.
-    const { data: apresTransmission } = await supabase
-      .from("factures")
-      .select("xml_ubl")
-      .eq("id", data.facture_id)
-      .maybeSingle();
-    const xml = (apresTransmission as any)?.xml_ubl ?? "";
-
-    if (conforme && Number(facture.montant_ttc) > 0) {
+    // ─── Contrôles COMPTABLES, AVANT tout scellement ─────────────────────────
+    // La vente est construite et contrôlée (cut-off d'exercice, unicité de la
+    // référence, schéma acompte / solde) AVANT d'être scellée et transmise.
+    // Dans l'ordre inverse, un refus comptable arrivait trop tard : la facture
+    // était déjà « conforme », porteuse d'un UUID DGI, sans aucune écriture VTE —
+    // puis rapprochée d'un virement et réputée payée (FA-2024-0078, 28/10/2026).
+    // Une facture qui ne peut pas être comptabilisée ne doit pas être émise.
+    // Une facture DÉJÀ conforme n'est pas recomptabilisée : la transmission la
+    // refuse d'elle-même, et le contrôle d'unicité la rejetterait à tort.
+    let ecrituresVente: ReturnType<typeof lignesEcrituresVente> | null = null;
+    if (Number(facture.montant_ttc) > 0 && (facture as any).statut !== "conforme") {
       const ref = facture.numero ?? facture.id;
       // Ligne 3 — compte de TIERS : auxiliaire du client (C0002 → 34210002) si sa
       // fiche porte un code, sinon le collectif 3421. Le lettrage et la balance
@@ -739,7 +728,7 @@ export const generateFactureXml = createServerFn({ method: "POST" })
           .neq("id", facture.id);
         montantAcomptesHt = (acomptes ?? []).reduce((s: number, a: any) => s + (Number(a.montant_ht) || 0), 0);
       }
-      const ecrituresVente = lignesEcrituresVente({
+      ecrituresVente = lignesEcrituresVente({
         dossier_id: facture.dossier_id,
         facture_id: facture.id,
         reference: String(ref),
@@ -754,7 +743,7 @@ export const generateFactureXml = createServerFn({ method: "POST" })
       });
       assertLignesVente(ecrituresVente, typeVente);
 
-      // Cut-off + unicité de la référence, juste avant l'insert.
+      // Cut-off + unicité de la référence, avant le scellement (cf. ci-dessus).
       //
       // Le cut-off oppose la date de la pièce aux bornes de l'exercice ACTIF —
       // celui de l'horloge, resserré au premier exercice par la date de début
@@ -774,6 +763,30 @@ export const generateFactureXml = createServerFn({ method: "POST" })
         bornes: bornesExerciceActif((facture as any).dossiers ?? null),
         existantes: (refsExistantes ?? []) as any[],
       });
+    }
+
+    const transmission = await moteurEfacture.transmettre(data.facture_id);
+    const conforme = transmission.succes;
+    const dgi_uuid = transmission.dgi_uuid;
+    const hash = transmission.hash_sha256 ?? "";
+    const erreurs = (transmission.erreurs as { message: string }[]).map((e) => e.message);
+    const dgi_response = {
+      statut: transmission.statut,
+      message: transmission.message,
+      erreurs: transmission.erreurs,
+      avertissements: transmission.avertissements,
+    };
+
+    // Le XML est relu plutôt que reconstruit : c'est l'octet EXACT qui vient
+    // d'être scellé et transmis qui doit être rendu à l'appelant.
+    const { data: apresTransmission } = await supabase
+      .from("factures")
+      .select("xml_ubl")
+      .eq("id", data.facture_id)
+      .maybeSingle();
+    const xml = (apresTransmission as any)?.xml_ubl ?? "";
+
+    if (conforme && ecrituresVente) {
       // Erreur RENDUE par Supabase, pas levée : sans ce contrôle, la facture
       // était archivée et réputée comptabilisée sans aucune écriture VTE.
       const { error: eVte } = await supabase.from("ecritures_comptables").insert(normaliserComptesLignes(ecrituresVente));
