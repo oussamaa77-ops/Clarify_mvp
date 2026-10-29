@@ -4,7 +4,7 @@ import { compteTiersAuxiliaire, suffixeAuxiliaire } from "@/lib/comptes-auxiliai
 import { synthetiserBalance, ventilerSolde, type LigneBalance as LigneBalanceLib } from "@/lib/balance-comptable";
 import { normaliserNumeroCompte } from "@/lib/numero-compte";
 import { validatePcmAccount } from "@/lib/pcm-referentiel";
-import { bornesExercice, exerciceParDefaut, exercicesDisponibles } from "@/lib/exercice-comptable";
+import { bornesExercice, exerciceParDefaut, exercicesDisponibles, lireDatesEcritures } from "@/lib/exercice-comptable";
 import { JOURNAL_AN, sansANouveaux } from "@/lib/a-nouveaux";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -122,8 +122,8 @@ function ComptabilitePage() {
   // liste d'années en dur ferait chercher l'utilisateur dans des exercices vides.
   useEffect(() => {
     (async () => {
-      const [{ data: dates }, { data: dos }] = await Promise.all([
-        supabase.from("ecritures_comptables").select("date_ecriture").eq("dossier_id", dossierId),
+      const [dates, { data: dos }] = await Promise.all([
+        lireDatesEcritures(supabase, dossierId),
         (supabase.from("dossiers") as any).select("*").eq("id", dossierId).maybeSingle(),
       ]);
       const dispo = exercicesDisponibles(((dates ?? []) as any[]).map((d) => d.date_ecriture));

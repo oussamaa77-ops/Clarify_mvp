@@ -104,6 +104,26 @@ export function filtrerExercice<T extends Record<string, any>>(
 }
 
 /**
+ * Toutes les dates d'écriture d'un dossier, lues PAR PAGES de 1 000.
+ *
+ * PostgREST plafonne une réponse à 1 000 lignes : lu d'un seul coup, un dossier
+ * plus gros perdait des années entières du sélecteur d'exercice — 2024 absent
+ * chez Smart Water alors que FA-2024-0078 y était comptabilisée (29/10/2026).
+ */
+export async function lireDatesEcritures(sb: any, dossierId: string): Promise<{ date_ecriture: string }[]> {
+  const toutes: { date_ecriture: string }[] = [];
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await sb.from("ecritures_comptables")
+      .select("date_ecriture").eq("dossier_id", dossierId)
+      .order("date_ecriture").order("id").range(de, de + 999);
+    if (error || !data?.length) break;
+    toutes.push(...data);
+    if (data.length < 1000) break;
+  }
+  return toutes;
+}
+
+/**
  * Millésimes présents dans un jeu de dates, du plus récent au plus ancien.
  *
  * Sert à peupler le sélecteur d'exercice : proposer 2019..2030 en dur ferait

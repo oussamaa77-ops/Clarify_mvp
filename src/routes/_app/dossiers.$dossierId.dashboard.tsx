@@ -23,7 +23,7 @@ import {
   soldeBancaireAffiche, type LigneGrandLivre,
 } from "@/lib/encours-grandlivre";
 import {
-  bornesExercice, dansExercice, exerciceCourant, exercicesDisponibles,
+  bornesExercice, dansExercice, exerciceCourant, exercicesDisponibles, lireDatesEcritures,
 } from "@/lib/exercice-comptable";
 import { sansANouveaux } from "@/lib/a-nouveaux";
 import { joursRetard } from "@/lib/factures-filtres";
@@ -154,7 +154,7 @@ function DashboardPage() {
           .or("compte_numero.like.34%,compte_numero.like.44%,compte_numero.like.51%")
           .lte("date_ecriture", bornes.fin),
         // Millésimes réellement portés par le dossier, pour le sélecteur.
-        supabase.from("ecritures_comptables").select("date_ecriture").eq("dossier_id", dossierId),
+        lireDatesEcritures(supabase, dossierId).then((data) => ({ data })),
       ]);
       setDossier(d);
       setFactures(f ?? []);
