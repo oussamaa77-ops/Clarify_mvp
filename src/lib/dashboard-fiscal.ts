@@ -5,6 +5,7 @@
 import { DICTIONNAIRE_PCM } from "./categorization-engine";
 import { numeroSignificatif } from "./numero-compte";
 import { joursRetard } from "./factures-filtres";
+import { RACINES_PCM } from "./pcm-referentiel";
 
 /** Facture (vente ou achat) vue sous l'angle des montants et du règlement. */
 export interface FactureFiscale {
@@ -214,7 +215,11 @@ function decomposerReglement(
 export function synthetiserTva(
   ventes: FactureFiscale[],
   achats: FactureFiscale[],
-  opts: { debut?: string; fin?: string; paiements?: PaiementFiscal[] } = {},
+  opts: {
+    debut?: string; fin?: string; paiements?: PaiementFiscal[]; ecritures?: EcritureTvaTresorerie[];
+    /** Achats écartés de la déduction (cf. `classerDeductibiliteAchats`). */
+    achatsExclus?: Set<string>;
+  } = {},
 ): SyntheseTva {
   const dansPeriode = (date: string | null | undefined) => {
     if (!opts.debut && !opts.fin) return true;
@@ -251,16 +256,113 @@ export function synthetiserTva(
   };
 
   const v = cumul(ventes, "facture_id");
-  const a = cumul(achats, "facture_fournisseur_id");
-  const nette = round2(v.tva - a.tva);
+  const exclus = opts.achatsExclus;
+  const a = cumul(exclus?.size ? achats.filter((f) => !f.id || !exclus.has(String(f.id))) : achats, "facture_fournisseur_id");
+  // TVA née d'un mouvement de trésorerie SANS facture (frais bancaires,
+  // justificatifs rapprochés) : elle est au grand livre, donc dans la
+  // déclaration, et doit donc être ici aussi.
+  const hf = opts.ecritures ? tvaHorsFactures(opts.ecritures, opts) : { collectee: 0, deductible: 0 };
+  const collectee = round2(v.tva + hf.collectee);
+  const deductible = round2(a.tva + hf.deductible);
+  const nette = round2(collectee - deductible);
   const totale = v.totale + a.totale;
   return {
-    collectee: v.tva,
-    deductible: a.tva,
+    collectee,
+    deductible,
     nette,
     estCredit: nette < 0,
     couverture: totale > 0 ? Math.min(1, (v.datee + a.datee) / totale) : 1,
   };
+}
+
+/** Ligne du grand livre, vue par `tvaHorsFactures`. */
+export interface EcritureTvaTresorerie {
+  journal_code?: string | null;
+  compte_numero?: string | null;
+  date_ecriture?: string | null;
+  debit?: number | null;
+  credit?: number | null;
+}
+
+export interface DeductibiliteAchats {
+  /** Achats comptabilisés SANS TVA récupérable (art. 106 CGI) : exclus. */
+  nonDeductibles: Set<string>;
+  /**
+   * Achats portant de la TVA mais SANS AUCUNE écriture d'achat : leur droit à
+   * déduction n'a jamais été établi. Exclus aussi — jamais présumés déductibles
+   * — et rendus à l'utilisateur pour validation.
+   */
+  nonClasses: Set<string>;
+  /** Union des deux : ce que la synthèse, le relevé et l'EDI écartent. */
+  exclus: Set<string>;
+}
+
+/**
+ * Statut de déduction de chaque achat, lu dans le grand livre (journaux ACH et
+ * ACH-AVR). L'achat est retrouvé par son id (`reference_piece` du générateur)
+ * ou, à défaut, par son numéro (écritures reprises d'un grand livre importé).
+ * Clés rendues : l'id de la facture fournisseur.
+ */
+export function classerDeductibiliteAchats(
+  achats: { id?: string | null; numero?: string | null; montant_tva?: number | null }[],
+  ecritures: (EcritureTvaTresorerie & { reference_piece?: string | null })[],
+): DeductibiliteAchats {
+  const pieces = new Map<string, { tva: boolean }>();
+  for (const e of ecritures) {
+    const j = String(e.journal_code ?? "").toUpperCase();
+    if (j !== "ACH" && j !== "ACH-AVR") continue;
+    const ref = String(e.reference_piece ?? "").trim();
+    if (!ref) continue;
+    const c = String(e.compte_numero ?? "").trim();
+    const surTva = (c.startsWith(RACINES_PCM.TVA_ATTENTE_ACHAT) || c.startsWith(RACINES_PCM.TVA_RECUPERABLE))
+      && Math.abs(n(e.debit) - n(e.credit)) > 0.005;
+    const p = pieces.get(ref) ?? { tva: false };
+    p.tva = p.tva || surTva;
+    pieces.set(ref, p);
+  }
+  const nonDeductibles = new Set<string>();
+  const nonClasses = new Set<string>();
+  for (const a of achats) {
+    const id = String(a.id ?? "").trim();
+    if (!id) continue;
+    const piece = pieces.get(id) ?? pieces.get(String(a.numero ?? "").trim());
+    if (!piece) {
+      if (Math.abs(n(a.montant_tva)) > 0.005) nonClasses.add(id);
+    } else if (!piece.tva) {
+      nonDeductibles.add(id);
+    }
+  }
+  return { nonDeductibles, nonClasses, exclus: new Set([...nonDeductibles, ...nonClasses]) };
+}
+
+/** Journaux de trésorerie : une TVA y est posée sans facture d'origine. */
+const JOURNAUX_TRESORERIE = new Set(["BQ", "CAI"]);
+
+/**
+ * TVA comptabilisée DIRECTEMENT en trésorerie, sans facture : TVA de 10 % des
+ * commissions bancaires, justificatifs (avis de débit, quittances) rapprochés
+ * d'une ligne de relevé. Ces lignes débitent 34552 (ou créditent 44551) dans les
+ * journaux BQ / CAI — la TVA des factures, elle, n'y passe jamais : elle naît en
+ * ACH / VTE sur un compte d'attente et bascule en OD.
+ *
+ * Sans ce complément, la synthèse lue sur les factures sous-estimait la TVA
+ * déductible par rapport à l'écriture de liquidation, qui lit le grand livre.
+ */
+export function tvaHorsFactures(
+  ecritures: EcritureTvaTresorerie[],
+  bornes: { debut?: string; fin?: string } = {},
+): { collectee: number; deductible: number } {
+  let collectee = 0, deductible = 0;
+  for (const e of ecritures) {
+    if (!JOURNAUX_TRESORERIE.has(String(e.journal_code ?? "").toUpperCase())) continue;
+    const d = String(e.date_ecriture ?? "").slice(0, 10);
+    if (bornes.debut && (!d || d < bornes.debut)) continue;
+    if (bornes.fin && (!d || d > bornes.fin)) continue;
+    const c = String(e.compte_numero ?? "").trim();
+    if (c.startsWith(RACINES_PCM.TVA_FACTUREE)) collectee += n(e.credit) - n(e.debit);
+    else if (c.startsWith(RACINES_PCM.TVA_RECUPERABLE)) deductible += n(e.debit) - n(e.credit);
+  }
+  return { collectee: round2(collectee), deductible: round2(deductible) };
 }
 
 /**
@@ -276,12 +378,19 @@ export function periodesTva(
   ventes: FactureFiscale[],
   achats: FactureFiscale[],
   paiements: PaiementFiscal[] = [],
+  ecritures: EcritureTvaTresorerie[] = [],
 ): string[] {
   const mois = new Set<string>();
   const ajouter = (date: string | null | undefined) => {
     const m = (date ?? "").slice(0, 7);
     if (/^\d{4}-\d{2}$/.test(m)) mois.add(m);
   };
+  for (const e of ecritures) {
+    const c = String(e.compte_numero ?? "").trim();
+    if (JOURNAUX_TRESORERIE.has(String(e.journal_code ?? "").toUpperCase())
+      && (c.startsWith(RACINES_PCM.TVA_FACTUREE) || c.startsWith(RACINES_PCM.TVA_RECUPERABLE))
+      && Math.abs(n(e.debit) - n(e.credit)) > 0.005) ajouter(e.date_ecriture);
+  }
 
   for (const [fs, cle] of [[ventes, "facture_id"], [achats, "facture_fournisseur_id"]] as const) {
     const { index, estAvoirIsole, avoirDejaImpute } = contexteAvoirs(fs, paiements, cle);
@@ -314,13 +423,18 @@ export function tvaRecuperableEnCours(achats: FactureFiscale[]): number {
 }
 
 /**
- * Date limite de télédéclaration et de paiement SIMPL-TVA : dernier jour du
- * mois SUIVANT la période déclarée. `periode` au format YYYY-MM.
+ * Date limite de télédéclaration et de paiement SIMPL-TVA (art. 110 CGI) :
+ * dernier jour du mois SUIVANT la période déclarée.
+ *   • mensuel     `AAAA-MM`  → fin du mois suivant ;
+ *   • trimestriel `AAAA-Tn`  → fin du mois suivant le trimestre.
  *
- * NB : le dépôt papier obéit à une échéance plus courte (le 20). Ce calcul vise
- * la télédéclaration, seul canal ouvert à la majorité des entreprises.
+ * C'est la SEULE règle d'échéance de l'application : le rappel automatique et
+ * l'écran Fiscalité l'emploient aussi. L'ancien délai du 20 ne valait que pour
+ * le dépôt papier, remplacé par la télédéclaration obligatoire.
  */
 export function echeanceSimplTva(periode: string): Date | null {
+  const t = /^(\d{4})-T([1-4])$/i.exec(periode.trim());
+  if (t) return new Date(Number(t[1]), Number(t[2]) * 3 + 1, 0);
   const m = /^(\d{4})-(\d{2})$/.exec(periode.trim());
   if (!m) return null;
   const annee = Number(m[1]);
@@ -669,4 +783,255 @@ export function calculerCashFlow(
   const encaissementsHt = cumulHt(ventes);
   const decaissementsHt = cumulHt(achats);
   return { encaissementsHt, decaissementsHt, marge: round2(encaissementsHt - decaissementsHt) };
+}
+
+// ─── Calendrier déclaratif de la TVA ─────────────────────────────────────────
+//
+// L'échéance d'une déclaration ne dépend pas de l'existence de factures : une
+// période sans opération se déclare aussi (« néant »), et un crédit de TVA se
+// déclare pour être reporté. Le calendrier se lit sur la PÉRIODICITÉ de chaque
+// année (art. 108 CGI), les dates, et l'ÉTAT RÉEL de chaque période — liquidée
+// en comptabilité, déposée (récépissé SIMPL-TVA), payée.
+
+export type PeriodiciteTva = "mensuel" | "trimestriel";
+
+/** Seuil du régime mensuel (art. 108 CGI) : CA taxable N-1 ≥ 1 000 000 MAD. */
+export const SEUIL_TVA_MENSUELLE = 1_000_000;
+
+/**
+ * Situation déclarative du dossier (colonne `dossiers.periodicite_tva`) :
+ *   option_mensuelle  option pour la déclaration mensuelle (art. 108) ;
+ *   saisonniere       activité saisonnière, périodique ou occasionnelle → trimestrielle ;
+ *   non_resident      non-résident sans établissement au Maroc → mensuelle.
+ * NULL : situation de droit commun, régie par le CA N-1 et l'ancienneté.
+ */
+export type SituationTva = "option_mensuelle" | "saisonniere" | "non_resident";
+
+export interface PeriodiciteAnnee {
+  periodicite: PeriodiciteTva;
+  source: "historique" | "non_resident" | "saisonniere" | "option" | "nouvelle_entreprise" | "chiffre_affaires" | "defaut";
+  motif: string;
+}
+
+/**
+ * Périodicité déclarative d'une ANNÉE civile, selon l'art. 108 CGI :
+ *   1. la périodicité RETENUE pour cette année, si elle a été enregistrée
+ *      (ajustements_fiscaux[année].periodicite_tva) — l'historique ne bouge pas
+ *      quand le CA ou la situation du dossier changent ensuite ;
+ *   2. non-résident sans établissement → mensuelle ;
+ *   3. activité saisonnière, périodique ou occasionnelle → trimestrielle ;
+ *   4. option pour le régime mensuel → mensuelle ;
+ *   5. entreprise nouvelle (début d'activité dans l'année) → trimestrielle pour
+ *      la période de l'année civile en cours ;
+ *   6. CA taxable N-1 ≥ 1 000 000 MAD → mensuelle, sinon trimestrielle ;
+ *   7. CA N-1 inconnu → trimestrielle, À CONFIRMER (aucune présomption mensuelle).
+ */
+export function periodiciteTva(
+  dossier: { periodicite_tva?: string | null; date_debut_activite?: string | null; ajustements_fiscaux?: unknown } | null | undefined,
+  annee: number,
+  caTaxableAnneePrecedente?: number | null,
+): PeriodiciteAnnee {
+  const historique = (((dossier?.ajustements_fiscaux ?? {}) as Record<string, any>)[String(annee)] ?? {}).periodicite_tva;
+  if (historique === "mensuel" || historique === "trimestriel") {
+    return { periodicite: historique, source: "historique", motif: `périodicité retenue pour ${annee}` };
+  }
+  const situation = String(dossier?.periodicite_tva ?? "").trim().toLowerCase();
+  if (situation === "non_resident") return { periodicite: "mensuel", source: "non_resident", motif: "non-résident sans établissement au Maroc (art. 108)" };
+  if (situation === "saisonniere") return { periodicite: "trimestriel", source: "saisonniere", motif: "activité saisonnière, périodique ou occasionnelle (art. 108)" };
+  // Valeur historique « mensuel » de la colonne : une option déjà exprimée.
+  if (situation === "option_mensuelle" || situation === "mensuel") return { periodicite: "mensuel", source: "option", motif: "option pour la déclaration mensuelle (art. 108)" };
+  const debut = String(dossier?.date_debut_activite ?? "").slice(0, 4);
+  if (debut && Number(debut) === annee) {
+    return { periodicite: "trimestriel", source: "nouvelle_entreprise", motif: `entreprise nouvelle : trimestrielle pour l'année civile ${annee} (art. 108)` };
+  }
+  if (caTaxableAnneePrecedente != null && Number.isFinite(caTaxableAnneePrecedente) && caTaxableAnneePrecedente > 0) {
+    return caTaxableAnneePrecedente >= SEUIL_TVA_MENSUELLE
+      ? { periodicite: "mensuel", source: "chiffre_affaires", motif: `CA taxable ${annee - 1} ≥ 1 000 000 MAD (art. 108)` }
+      : { periodicite: "trimestriel", source: "chiffre_affaires", motif: `CA taxable ${annee - 1} < 1 000 000 MAD (art. 108)` };
+  }
+  return { periodicite: "trimestriel", source: "defaut", motif: `CA taxable ${annee - 1} inconnu : trimestrielle à confirmer dans les paramètres fiscaux` };
+}
+
+/** Périodes LIQUIDÉES en comptabilité : celles qui portent une OD DECL-TVA-<période>. */
+export function periodesDeclareesTva(references: (string | null | undefined)[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of references) {
+    const m = /^DECL-TVA-(\d{4}-(?:\d{2}|T[1-4]))$/i.exec(String(r ?? "").trim());
+    if (m) out.add(m[1].toUpperCase());
+  }
+  return out;
+}
+
+/** Ce que l'on sait d'une période, au-delà du calcul. */
+export interface EtatDeclarationTva {
+  /** OD de liquidation passée (DECL-TVA-<période>) : la TVA est LIQUIDÉE en comptabilité. */
+  liquidee: boolean;
+  /** Récépissé SIMPL-TVA enregistré : la déclaration est DÉPOSÉE (accusé de réception). */
+  deposee: boolean;
+  /** Nom du récépissé — la référence de la preuve de dépôt. */
+  recepisse?: string | null;
+  /** TVA due par la liquidation (crédit 4456). 0 : crédit ou néant. */
+  montantDu: number;
+  /** Paiements DGI rattachés (débit 4456, même référence). */
+  montantPaye: number;
+}
+
+/**
+ * État réel de chaque période, lu dans le grand livre et la liste des récépissés.
+ * Une OD de liquidation ne vaut PAS dépôt : seule la preuve de dépôt (récépissé)
+ * le fait. Le paiement se lit sur le 4456 de la même référence.
+ */
+export function etatsDeclarationsTva(
+  ecritures: { reference_piece?: string | null; compte_numero?: string | null; debit?: number | null; credit?: number | null }[],
+  recepisses: (string | null | undefined)[] = [],
+): Map<string, EtatDeclarationTva> {
+  const etats = new Map<string, EtatDeclarationTva>();
+  const etat = (p: string) => {
+    let e = etats.get(p);
+    if (!e) { e = { liquidee: false, deposee: false, recepisse: null, montantDu: 0, montantPaye: 0 }; etats.set(p, e); }
+    return e;
+  };
+  for (const l of ecritures) {
+    const m = /^DECL-TVA-(\d{4}-(?:\d{2}|T[1-4]))$/i.exec(String(l.reference_piece ?? "").trim());
+    if (!m) continue;
+    const e = etat(m[1].toUpperCase());
+    e.liquidee = true;
+    if (String(l.compte_numero ?? "").startsWith(RACINES_PCM.TVA_DUE)) {
+      e.montantDu = round2(e.montantDu + n(l.credit));
+      e.montantPaye = round2(e.montantPaye + n(l.debit));
+    }
+  }
+  for (const nom of recepisses) {
+    const m = /DECL-TVA-(\d{4}-(?:\d{2}|T[1-4]))/i.exec(String(nom ?? ""));
+    if (!m) continue;
+    const e = etat(m[1].toUpperCase());
+    e.deposee = true;
+    e.recepisse = String(nom);
+  }
+  return etats;
+}
+
+export type StatutEcheanceTva = "en_cours" | "a_declarer" | "en_retard" | "a_payer" | "reglee";
+
+export interface EcheanceTva {
+  /** « AAAA-MM » ou « AAAA-Tn ». */
+  periode: string;
+  debut: string;
+  fin: string;
+  /** Date limite de télédéclaration et de paiement, AAAA-MM-JJ. */
+  echeance: string;
+  statut: StatutEcheanceTva;
+  /** Liquidée en comptabilité mais non déposée : le rappel doit continuer. */
+  liquidee: boolean;
+  deposee: boolean;
+  recepisse: string | null;
+}
+
+const isoLocalTva = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/**
+ * Toutes les périodes déclaratives depuis l'ouverture de l'exercice PRÉCÉDENT (ou
+ * le début d'activité, s'il est postérieur) jusqu'à la période en cours, chacune
+ * avec la périodicité de SON année, son échéance et son état :
+ *   en_cours    la période n'est pas close ;
+ *   a_declarer  close, non déposée, échéance pas encore passée ;
+ *   en_retard   close, non déposée, échéance dépassée ;
+ *   a_payer     déposée, TVA due non (entièrement) payée ;
+ *   reglee      déposée, et payée — ou rien à payer (crédit, néant).
+ * Une OD de liquidation seule laisse la période « à déclarer » : le rappel ne
+ * disparaît pas parce qu'une écriture a été générée.
+ */
+export function calendrierTva(p: {
+  /** Périodicité d'une année, ou une périodicité unique. */
+  periodicite: PeriodiciteTva | ((annee: number) => PeriodiciteTva);
+  aujourdhui?: Date;
+  etats: Map<string, EtatDeclarationTva>;
+  dateDebutActivite?: string | null;
+}): EcheanceTva[] {
+  const auj = p.aujourdhui ?? new Date();
+  const jour = isoLocalTva(auj);
+  const debutActivite = /^\d{4}-\d{2}-\d{2}/.test(String(p.dateDebutActivite ?? "")) ? String(p.dateDebutActivite).slice(0, 10) : null;
+  const periodiciteDe = typeof p.periodicite === "function" ? p.periodicite : () => p.periodicite as PeriodiciteTva;
+  const out: EcheanceTva[] = [];
+  for (let annee = auj.getFullYear() - 1; annee <= auj.getFullYear(); annee++) {
+    const mensuel = periodiciteDe(annee) === "mensuel";
+    const nb = mensuel ? 12 : 4;
+    for (let k = 1; k <= nb; k++) {
+      const periode = mensuel ? `${annee}-${String(k).padStart(2, "0")}` : `${annee}-T${k}`;
+      const moisDebut = mensuel ? k : (k - 1) * 3 + 1;
+      const moisFin = mensuel ? k : k * 3;
+      const debut = `${annee}-${String(moisDebut).padStart(2, "0")}-01`;
+      const fin = isoLocalTva(new Date(annee, moisFin, 0));
+      if (debut > jour) break;
+      if (debutActivite && fin < debutActivite) continue;
+      const echeance = isoLocalTva(echeanceSimplTva(periode)!);
+      const e = p.etats.get(periode);
+      const statut: StatutEcheanceTva = fin >= jour ? "en_cours"
+        : !e?.deposee ? (echeance < jour ? "en_retard" : "a_declarer")
+        : (e.montantDu - e.montantPaye > 0.005 ? "a_payer" : "reglee");
+      out.push({ periode, debut, fin, echeance, statut, liquidee: !!e?.liquidee, deposee: !!e?.deposee, recepisse: e?.recepisse ?? null });
+    }
+  }
+  return out;
+}
+
+/** L'échéance qui demande une action : la plus ancienne non déposée en retard, puis à déclarer, puis à payer. */
+export function prochaineEcheanceTva(calendrier: EcheanceTva[]): EcheanceTva | null {
+  return calendrier.find((e) => e.statut === "en_retard")
+    ?? calendrier.find((e) => e.statut === "a_declarer")
+    ?? calendrier.find((e) => e.statut === "a_payer")
+    ?? null;
+}
+
+// ─── Règlements par compensation, lus au grand livre ─────────────────────────
+
+/** Préfixe des OD de compensation (même valeur que genererEcritures.PREFIXE_COMPENSATION). */
+export const PREFIXE_OD_COMPENSATION = "COMP-";
+
+/**
+ * Règlements par COMPENSATION de chaque facture, au format des `paiements` :
+ * une facture lettrée avec une OD COMP-<n°> (même code de lettrage, même compte
+ * de tiers) est réglée, pour ce montant, à la DATE DE SIGNATURE de la convention
+ * — le fait générateur, et non la date comptable de l'OD ni sa date de saisie.
+ * La table `paiements` ne les porte pas (aucune pièce de trésorerie) : sans eux,
+ * la synthèse TVA et le relevé des déductions ignoraient la part compensée.
+ */
+export function reglementsParCompensation(
+  ecritures: { journal_code?: string | null; compte_numero?: string | null; reference_piece?: string | null;
+    lettrage_code?: string | null; facture_id?: string | null; debit?: number | null; credit?: number | null; date_ecriture?: string | null }[],
+  factures: { id?: string | null; numero?: string | null }[],
+  sens: "client" | "fournisseur",
+  /** n° de convention → date de signature. */
+  signatures: Map<string, string>,
+): PaiementFiscal[] {
+  const racine = sens === "client" ? RACINES_PCM.CLIENTS : RACINES_PCM.FOURNISSEURS;
+  const tiers = ecritures.filter((l) => String(l.compte_numero ?? "").startsWith(racine) && String(l.lettrage_code ?? "").trim());
+  const comp = tiers.filter((l) => String(l.journal_code ?? "").toUpperCase() === "OD"
+    && String(l.reference_piece ?? "").startsWith(PREFIXE_OD_COMPENSATION));
+  const out: PaiementFiscal[] = [];
+  // Une ligne de compensation ne règle qu'une fois, même si la facture a plusieurs lignes au même code.
+  const utilisees = new Set<object>();
+  for (const f of factures) {
+    const id = String(f.id ?? "").trim();
+    const num = String(f.numero ?? "").trim();
+    if (!id) continue;
+    const lignesFacture = tiers.filter((l) => String(l.journal_code ?? "").toUpperCase() !== "OD"
+      && (String(l.facture_id ?? "") === id || String(l.reference_piece ?? "") === id || (num && String(l.reference_piece ?? "") === num)));
+    for (const lf of lignesFacture) {
+      for (const c of comp.filter((x) => x.lettrage_code === lf.lettrage_code && x.compte_numero === lf.compte_numero && !utilisees.has(x))) {
+        utilisees.add(c);
+        const montant = round2(sens === "client" ? n(c.credit) - n(c.debit) : n(c.debit) - n(c.credit));
+        const numero = String(c.reference_piece).slice(PREFIXE_OD_COMPENSATION.length);
+        const date = signatures.get(numero) ?? String(c.date_ecriture ?? "").slice(0, 10);
+        if (montant > 0.005) {
+          out.push({
+            ...(sens === "client" ? { facture_id: id } : { facture_fournisseur_id: id }),
+            montant, date_paiement: date, origine: "compensation", reference: String(c.reference_piece),
+          });
+        }
+      }
+    }
+  }
+  return out;
 }

@@ -100,8 +100,11 @@ describe("(c) le journal des ventes ne crédite jamais le 4421 hors acompte", ()
 
   it("un type inconnu est traité comme une facture ORDINAIRE, pas comme un acompte", () => {
     // C'est le sens de sécurité utile : dans le doute on constate le produit.
-    expect(normaliserTypeVente("avoir")).toBe("facture");
+    expect(normaliserTypeVente("inconnu")).toBe("facture");
     expect(normaliserTypeVente(null)).toBe("facture");
+    // L'avoir, lui, est une nature CONNUE : le rabattre sur « facture » le
+    // comptabilisait comme une vente (audit 2026-11-03).
+    expect(normaliserTypeVente("avoir")).toBe("avoir");
     expect(normaliserTypeVente("Acompte")).toBe("acompte");
   });
 

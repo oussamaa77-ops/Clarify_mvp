@@ -113,7 +113,8 @@ export function rapprocherCaProduits(
   const retenues = horsAcompte.filter(estComptabilisable);
   const horsPerimetre = horsAcompte.filter((f) => !estComptabilisable(f));
 
-  const caHt = r2(retenues.reduce((s, f) => s + nb(f.montant_ht), 0));
+  // Un avoir RÉDUIT le chiffre d'affaires, quel que soit le signe saisi.
+  const caHt = r2(retenues.reduce((s, f) => s + (normaliserTypeVente(f.type) === "avoir" ? -Math.abs(nb(f.montant_ht)) : nb(f.montant_ht)), 0));
   const credits7 = r2((lignes ?? [])
     .filter((l) => txt(l.compte_numero).startsWith("7"))
     .reduce((s, l) => s + nb(l.credit) - nb(l.debit), 0));

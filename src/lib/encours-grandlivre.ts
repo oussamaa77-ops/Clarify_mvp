@@ -282,6 +282,11 @@ export interface CibleFacture {
  * une écriture de banque la mentionne : c'est précisément ce que la règle
  * d'intégrité veut faire apparaître (cf. integrite-tresorerie.ts).
  */
+/** Préfixe des OD de compensation (même valeur que genererEcritures.PREFIXE_COMPENSATION). */
+const PREFIXE_OD_COMPENSATION = "COMP-";
+const estLigneCompensation = (l: LigneGrandLivre) =>
+  txt(l.journal_code).toUpperCase() === "OD" && txt(l.reference_piece).startsWith(PREFIXE_OD_COMPENSATION);
+
 export function situationFactureGrandLivre(
   lignes: LigneGrandLivre[], cible: CibleFacture,
 ): SituationFacture {
@@ -311,9 +316,13 @@ export function situationFactureGrandLivre(
   // même auxiliaire (34210002), pas seulement la même racine.
   const comptes = new Set(lignesFacture.map((l) => txt(l.compte_numero)));
 
+  // Règlement = une pièce de TRÉSORERIE lettrée avec la facture, ou une OD de
+  // COMPENSATION (COMP-<n°>) lettrée avec elle : une compensation éteint la
+  // créance comme un paiement. Le lettrage ne l'admet que recevable (convention
+  // signée, même personne juridique — cf. lettrage-compta.functions).
   const reglements = codes.length
     ? lignes.filter((l) =>
-        estJournalTresorerie(l.journal_code)
+        (estJournalTresorerie(l.journal_code) || estLigneCompensation(l))
         && comptes.has(txt(l.compte_numero))
         && codes.includes(txt(l.lettrage_code)))
     : [];

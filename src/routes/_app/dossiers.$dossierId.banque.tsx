@@ -30,7 +30,8 @@ import { BankLogo } from "@/components/BankLogo";
 import { DocumentViewer, type DocumentViewerSource } from "@/components/DocumentViewer";
 import { logAudit } from "@/lib/audit";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
-import { quotePartReglement } from "@/lib/releve-deductions";
+import { champsManquantsSimplTva, qualifierLigneEdi, type DocumentEdi } from "@/lib/releve-deductions";
+import { classerDeductibiliteAchats } from "@/lib/dashboard-fiscal";
 // NB : pdfjs-dist n'est PAS importé statiquement — il tire `canvas` (binaire natif)
 // qui polluerait le bundle SERVEUR (SSR) et casserait le déploiement serverless.
 // On le charge donc UNIQUEMENT côté client, à la demande, via import() dynamique.
@@ -1470,24 +1471,35 @@ function BanquePage() {
     fee:{reference?:string|null;libelle?:string|null;montant:number},
     lot:FraisLot[],
     tauxPcm:number,
-  ):{ht:number;tva:number;ttc:number;taux:number}=>{
+  ):{ht:number;tva:number;ttc:number;taux:number;auReleve:boolean}=>{
     const key=_refKey(fee.reference);
     const tvaLine=key?lot.find(t=>_estLigneTvaIsolee(t)&&_refKey(t.reference)===key):undefined;
     if(tvaLine){
       const ht=Math.abs(Math.round(fee.montant*100)/100);
       const tva=Math.abs(Math.round(tvaLine.montant*100)/100);
-      return {ht,tva,ttc:Math.round((ht+tva)*100)/100,taux:ht>0?Math.round(tva/ht*100):tauxPcm};
+      return {ht,tva,ttc:Math.round((ht+tva)*100)/100,taux:ht>0?Math.round(tva/ht*100):tauxPcm,auReleve:true};
     }
     const ttc=Math.abs(Math.round(fee.montant*100)/100);
     // Droit de timbre : TVA NON récupérable → pas de division par (1+taux), aucune ligne
     // de TVA. Le montant reste à 100 % sur le compte de frais (HT = montant, TVA = 0).
-    if(/TIMBRE/i.test(fee.libelle||"")) return {ht:ttc,tva:0,ttc,taux:0};
+    if(/TIMBRE/i.test(fee.libelle||"")) return {ht:ttc,tva:0,ttc,taux:0,auReleve:false};
     const t=(tauxPcm||0)/100;
     const ht=t>0?Math.round(ttc/(1+t)*100)/100:ttc;
-    return {ht,tva:Math.round((ttc-ht)*100)/100,ttc,taux:tauxPcm};
+    // TVA RECONSTITUÉE d'un TTC : aucune pièce ne la justifie (auReleve = false).
+    return {ht,tva:Math.round((ttc-ht)*100)/100,ttc,taux:tauxPcm,auReleve:false};
   };
   // Ligne de TVA isolée du relevé (TVA sur commissions) : 34552, ou 4456 / tva_dgi
   // dans l'historique. Elle ne se déclare jamais seule : sa TVA rejoint la ligne de frais.
+  // Achats dont la TVA n'entre pas au relevé : non récupérable (art. 106) ou jamais
+  // comptabilisée — même règle que l'écran Fiscalité (classerDeductibiliteAchats).
+  const _achatsExclusEdi=async(achats:any[]):Promise<Set<string>>=>{
+    const refs=[...new Set(achats.flatMap((a:any)=>[a.id,a.numero]).filter(Boolean))];
+    if(!refs.length) return new Set();
+    const {data}=await (supabase as any).from("ecritures_comptables")
+      .select("journal_code,compte_numero,debit,credit,reference_piece")
+      .eq("dossier_id",dossierId).in("reference_piece",refs);
+    return classerDeductibiliteAchats(achats,(data??[]) as any[]).exclus;
+  };
   const _estLigneTvaIsolee=(t:{compte_comptable?:string|null;categorie?:string|null}):boolean=>{
     const c=(t.compte_comptable||"").trim();
     return t.categorie==="tva_frais_bancaires"||t.categorie==="tva_dgi"
@@ -1561,8 +1573,10 @@ function BanquePage() {
 
     const dataRows:any[][]=[];
     let totalHT=0,totalTVA=0,totalTTC=0;
+    const rejets:string[]=[];
+    const achatsExclus=await _achatsExclusEdi((allFF as any[]).filter((f:any)=>txEligibles.some(tx=>tx.facture_id===f.id)));
 
-    txEligibles.forEach((tx,i)=>{
+    txEligibles.forEach((tx)=>{
       const pcm=PCM_MAP[tx.categorie]??PCM_MAP.autre;
       const facFourn=tx.facture_id?(allFF as any[]).find((f:any)=>f.id===tx.facture_id):null;
       const facClient=tx.facture_id?(allFC as any[]).find((f:any)=>f.id===tx.facture_id):null;
@@ -1573,26 +1587,25 @@ function BanquePage() {
       // Montants et taux depuis le document OCR — jamais DÉDUITS du montant
       // bancaire ; celui-ci ne fixe que la quote-part réglée (voir plus bas).
       const hasDoc = !!(facFourn||facClient||justi);
-      // Sans document (frais bancaires 61473) → reconstitution HT/TVA/TTC GÉNÉRIQUE :
-      // couple frais(61473)/TVA(34552) corrélé par référence, sinon TVA incluse (TTC).
+      // Sans pièce (frais bancaires 61473) : seule une TVA qui FIGURE au relevé
+      // (couple frais / TVA corrélé par référence) est retenue — cf. qualifierLigneEdi.
       const frais = hasDoc ? null : _detailFraisBancaires(tx, txExtraites as FraisLot[], pcm.tva);
-      const htDoc  = facFourn ? Math.round(Number(facFourn.montant_ht )*100)/100
-                   : facClient ? Math.round(Number(facClient.montant_ht)*100)/100
-                   : justi     ? Math.round(Number(justi.montant_ht    )*100)/100 : frais!.ht;
-      const ttcDoc = facFourn ? Math.round(Number(facFourn.montant_ttc)*100)/100
-                   : facClient ? Math.round(Number(facClient.montant_ttc)*100)/100
-                   : justi     ? Math.round(Number(justi.montant_ttc   )*100)/100 : frais!.ttc;
-      const tvaDoc = facFourn ? Math.round(Number(facFourn.montant_tva)*100)/100
-                   : facClient ? Math.round(Number(facClient.montant_tva)*100)/100
-                   : justi     ? Math.round((ttcDoc - htDoc)*100)/100 : frais!.tva;
-      // Régime de l'ENCAISSEMENT (REGIME 1 en en-tête) : la ligne est un
-      // RÈGLEMENT, pas une facture. Une facture réglée en deux virements donne
-      // deux lignes, chacune avec SA quote-part — et non la TVA entière deux fois.
-      // Les taux restent ceux du document ; seul le prorata vient de la banque.
-      const {ht,tva,ttc} = hasDoc
-        ? quotePartReglement({ht:htDoc,tva:tvaDoc,ttc:ttcDoc}, Number(tx.montant))
-        : {ht:htDoc,tva:tvaDoc,ttc:ttcDoc};
+      const r2e=(x:any)=>Math.round(Number(x||0)*100)/100;
+      const document:DocumentEdi = facFourn
+        ? { nature:"facture_fournisseur", id:facFourn.id, ht:r2e(facFourn.montant_ht), tva:r2e(facFourn.montant_tva), ttc:r2e(facFourn.montant_ttc), type:(facFourn as any).type }
+        : facClient ? { nature:"facture_client" }
+        : justi ? { nature:"justificatif", ht:r2e(justi.montant_ht), tva:r2e(Number(justi.montant_ttc)-Number(justi.montant_ht)), ttc:r2e(justi.montant_ttc), eligible_edi:justi.eligible_edi }
+        : null;
+      const q = qualifierLigneEdi({
+        type: tx.type, montant: Number(tx.montant), document,
+        fraisBancaires: !hasDoc && estCompteFraisBancaires(_comptePcm(tx)),
+        tvaFraisAuReleve: frais?.auReleve ? { ht: frais.ht, tva: frais.tva } : null,
+        achatsExclus,
+      });
+      if(!q.ok){ rejets.push(`${tx.libelle||tx.reference||"ligne"} : ${q.motif}`); return; }
+      const {ht,tva,ttc} = q;
       const taux= frais ? frais.taux : ht>0&&tva>0 ? Math.round(tva/ht*100) : justi ? (Number(justi.taux_tva)||pcm.tva) : pcm.tva;
+      const i = dataRows.length;
 
       // FACT_NUM — n° de pièce du document, sinon référence bancaire, sinon « RELEVE »
       const factNum = facFourn?.numero || facClient?.numero || justi?.numero_piece || tx.reference || (frais ? "RELEVE" : "—");
@@ -1607,6 +1620,11 @@ function BanquePage() {
       const dateFacRaw=facFourn?.date_facture||facClient?.date_facture||justi?.date_document||"";
       const dateFac=dateFacRaw?_toDisplayDate(dateFacRaw):datePaie;
 
+      // Champs OBLIGATOIRES du relevé SIMPL-TVA : une ligne incomplète serait
+      // rejetée au dépôt — elle est écartée, et signalée.
+      const manquantsEdi=champsManquantsSimplTva({ifFournisseur:ifFrss,iceFournisseur:iceFrss,nomFournisseur:libFrss,
+        numeroFacture:factNum==="—"?"":factNum,dateFacture:dateFacRaw||tx.date_operation,tauxTva:taux});
+      if(manquantsEdi.length){ rejets.push(`${factNum} : ${manquantsEdi.join(", ")} manquant(s)`); return; }
       totalHT+=ht; totalTVA+=tva; totalTTC+=ttc;
       dataRows.push([i+1,factNum,libFrss.slice(0,50)||(tx.libelle||"").slice(0,50),ht,tva,ttc,ifFrss,libFrss,iceFrss,taux,i+1,datePaie,dateFac]);
     });
@@ -1615,8 +1633,10 @@ function BanquePage() {
     const wb=XLSX.utils.book_new();
     const ws=_buildEDISheet(XLSX,dossierInfo,annee,mois,dataRows,totalHT,totalTVA,totalTTC);
     XLSX.utils.book_append_sheet(wb,ws,"Relevé Déduction");
+    if(!dataRows.length){ toast.warning(`Aucune TVA déductible justifiée — ${rejets.length} ligne(s) écartée(s)`); return; }
     XLSX.writeFile(wb,`EDI_DGI_${(dossierInfo.nom_societe||"export").replace(/\s/g,"_")}_${annee}_${String(mois).padStart(2,"0")}.xlsx`);
-    toast.success(`EDI DGI — ${txEligibles.length} lignes | HT: ${Math.round(totalHT).toLocaleString("fr-MA")} MAD | TVA: ${Math.round(totalTVA).toLocaleString("fr-MA")} MAD`);
+    toast.success(`EDI DGI — ${dataRows.length} lignes | HT: ${Math.round(totalHT).toLocaleString("fr-MA")} MAD | TVA: ${Math.round(totalTVA).toLocaleString("fr-MA")} MAD`);
+    if(rejets.length) toast.warning(`${rejets.length} ligne(s) écartée(s) : ${rejets.slice(0,3).join(" · ")}${rejets.length>3?" …":""}`);
   };
 
 
@@ -1900,13 +1920,14 @@ function BanquePage() {
       // JOIN inline fournisseurs pour récupérer if_fiscal et ice (pas sur factures_fournisseurs)
       ffIds.length
         ?(supabase as any).from("factures_fournisseurs")
-          .select("id,numero,montant_ht,montant_tva,montant_ttc,date_facture,fournisseur_nom,fournisseur_id,fournisseurs(id,nom,ice,if_fiscal)")
+          // `*` : la colonne `type` (avoir) n'existe qu'après la migration 20261103130000.
+          .select("*,fournisseurs(id,nom,ice,if_fiscal)")
           .in("id",ffIds)
         :{data:[]},
       // justificatifs : numero_piece est le champ ref, pas de if_tiers/ice_tiers
       jIds.length
         ?(supabase as any).from("justificatifs")
-          .select("id,numero_piece,montant_ht,montant_ttc,taux_tva,nom_tiers,date_document,type_document")
+          .select("id,numero_piece,montant_ht,montant_ttc,taux_tva,nom_tiers,date_document,type_document,eligible_edi")
           .in("id",jIds)
         :{data:[]},
     ]);
@@ -1922,8 +1943,10 @@ function BanquePage() {
 
     const dataRows:any[][]=[];
     let totalHT=0,totalTVA=0,totalTTC=0;
+    const rejets:string[]=[];
+    const achatsExclus=await _achatsExclusEdi(Object.values(ffMap));
 
-    txEligibles.forEach((tx,i)=>{
+    txEligibles.forEach((tx)=>{
       const ff=tx.document_type==="facture_fournisseur"?ffMap[tx.facture_id as string]:null;
       const jus=tx.document_type==="justificatif"?jMap[tx.justificatif_id as string]:null;
 
@@ -1936,12 +1959,24 @@ function BanquePage() {
       // GÉNÉRIQUE par corrélation de comptes PCM (61473 ↔ 34552 même référence), sinon TTC.
       const pcm = PCM_MAP[(tx as any).categorie] ?? PCM_MAP.frais_bancaires;
       const frais = (!ff && !jus) ? _detailFraisBancaires(tx as any, transactions as any as FraisLot[], pcm.tva) : null;
-      const ht  = ff ? Math.round(Number(ff.montant_ht )*100)/100
-                     : jus ? Math.round(Number(jus.montant_ht)*100)/100 : frais!.ht;
-      const ttc = ff ? Math.round(Number(ff.montant_ttc)*100)/100
-                     : jus ? Math.round(Number(jus.montant_ttc)*100)/100 : frais!.ttc;
-      const tva = ff ? Math.round(Number(ff.montant_tva)*100)/100
-                     : jus ? Math.round((ttc-ht)*100)/100 : frais!.tva;
+      const r2e=(x:any)=>Math.round(Number(x||0)*100)/100;
+      // Une ligne liée à une facture CLIENT n'a aucun document ici : elle est écartée.
+      const document:DocumentEdi = ff
+        ? { nature:"facture_fournisseur", id:ff.id, ht:r2e(ff.montant_ht), tva:r2e(ff.montant_tva), ttc:r2e(ff.montant_ttc), type:ff.type }
+        : jus ? { nature:"justificatif", ht:r2e(jus.montant_ht), tva:r2e(Number(jus.montant_ttc)-Number(jus.montant_ht)), ttc:r2e(jus.montant_ttc), eligible_edi:jus.eligible_edi }
+        : (tx.facture_id && tx.document_type!=="facture_fournisseur") ? { nature:"facture_client" }
+        : null;
+      // Avant : la facture ENTIÈRE à chaque virement (pas de quote-part) — une
+      // facture réglée en deux fois faisait déduire deux fois sa TVA.
+      const q = qualifierLigneEdi({
+        type: tx.type, montant: Number(tx.montant), document,
+        fraisBancaires: !ff && !jus && estCompteFraisBancaires(_comptePcm(tx as any)),
+        tvaFraisAuReleve: frais?.auReleve ? { ht: frais.ht, tva: frais.tva } : null,
+        achatsExclus,
+      });
+      if(!q.ok){ rejets.push(`${tx.libelle||(tx as any).reference||"ligne"} : ${q.motif}`); return; }
+      const {ht,tva,ttc} = q;
+      const i = dataRows.length;
       const taux= frais ? frais.taux
                      : ff ? (ht>0&&tva>0?Math.round(tva/ht*100):0)
                      : jus ? (Number(jus.taux_tva)||(ht>0&&tva>0?Math.round(tva/ht*100):0)) : pcm.tva;
@@ -1959,6 +1994,11 @@ function BanquePage() {
       const dateFacRaw= ff?.date_facture || jus?.date_document || "";
       const dateFac   = dateFacRaw ? _toDisplayDate(dateFacRaw) : datePaie;
 
+      // Champs OBLIGATOIRES du relevé SIMPL-TVA : une ligne incomplète serait
+      // rejetée au dépôt — elle est écartée, et signalée.
+      const manquantsEdi=champsManquantsSimplTva({ifFournisseur:ifFrss,iceFournisseur:iceFrss,nomFournisseur:libFrss,
+        numeroFacture:factNum==="—"?"":factNum,dateFacture:dateFacRaw||tx.date_operation,tauxTva:taux});
+      if(manquantsEdi.length){ rejets.push(`${factNum} : ${manquantsEdi.join(", ")} manquant(s)`); return; }
       totalHT+=ht; totalTVA+=tva; totalTTC+=ttc;
       dataRows.push([i+1,factNum,libFrss.slice(0,50)||(tx.libelle||"").slice(0,50),ht,tva,ttc,ifFrss,libFrss,iceFrss,taux,i+1,datePaie,dateFac]);
     });
@@ -1967,8 +2007,10 @@ function BanquePage() {
     const wb=XLSX.utils.book_new();
     const ws=_buildEDISheet(XLSX,dossierInfo,annee,mois,dataRows,totalHT,totalTVA,totalTTC);
     XLSX.utils.book_append_sheet(wb,ws,"Relevé Déduction");
+    if(!dataRows.length){ toast.warning(`Aucune TVA déductible justifiée — ${rejets.length} ligne(s) écartée(s)`); return; }
     XLSX.writeFile(wb,`EDI_DGI_${(dossierInfo.nom_societe||"export").replace(/\s/g,"_")}_${annee}_${String(mois).padStart(2,"0")}.xlsx`);
-    toast.success(`EDI DGI — ${txEligibles.length} lignes | HT: ${Math.round(totalHT).toLocaleString("fr-MA")} | TVA: ${Math.round(totalTVA).toLocaleString("fr-MA")} MAD`);
+    toast.success(`EDI DGI — ${dataRows.length} lignes | HT: ${Math.round(totalHT).toLocaleString("fr-MA")} | TVA: ${Math.round(totalTVA).toLocaleString("fr-MA")} MAD`);
+    if(rejets.length) toast.warning(`${rejets.length} ligne(s) écartée(s) : ${rejets.slice(0,3).join(" · ")}${rejets.length>3?" …":""}`);
   };
 
   const genererBilanFromDB = () => {

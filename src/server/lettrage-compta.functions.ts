@@ -13,17 +13,19 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import {
-  COMPTES_TVA, controlerEquilibre, planifierDelettrage,
+  COMPTES_TVA, construireBasculeTva, controlerEquilibre, planifierDelettrage,
   planifierLettrage, referencesPiece, regrouperParCompte, sensDuCompte,
   type LigneLettrable, type SensTiers,
 } from "@/services/lettrage";
 import { synchroniserApresLettrage } from "./factures-gl.functions";
 import { controlerPiece } from "@/lib/liquidation-tva";
 import {
+  CATEGORIE_CONVENTION_COMPENSATION, PREFIXE_COMPENSATION, controlerMentionsFacture, controlerPieceCompensation, type IdentiteTiers,
   controlerEcrituresRegime, estBasculeTva, estJournalReglement, genererOdBasculeTva,
   JOURNAUX_REGLEMENT, type LigneTresoreriePreuve,
 } from "@/lib/genererEcritures";
 import { memeCompte, normaliserNumeroCompte } from "@/lib/numero-compte";
+import { compteTiersAuxiliaire } from "@/lib/comptes-auxiliaires";
 import { controlerCaissePositive, RACINE_CAISSE } from "@/lib/integrite-tresorerie";
 import { proxyFetch } from "./proxy-fetch";
 
@@ -40,6 +42,75 @@ import { proxyFetch } from "./proxy-fetch";
 // l'application, verrous compris. Un `insert` direct depuis un script
 // contournerait `controlerEcrituresRegime` — c'est-à-dire exactement les règles
 // que la reprise est censée rétablir.
+/**
+ * Pièces de compensation (OD COMP-<n°>) du dossier, jugées une à une par
+ * `controlerPieceCompensation` : convention, original, signatures, date réelle de
+ * signature, identité juridique des parties (fiches clients et fournisseurs),
+ * montant convenu. Une lecture en échec — table ou colonne absente avant
+ * migration — ne rend RIEN de recevable : faute de preuve, aucune compensation.
+ *
+ * `lignes` : les lignes RECEVABLES, datées de la SIGNATURE (le fait générateur),
+ * prêtes à servir de preuve de règlement ; `signatures` : n° de pièce → date de
+ * signature ; `refus` : n° de pièce → griefs.
+ */
+export async function lireCompensations(sb: any, dossierId: string): Promise<{
+  lignes: LigneTresoreriePreuve[]; signatures: Map<string, string>; refus: Map<string, string[]>;
+}> {
+  const vide = { lignes: [] as LigneTresoreriePreuve[], signatures: new Map<string, string>(), refus: new Map<string, string[]>() };
+  try {
+    const { data: od, error } = await sb.from("ecritures_comptables")
+      .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
+      .eq("dossier_id", dossierId).eq("journal_code", "OD").like("reference_piece", `${PREFIXE_COMPENSATION}%`);
+    if (error || !od?.length) return vide;
+    const [{ data: conv, error: eConv }, { data: clis, error: eCli }, { data: fous, error: eFou }] = await Promise.all([
+      sb.from("justificatifs")
+        .select("numero_piece,date_document,date_signature,signature_parties,categorie_pcm,montant_ttc,fichier_original_url,url_fichier")
+        .eq("dossier_id", dossierId).eq("categorie_pcm", CATEGORIE_CONVENTION_COMPENSATION),
+      sb.from("clients").select("nom,ice,if_fiscal,code_auxiliaire").eq("dossier_id", dossierId),
+      sb.from("fournisseurs").select("nom,ice,if_fiscal,code_auxiliaire").eq("dossier_id", dossierId),
+    ]);
+    if (eConv) return vide;
+    // Compte auxiliaire → identité du tiers. Un compte collectif (3421, 4411)
+    // n'identifie personne : la compensation y sera refusée.
+    const identites = new Map<string, IdentiteTiers>();
+    const indexer = (rows: any[] | null, sens: "client" | "fournisseur") => {
+      for (const t of rows ?? []) {
+        if (!String(t.code_auxiliaire ?? "").trim()) continue;
+        identites.set(normaliserNumeroCompte(compteTiersAuxiliaire(sens, t.code_auxiliaire)), { nom: t.nom, ice: t.ice, if_fiscal: t.if_fiscal });
+      }
+    };
+    if (!eCli) indexer(clis, "client");
+    if (!eFou) indexer(fous, "fournisseur");
+    const tiersDuCompte = (c: string) => identites.get(normaliserNumeroCompte(c));
+
+    const parRef = new Map<string, any[]>();
+    for (const l of od as any[]) {
+      const r = String(l.reference_piece ?? "").trim();
+      parRef.set(r, [...(parRef.get(r) ?? []), l]);
+    }
+    const out = { lignes: [] as LigneTresoreriePreuve[], signatures: new Map<string, string>(), refus: new Map<string, string[]>() };
+    for (const [ref, lignes] of parRef) {
+      const numero = ref.slice(PREFIXE_COMPENSATION.length).trim();
+      const convention = ((conv ?? []) as any[]).find((c) => String(c.numero_piece ?? "").trim() === numero);
+      const verdict = controlerPieceCompensation(lignes, convention, { tiersDuCompte });
+      if (!verdict.ok) { out.refus.set(ref, verdict.violations); continue; }
+      const signature = String(convention.date_signature).slice(0, 10);
+      out.signatures.set(ref, signature);
+      // Datées de la signature : c'est le jour où la compensation éteint les
+      // créances, et donc le jour du fait générateur de la TVA.
+      out.lignes.push(...lignes.map((l: any) => ({ ...l, date_ecriture: signature })));
+    }
+    return out;
+  } catch {
+    return vide;
+  }
+}
+
+/** Lignes des compensations recevables (cf. `lireCompensations`). */
+export async function compensationsRecevables(sb: any, dossierId: string): Promise<LigneTresoreriePreuve[]> {
+  return (await lireCompensations(sb, dossierId)).lignes;
+}
+
 export async function insererPiece(
   sb: any,
   dossierId: string,
@@ -49,6 +120,7 @@ export async function insererPiece(
   opts: { lettrageCode?: string | null; origine?: string } = {},
 ): Promise<{ error: string | null }> {
   // ── VERROU 7 : une bascule de TVA exige un règlement CONSTATÉ ─────────────
+  // (trésorerie BQ / CAI, ou compensation recevable — cf. lireCompensations).
   // Le contrôle a besoin du grand livre, qu'une fonction pure ne peut pas
   // connaître : c'est ICI, seul passage obligé vers la base, qu'on le lit.
   //
@@ -68,6 +140,10 @@ export async function insererPiece(
       // Client sans `select` (bouchons de test) : verrou non armé, à dessein.
     }
   }
+
+  // Compensation de créances réciproques : un règlement SANS mouvement d'argent,
+  // recevable seulement s'il est adossé à une convention datée et signée.
+  const compensations = tresorerie ? await compensationsRecevables(sb, dossierId) : [];
 
   // ── VERROU 8 : une caisse ne peut pas devenir créditrice (C_t ≥ 0) ────────
   // Même raisonnement que le verrou 7, et même prudence : l'invariant porte sur
@@ -108,7 +184,7 @@ export async function insererPiece(
   // Rendu comme une erreur et non jeté — cette fonction est appelée depuis des
   // chemins qui ne doivent jamais faire échouer le règlement qu'ils suivent
   // (cf. `comptabiliserReglement`).
-  const verdict = controlerEcrituresRegime(pourControle, { tresorerie });
+  const verdict = controlerEcrituresRegime(pourControle, { tresorerie, compensations });
   if (!verdict.ok) return { error: verdict.violations.join(" ") };
 
   const base = lignes.map((l) => ({
@@ -288,6 +364,42 @@ export interface BasculeTva {
   /** Lignes d'OD insérées (0 ou 2). */
   od: number;
   error?: string | null;
+  /** TVA d'achat volontairement RETENUE en attente (facture non conforme) : le motif. */
+  retenue?: string | null;
+}
+
+/**
+ * La facture fournisseur que désigne cette référence fonde-t-elle le droit à
+ * déduction (mentions des art. 145-146 CGI) ? Tant qu'elle ne le fait pas, sa TVA
+ * reste au 3458 : la bascule n'a pas lieu, et la prochaine passe la refera une
+ * fois la fiche complétée. Référence qui ne désigne aucune facture fournisseur
+ * (ligne de banque, pièce reprise d'un grand livre) : rien à contrôler ici.
+ */
+export async function mentionsAchatManquantes(sb: any, dossierId: string, reference: string): Promise<string[]> {
+  try {
+    const ref = String(reference ?? "").trim();
+    if (!ref) return [];
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+    const { data, error } = await sb.from("factures_fournisseurs")
+      .select("id,numero,date_facture,montant_ht,montant_tva,montant_ttc,lignes,fournisseur_nom,ice_vendeur,if_vendeur,fournisseur_id")
+      .eq("dossier_id", dossierId).eq(uuid ? "id" : "numero", ref);
+    if (error || !data?.length) return [];
+    const f = data[0] as any;
+    let ice = f.ice_vendeur, ifFiscal = f.if_vendeur, nom = f.fournisseur_nom;
+    if (f.fournisseur_id && (!ice || !ifFiscal)) {
+      const { data: fo } = await sb.from("fournisseurs").select("nom,ice,if_fiscal").eq("id", f.fournisseur_id);
+      const fiche = (fo ?? [])[0] as any;
+      ice = ice || fiche?.ice; ifFiscal = ifFiscal || fiche?.if_fiscal; nom = nom || fiche?.nom;
+    }
+    const lignes = Array.isArray(f.lignes) ? f.lignes : [];
+    return controlerMentionsFacture({
+      fournisseur_nom: nom, ice_fournisseur: ice, if_fournisseur: ifFiscal, numero: f.numero,
+      date_facture: f.date_facture, designations: lignes.map((l: any) => l?.designation),
+      montant_ht: f.montant_ht, montant_tva: f.montant_tva, montant_ttc: f.montant_ttc,
+    }).manquantes;
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -319,6 +431,14 @@ export async function basculerTvaSurReglement(
     await tvaEnAttenteDeLaPiece(sb, p.dossierId, p.reference, p.sens);
   if (tvaAttente <= 0) return { tva: 0, od: 0 };      // pièce sans TVA, ou déjà basculée
   if (p.montantRegle <= 0.005) return { tva: 0, od: 0 };
+  // Droit à déduction : la facture doit porter ses mentions obligatoires. Sinon
+  // la TVA RESTE en attente — sans erreur : le règlement, lui, est bien constaté.
+  if (p.sens === "fournisseur") {
+    const manquantes = await mentionsAchatManquantes(sb, p.dossierId, p.reference);
+    if (manquantes.length) {
+      return { tva: 0, od: 0, retenue: `TVA de « ${p.reference} » conservée en attente : facture incomplète (${manquantes.join(", ")}).` };
+    }
+  }
 
   // Le prorata appartient au générateur (src/lib/genererEcritures.ts), et à lui
   // seul : la règle « au prorata de la TVA d'ORIGINE, plafonné au reste en
@@ -354,6 +474,73 @@ export async function basculerTvaSurReglement(
   });
   if (error) return { tva: 0, od: 0, error };
   return { tva: aBasculer, od: od.length };
+}
+
+/** Journaux des avoirs : client (VTE-AVR) et fournisseur (ACH-AVR). */
+const JOURNAL_AVOIR: Record<SensTiers, string> = { client: "VTE-AVR", fournisseur: "ACH-AVR" };
+
+/**
+ * TVA d'un AVOIR encore à reprendre. L'avoir a posé sa TVA en sens inverse sur le
+ * compte d'attente (vente : D 4458 ; achat : C 3458) ; la reprise la ramène.
+ */
+export async function tvaAvoirDeLaPiece(
+  sb: any, dossierId: string, reference: string, sens: SensTiers,
+): Promise<{ tvaAvoir: number; tvaAReprendre: number; ttcAvoir: number }> {
+  const { data } = await sb.from("ecritures_comptables")
+    .select("journal_code,compte_numero,debit,credit")
+    .eq("dossier_id", dossierId).in("reference_piece", referencesPiece(reference));
+  const lignes = (data ?? []) as any[];
+  const attente = COMPTES_TVA[sens].attente;
+  const avr = lignes.filter((l) => String(l.journal_code ?? "").toUpperCase() === JOURNAL_AVOIR[sens]);
+  if (!avr.length) return { tvaAvoir: 0, tvaAReprendre: 0, ttcAvoir: 0 };
+  const surAttente = (l: any) => memeCompte(l.compte_numero, attente);
+  // Vente : l'avoir DÉBITE l'attente, la reprise la CRÉDITE. Achat : l'inverse.
+  const tvaAvoir = avr.filter(surAttente).reduce((s, l) => s + (sens === "client" ? nb(l.debit) : nb(l.credit)), 0);
+  const reprise = lignes.filter((l) => String(l.journal_code ?? "").toUpperCase() === "OD" && surAttente(l))
+    .reduce((s, l) => s + (sens === "client" ? nb(l.credit) : nb(l.debit)), 0);
+  const ttcAvoir = avr.filter((l) => sensDuCompte(l.compte_numero) === sens)
+    .reduce((s, l) => s + (sens === "client" ? nb(l.credit) : nb(l.debit)), 0);
+  return {
+    tvaAvoir: round2(tvaAvoir),
+    tvaAReprendre: Math.max(0, round2(tvaAvoir - reprise)),
+    ttcAvoir: round2(ttcAvoir),
+  };
+}
+
+/**
+ * Reprise de la TVA d'un avoir, au prorata de la part lettrée — l'imputation sur
+ * une facture, ou le remboursement du client / par le fournisseur :
+ *
+ *   avoir client       D 44551 / C 4458   la TVA collectée diminue
+ *   avoir fournisseur  D 3458  / C 34552  la TVA déduite est reversée
+ *
+ * Sans elle, un avoir lettré avec sa facture laissait la TVA collectée sur la
+ * TOTALITÉ de la facture (la bascule mesure la facture lettrée, pas l'argent
+ * reçu), et un avoir remboursé après encaissement intégral ne réduisait jamais
+ * la TVA due.
+ */
+export async function reprendreTvaAvoir(
+  sb: any,
+  p: { dossierId: string; reference: string; sens: SensTiers; montantLettre: number; date: string;
+    lettrageCode?: string | null; origine?: "auto" | "manuel" },
+): Promise<BasculeTva> {
+  const { tvaAvoir, tvaAReprendre, ttcAvoir } = await tvaAvoirDeLaPiece(sb, p.dossierId, p.reference, p.sens);
+  if (tvaAReprendre <= 0.005 || p.montantLettre <= 0.005) return { tva: 0, od: 0 };
+  const proratise = ttcAvoir > 0 ? round2(tvaAvoir * Math.min(1, p.montantLettre / ttcAvoir)) : tvaAReprendre;
+  const montant = round2(Math.min(proratise, tvaAReprendre));
+  if (montant <= 0.005) return { tva: 0, od: 0 };
+  // Même OD que la bascule d'une facture, sens inversé ligne à ligne.
+  const od = construireBasculeTva({
+    sens: p.sens, montantTva: montant, date: p.date, reference: p.reference,
+    libelle: `Reprise TVA avoir ${p.reference}`, lettrageCode: p.lettrageCode ?? "",
+  }).map((l) => ({ ...l, debit: l.credit, credit: l.debit }));
+  const ctrl = controlerPiece(od);
+  if (!ctrl.ok) return { tva: 0, od: 0, error: ctrl.raison ?? "Pièce déséquilibrée" };
+  const { error } = await insererPiece(sb, p.dossierId, od, {
+    lettrageCode: p.lettrageCode || null, origine: p.origine ?? "auto",
+  });
+  if (error) return { tva: 0, od: 0, error };
+  return { tva: montant, od: od.length };
 }
 
 export interface ResultatLettrage {
@@ -429,6 +616,31 @@ export async function executerLettrage(
     });
     if (!plan.ok) return { ok: false, reason: plan.raison, code: null };
 
+    // 2 bis) Compensation : une OD COMP-<n°> ne se lettre que RECEVABLE —
+    // convention originale, signée des deux parties, datée, même personne
+    // juridique, montant convenu respecté. Sinon le règlement n'est pas établi
+    // et la facture ne doit pas passer pour soldée.
+    const refsCompensation = [...new Set(lignes.map((l) => String(l.reference_piece ?? "").trim())
+      .filter((r) => r.startsWith(PREFIXE_COMPENSATION)))];
+    const compensations = refsCompensation.length ? await lireCompensations(sb, data.dossierId) : null;
+    if (compensations) {
+      for (const r of refsCompensation) {
+        if (!compensations.signatures.has(r)) {
+          return { ok: false, reason: `Compensation « ${r} » non recevable : ${(compensations.refus.get(r) ?? ["convention introuvable"]).join(" ")}`, code: null };
+        }
+      }
+    }
+    // Part du lettrage réglée par compensation, à imputer sur les factures du
+    // groupe : elle se date de la SIGNATURE de la convention (fait générateur),
+    // le reste de la date du règlement de trésorerie.
+    let resteCompense = 0;
+    let dateCompensation = "";
+    if (compensations && plan.sens) {
+      resteCompense = round2(lignes.filter((l) => String(l.reference_piece ?? "").startsWith(PREFIXE_COMPENSATION))
+        .reduce((s, l) => s + (plan.sens === "client" ? nb(l.credit) - nb(l.debit) : nb(l.debit) - nb(l.credit)), 0));
+      dateCompensation = refsCompensation.map((r) => compensations.signatures.get(r) ?? "").sort().at(-1) ?? "";
+    }
+
     // 3) Estampiller les lignes. Le garde `is("lettrage_code", null)` rend
     // l'opération idempotente : deux clics concurrents ne posent qu'un code.
     const maintenant = new Date().toISOString();
@@ -476,7 +688,28 @@ export async function executerLettrage(
         const montantSolde = lignes
           .filter((l) => String(l.reference_piece ?? "").trim() === ref)
           .reduce((s, l) => s + (sens === "client" ? nb(l.debit) : nb(l.credit)), 0);
-        if (montantSolde <= 0.005) continue;   // aucune ligne de facture de cette pièce ici
+        if (montantSolde <= 0.005) {
+          // Côté opposé : un AVOIR lettré (imputé sur une facture, ou remboursé)
+          // reprend sa TVA au prorata de la part lettrée. Pour une ligne de
+          // banque, la reprise ne trouve aucun avoir et ne fait rien.
+          const montantAvoir = lignes
+            .filter((l) => String(l.reference_piece ?? "").trim() === ref
+              && String((l as any).journal_code ?? "").toUpperCase() === JOURNAL_AVOIR[sens])
+            .reduce((s, l) => s + (sens === "client" ? nb(l.credit) : nb(l.debit)), 0);
+          if (montantAvoir > 0.005) {
+            const ra = await reprendreTvaAvoir(sb, {
+              dossierId: data.dossierId, reference: ref, sens, montantLettre: montantAvoir,
+              date: dateTva, lettrageCode: plan.code, origine: data.origine,
+            });
+            if (ra.error) {
+              await annulerEstampillage();
+              return { ok: false, reason: `Reprise de TVA de l'avoir impossible : ${ra.error}`, code: null };
+            }
+            odInserees += ra.od;
+            tvaBasculee -= ra.tva;
+          }
+          continue;   // aucune ligne de facture de cette pièce ici
+        }
 
         // Traçabilité : la facture est celle qu'estampillent les lignes de CETTE
         // référence. On la lit sur les lignes plutôt que de la demander à
@@ -485,18 +718,28 @@ export async function executerLettrage(
           .filter((l) => String(l.reference_piece ?? "").trim() === ref)
           .map((l) => (l as any).facture_id).find(Boolean) ?? null;
 
-        const r = await basculerTvaSurReglement(sb, {
-          dossierId: data.dossierId, reference: ref, sens,
-          montantRegle: montantSolde, date: dateTva,
-          lettrageCode: plan.code, origine: data.origine,
-          factureId, paiementId: data.paiementId ?? null,
-        });
-        if (r.error) {
-          await annulerEstampillage();
-          return { ok: false, reason: `Bascule de TVA impossible : ${r.error}`, code: null };
+        // Règlement MIXTE (compensation + virement) : deux bascules, chacune à la
+        // date de SON moyen de règlement — la signature pour la part compensée.
+        const partCompensee = round2(Math.min(resteCompense, montantSolde));
+        resteCompense = round2(resteCompense - partCompensee);
+        const parts = [
+          { montant: partCompensee, date: dateCompensation || dateTva },
+          { montant: round2(montantSolde - partCompensee), date: dateTva },
+        ].filter((p) => p.montant > 0.005);
+        for (const part of parts) {
+          const r = await basculerTvaSurReglement(sb, {
+            dossierId: data.dossierId, reference: ref, sens,
+            montantRegle: part.montant, date: part.date,
+            lettrageCode: plan.code, origine: data.origine,
+            factureId, paiementId: data.paiementId ?? null,
+          });
+          if (r.error) {
+            await annulerEstampillage();
+            return { ok: false, reason: `Bascule de TVA impossible : ${r.error}`, code: null };
+          }
+          odInserees += r.od;
+          tvaBasculee += r.tva;
         }
-        odInserees += r.od;
-        tvaBasculee += r.tva;
       }
     }
 

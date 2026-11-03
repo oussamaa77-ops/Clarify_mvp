@@ -675,7 +675,10 @@ export const generateFactureXml = createServerFn({ method: "POST" })
     // Une facture DÉJÀ conforme n'est pas recomptabilisée : la transmission la
     // refuse d'elle-même, et le contrôle d'unicité la rejetterait à tort.
     let ecrituresVente: ReturnType<typeof lignesEcrituresVente> | null = null;
-    if (Number(facture.montant_ttc) > 0 && (facture as any).statut !== "conforme") {
+    // Un avoir peut arriver en montants négatifs (import) : il se comptabilise aussi.
+    const estAvoirPiece = normaliserTypeVente((facture as any).type) === "avoir";
+    if ((Number(facture.montant_ttc) > 0 || (estAvoirPiece && Math.abs(Number(facture.montant_ttc)) > 0.005))
+      && (facture as any).statut !== "conforme") {
       const ref = facture.numero ?? facture.id;
       // Ligne 3 — compte de TIERS : auxiliaire du client (C0002 → 34210002) si sa
       // fiche porte un code, sinon le collectif 3421. Le lettrage et la balance

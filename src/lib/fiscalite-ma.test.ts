@@ -3,6 +3,8 @@ import {
   situerExercice, calculerCotisationMinimale, calculerAcomptesIS, calculerIS,
   calculerTP, statutTva, trancheIS, lireParametresFiscaux,
   TAUX_CM_DROIT_COMMUN, CM_MINIMUM_MAD, ANNEES_EXONERATION_TP, formatDateFr,
+  agregatsFiscaux, lireAjustementsFiscaux, resultatFiscal, normaliserRegimeIS,
+  TAUX_IS_ETABLISSEMENT_CREDIT, imputerDeficits, baremeIS,
 } from "./fiscalite-ma";
 
 describe("situerExercice", () => {
@@ -281,5 +283,105 @@ describe("formatDateFr", () => {
   it("formate en JJ/MM/AAAA", () => {
     expect(formatDateFr("2026-03-31")).toBe("31/03/2026");
     expect(formatDateFr(null)).toBe("");
+  });
+});
+
+// ─── Correctifs fiscaux du 2026-11-03 ────────────────────────────────────────
+describe("régime IS des établissements de crédit", () => {
+  it("applique 40 % sur tout le bénéfice", () => {
+    expect(trancheIS(1_000_000, "etablissement_credit").taux).toBe(TAUX_IS_ETABLISSEMENT_CREDIT);
+    const r = calculerIS({ exercice: 2026, resultatFiscal: 1_000_000, baseCotisationMinimale: 0, regime: "etablissement_credit" });
+    expect(r.isTheorique).toBe(400_000);
+  });
+  it("est lu depuis le dossier, une valeur inconnue retombant sur le droit commun", () => {
+    expect(lireParametresFiscaux({ regime_is: "etablissement_credit" }).regimeIS).toBe("etablissement_credit");
+    expect(normaliserRegimeIS("autre")).toBe("droit_commun");
+  });
+});
+
+describe("agregatsFiscaux", () => {
+  const l = (compte: string, debit: number, credit: number, extra: Record<string, unknown> = {}) =>
+    ({ compte_numero: compte, debit, credit, date_ecriture: "2026-05-10", journal_code: "OD", ...extra });
+
+  it("exclut l'IS comptabilisé (67) des charges : résultat AVANT impôt", () => {
+    const a = agregatsFiscaux([l("71240000", 0, 500_000), l("61250000", 100_000, 0), l("67010000", 80_000, 0)], 2026);
+    expect(a.charges).toBe(100_000);
+    expect(a.impotsResultats).toBe(80_000);
+    expect(a.resultatAvantImpot).toBe(400_000);
+  });
+
+  it("limite la base de CM aux produits de l'art. 144-I-B (sans reprises ni cessions)", () => {
+    const a = agregatsFiscaux([
+      l("7111", 0, 1_000_000),   // CA
+      l("7181", 0, 10_000),      // autres produits d'exploitation
+      l("7381", 0, 5_000),       // intérêts
+      l("7190", 0, 40_000),      // reprise d'exploitation — exclue
+      l("7513", 0, 200_000),     // cession d'immobilisation — exclue
+      l("7590", 0, 7_000),       // reprise non courante — exclue
+    ], 2026);
+    expect(a.produits).toBe(1_262_000);
+    expect(a.baseCotisationMinimale).toBe(1_015_000);
+    expect(a.ca).toBe(1_000_000);
+  });
+
+  it("ignore les autres exercices et le journal des à-nouveaux", () => {
+    const a = agregatsFiscaux([
+      l("7111", 0, 100, { date_ecriture: "2025-12-31" }),
+      l("7111", 0, 300, { journal_code: "AN" }),
+      l("7111", 0, 50),
+    ], 2026);
+    expect(a.produits).toBe(50);
+    expect(a.nbEcritures).toBe(1);
+  });
+});
+
+describe("ajustements fiscaux", () => {
+  const dossier = { ajustements_fiscaux: { "2026": { reintegrations: 12_000, deductions: "2000", is_du_precedent: 60_000 } } };
+
+  it("lit les ajustements de l'exercice demandé, et rien pour les autres", () => {
+    expect(lireAjustementsFiscaux(dossier, 2026)).toEqual({ reintegrations: 12_000, deductions: 2_000, isDuPrecedent: 60_000, deficitsAnterieurs: 0 });
+    expect(lireAjustementsFiscaux(dossier, 2025)).toEqual({ reintegrations: 0, deductions: 0, isDuPrecedent: null, deficitsAnterieurs: 0 });
+    expect(lireAjustementsFiscaux({}, 2026).isDuPrecedent).toBeNull();
+  });
+
+  it("résultat fiscal = résultat avant impôt + réintégrations − déductions", () => {
+    const a = agregatsFiscaux([{ compte_numero: "7111", debit: 0, credit: 100_000, date_ecriture: "2026-01-02" }], 2026);
+    expect(resultatFiscal(a, lireAjustementsFiscaux(dossier, 2026))).toBe(110_000);
+  });
+});
+
+
+describe("déficits reportables (art. 12 CGI)", () => {
+  const agr = (rai: number) => ({ produits: 0, charges: 0, impotsResultats: 0, resultatAvantImpot: rai, ca: 0, baseCotisationMinimale: 0, nbEcritures: 1 });
+  const aj = (deficitsAnterieurs: number) => ({ reintegrations: 0, deductions: 0, isDuPrecedent: null, deficitsAnterieurs });
+
+  it("impute le déficit dans la limite du bénéfice", () => {
+    expect(imputerDeficits(agr(100_000), aj(30_000))).toEqual({ avantDeficit: 100_000, deficitImpute: 30_000, resultatFiscal: 70_000, deficitReportable: 0 });
+    expect(imputerDeficits(agr(20_000), aj(30_000))).toEqual({ avantDeficit: 20_000, deficitImpute: 20_000, resultatFiscal: 0, deficitReportable: 10_000 });
+  });
+
+  it("ajoute le déficit de l'exercice au stock reportable, sans l'imputer", () => {
+    expect(imputerDeficits(agr(-50_000), aj(10_000))).toEqual({ avantDeficit: -50_000, deficitImpute: 0, resultatFiscal: -50_000, deficitReportable: 60_000 });
+  });
+
+  it("laisse la cotisation minimale due quand le déficit absorbe le bénéfice", () => {
+    const r = calculerIS({ exercice: 2026, resultatFiscal: imputerDeficits(agr(20_000), aj(30_000)).resultatFiscal, baseCotisationMinimale: 2_000_000 });
+    expect(r.isTheorique).toBe(0);
+    expect(r.isDu).toBe(5_000);
+  });
+});
+
+describe("barème IS de l'exercice concerné (LF 2023, transitoire)", () => {
+  it("applique les paliers transitoires aux exercices 2023 à 2025", () => {
+    expect(trancheIS(200_000, "droit_commun", 2024).taux).toBe(0.15);
+    expect(trancheIS(500_000, "droit_commun", 2024).taux).toBe(0.20);
+    expect(trancheIS(5_000_000, "droit_commun", 2025).taux).toBe(0.2275);
+    expect(trancheIS(300_000, "droit_commun", 2023).taux).toBe(0.125);
+  });
+
+  it("applique le barème cible à partir de 2026, sans toucher aux exercices antérieurs", () => {
+    expect(trancheIS(200_000, "droit_commun", 2026).taux).toBe(0.20);
+    expect(baremeIS(2027)).toBe(baremeIS(2026));
+    expect(calculerIS({ exercice: 2024, resultatFiscal: 200_000, baseCotisationMinimale: 0 }).isTheorique).toBe(30_000);
   });
 });

@@ -3,7 +3,9 @@ import {
   partReglee,
   synthetiserTva,
   tvaRecuperableEnCours,
-  echeanceSimplTva,
+  echeanceSimplTva, tvaHorsFactures, classerDeductibiliteAchats,
+  calendrierTva, periodiciteTva, periodesDeclareesTva, prochaineEcheanceTva, etatsDeclarationsTva,
+  reglementsParCompensation,
   joursAvant,
   ventilerChargesParCompte,
   ventilerVentesParCompte,
@@ -550,5 +552,159 @@ describe("calculerCashFlow", () => {
   it("marge négative quand on décaisse plus qu'on encaisse", () => {
     const achats = [f({ montant_paye: 1200, montant_restant: 0, statut_paiement: "payee" })];
     expect(calculerCashFlow([], achats).marge).toBe(-1000);
+  });
+});
+
+// ─── Correctifs fiscaux du 2026-11-03 ────────────────────────────────────────
+describe("echeanceSimplTva — régime trimestriel", () => {
+  it("fin du mois suivant le trimestre", () => {
+    const t1 = echeanceSimplTva("2026-T1")!;
+    expect([t1.getFullYear(), t1.getMonth() + 1, t1.getDate()]).toEqual([2026, 4, 30]);
+    const t4 = echeanceSimplTva("2026-T4")!;
+    expect([t4.getFullYear(), t4.getMonth() + 1, t4.getDate()]).toEqual([2027, 1, 31]);
+  });
+});
+
+describe("tvaHorsFactures — TVA née en trésorerie sans facture", () => {
+  const ecritures = [
+    { journal_code: "BQ", compte_numero: "34552", debit: 15, credit: 0, date_ecriture: "2026-04-30" },   // TVA sur frais bancaires
+    { journal_code: "OD", compte_numero: "34552", debit: 200, credit: 0, date_ecriture: "2026-04-15" },  // bascule d'une facture : déjà comptée
+    { journal_code: "BQ", compte_numero: "34552", debit: 99, credit: 0, date_ecriture: "2026-05-02" },   // hors période
+  ];
+
+  it("ne retient que les journaux BQ / CAI de la période", () => {
+    expect(tvaHorsFactures(ecritures, { debut: "2026-04-01", fin: "2026-04-30" })).toEqual({ collectee: 0, deductible: 15 });
+  });
+
+  it("est ajoutée à la TVA déductible de la synthèse quand les écritures sont fournies", () => {
+    const s = synthetiserTva([], [], { debut: "2026-04-01", fin: "2026-04-30", ecritures });
+    expect(s.deductible).toBe(15);
+    expect(s.nette).toBe(-15);
+    expect(synthetiserTva([], [], { debut: "2026-04-01", fin: "2026-04-30" }).deductible).toBe(0);
+  });
+
+  it("fait apparaître le mois dans la liste des périodes", () => {
+    expect(periodesTva([], [], [], ecritures)).toEqual(["2026-05", "2026-04"]);
+  });
+});
+
+
+describe("classerDeductibiliteAchats — la comptabilisation décide de la déduction", () => {
+  const ecritures = [
+    { journal_code: "ACH", compte_numero: "6143", debit: 600, credit: 0, reference_piece: "resto" },
+    { journal_code: "ACH", compte_numero: "44110001", debit: 0, credit: 600, reference_piece: "resto" },
+    { journal_code: "ACH", compte_numero: "6125", debit: 500, credit: 0, reference_piece: "fourn" },
+    { journal_code: "ACH", compte_numero: "3458", debit: 100, credit: 0, reference_piece: "fourn" },
+  ];
+
+  const achats = [
+    { id: "resto", montant_ht: 500, montant_tva: 100, montant_ttc: 600, statut_paiement: "payee", date_facture: "2026-04-02" },
+    { id: "fourn", montant_ht: 500, montant_tva: 100, montant_ttc: 600, statut_paiement: "payee", date_facture: "2026-04-02" },
+    { id: "ancien", numero: "F-OLD", montant_ht: 500, montant_tva: 100, montant_ttc: 600, statut_paiement: "payee", date_facture: "2026-04-02" },
+  ];
+
+  it("distingue non déductible, non classé et déductible", () => {
+    const d = classerDeductibiliteAchats(achats, ecritures);
+    expect([...d.nonDeductibles]).toEqual(["resto"]);
+    expect([...d.nonClasses]).toEqual(["ancien"]);
+    expect(d.exclus.has("fourn")).toBe(false);
+  });
+
+  it("ne présume jamais déductible un achat sans écriture d'achat", () => {
+    expect(synthetiserTva([], achats).deductible).toBe(300);
+    expect(synthetiserTva([], achats, { achatsExclus: classerDeductibiliteAchats(achats, ecritures).exclus }).deductible).toBe(100);
+  });
+
+  it("retrouve une écriture reprise par le numéro de la facture", () => {
+    const repris = [...ecritures, { journal_code: "ACH", compte_numero: "3458", debit: 100, credit: 0, reference_piece: "F-OLD" }];
+    expect(classerDeductibiliteAchats(achats, repris).nonClasses.size).toBe(0);
+  });
+
+  it("ne signale pas un achat sans TVA", () => {
+    expect(classerDeductibiliteAchats([{ id: "x", montant_tva: 0 }], []).nonClasses.size).toBe(0);
+  });
+});
+
+
+describe("périodicité TVA — art. 108, année par année", () => {
+  it("nouvelle entreprise : trimestrielle l'année de son début", () => {
+    expect(periodiciteTva({ date_debut_activite: "2026-03-01" }, 2026, null)).toMatchObject({ periodicite: "trimestriel", source: "nouvelle_entreprise" });
+  });
+  it("CA taxable N-1 : >= 1 000 000 mensuelle, sinon trimestrielle", () => {
+    expect(periodiciteTva({}, 2026, 1_000_000).periodicite).toBe("mensuel");
+    expect(periodiciteTva({}, 2026, 999_999).periodicite).toBe("trimestriel");
+  });
+  it("saisonnière : trimestrielle ; non-résident : mensuelle ; option : mensuelle", () => {
+    expect(periodiciteTva({ periodicite_tva: "saisonniere" }, 2026, 5_000_000).periodicite).toBe("trimestriel");
+    expect(periodiciteTva({ periodicite_tva: "non_resident" }, 2026, 10).periodicite).toBe("mensuel");
+    expect(periodiciteTva({ periodicite_tva: "option_mensuelle" }, 2026, 200_000)).toMatchObject({ periodicite: "mensuel", source: "option" });
+  });
+  it("CA inconnu : trimestrielle à confirmer — plus aucune présomption mensuelle", () => {
+    expect(periodiciteTva(null, 2026)).toMatchObject({ periodicite: "trimestriel", source: "defaut" });
+  });
+  it("préserve la périodicité retenue pour une année historique", () => {
+    const d = { ajustements_fiscaux: { "2025": { periodicite_tva: "mensuel" } } };
+    expect(periodiciteTva(d, 2025, 100)).toMatchObject({ periodicite: "mensuel", source: "historique" });
+    expect(periodiciteTva(d, 2026, 100).periodicite).toBe("trimestriel");
+  });
+});
+
+describe("calendrier TVA — état réel des déclarations", () => {
+  const auj = new Date(2026, 10, 3); // 3 novembre 2026
+  const odLiquidation = (p: string, du: number) => [
+    { reference_piece: `DECL-TVA-${p}`, compte_numero: "44551", debit: du, credit: 0 },
+    { reference_piece: `DECL-TVA-${p}`, compte_numero: "4456", debit: 0, credit: du },
+  ];
+
+  it("une OD de liquidation SANS récépissé laisse la période non déposée", () => {
+    const etats = etatsDeclarationsTva(odLiquidation("2026-09", 500), []);
+    const cal = calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats });
+    const sept = cal.find((e) => e.periode === "2026-09")!;
+    expect(sept).toMatchObject({ statut: "en_retard", liquidee: true, deposee: false });
+  });
+
+  it("déposée (récépissé) mais non payée : à payer ; payée : réglée", () => {
+    const ecr = [...odLiquidation("2026-09", 500)];
+    expect(calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats: etatsDeclarationsTva(ecr, ["DECL-TVA-2026-09.pdf"]) })
+      .find((e) => e.periode === "2026-09")?.statut).toBe("a_payer");
+    ecr.push({ reference_piece: "DECL-TVA-2026-09", compte_numero: "4456", debit: 500, credit: 0 });
+    expect(calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats: etatsDeclarationsTva(ecr, ["DECL-TVA-2026-09.pdf"]) })
+      .find((e) => e.periode === "2026-09")?.statut).toBe("reglee");
+  });
+
+  it("une période en crédit déposée est réglée sans paiement", () => {
+    const ecr = [{ reference_piece: "DECL-TVA-2026-10", compte_numero: "3456", debit: 300, credit: 0 }];
+    const etats = etatsDeclarationsTva(ecr, ["DECL-TVA-2026-10.pdf"]);
+    expect(calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats }).find((e) => e.periode === "2026-10")?.statut).toBe("reglee");
+  });
+
+  it("applique à chaque année SA périodicité, et le début d'activité", () => {
+    const cal = calendrierTva({
+      periodicite: (a) => (a === 2025 ? "mensuel" : "trimestriel"), aujourdhui: auj,
+      etats: new Map(), dateDebutActivite: "2025-11-01",
+    });
+    expect(cal.map((e) => e.periode)).toEqual(["2025-11", "2025-12", "2026-T1", "2026-T2", "2026-T3", "2026-T4"]);
+    expect(prochaineEcheanceTva(cal)?.periode).toBe("2025-11");
+  });
+
+  it("ne dépend pas de l'existence de factures : une période vide se déclare aussi", () => {
+    const cal = calendrierTva({ periodicite: "trimestriel", aujourdhui: auj, etats: new Map(), dateDebutActivite: "2026-04-15" });
+    expect(cal.find((e) => e.periode === "2026-T3")).toMatchObject({ statut: "en_retard", echeance: "2026-10-31" });
+  });
+
+  it("lit les périodes liquidées dans les références d'OD", () => {
+    expect([...periodesDeclareesTva(["DECL-TVA-2026-09", "FA-1", "DECL-TVA-2026-T2", null])]).toEqual(["2026-09", "2026-T2"]);
+  });
+});
+
+describe("reglementsParCompensation — règlements datés de la signature", () => {
+  const ecr = [
+    { journal_code: "ACH", compte_numero: "44110003", reference_piece: "ff1", lettrage_code: "AB", debit: 0, credit: 6000, date_ecriture: "2026-04-01" },
+    { journal_code: "OD", compte_numero: "44110003", reference_piece: "COMP-CV-7", lettrage_code: "AB", debit: 4000, credit: 0, date_ecriture: "2026-06-30" },
+    { journal_code: "BQ", compte_numero: "44110003", reference_piece: "VIR", lettrage_code: "AB", debit: 2000, credit: 0, date_ecriture: "2026-05-02" },
+  ];
+  it("retient la part compensée, datée de la signature et non de l'OD", () => {
+    const p = reglementsParCompensation(ecr, [{ id: "ff1" }], "fournisseur", new Map([["CV-7", "2026-05-20"]]));
+    expect(p).toEqual([{ facture_fournisseur_id: "ff1", montant: 4000, date_paiement: "2026-05-20", origine: "compensation", reference: "COMP-CV-7" }]);
   });
 });

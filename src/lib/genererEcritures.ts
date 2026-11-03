@@ -262,6 +262,60 @@ export function bornesExerciceActif(
   return bornesExercice(annee ?? exerciceCourant(aujourdhui), dossier?.date_debut_activite ?? null);
 }
 
+// ─── VERROU 11 — retouche manuelle d'une écriture existante ──────────────────
+//
+// L'écran Comptabilité laissait modifier et supprimer N'IMPORTE quelle écriture :
+// une ligne de facture (VTE / ACH), une ligne lettrée, l'OD d'une déclaration
+// de TVA, une écriture d'un exercice antérieur. Une suppression y ouvrait une
+// demi-pièce, faisait disparaître un règlement ou une TVA déclarée, sans trace.
+// Une écriture validée se corrige par une contre-écriture (avoir, annulation du
+// règlement, régularisation), pas par effacement.
+
+/** Ce qu'une retouche doit savoir d'une écriture. */
+export interface EcritureRetouchee {
+  journal_code?: string | null;
+  reference_piece?: string | null;
+  lettrage_code?: string | null;
+  facture_id?: string | null;
+  transaction_id?: string | null;
+  paiement_id?: string | null;
+  date_ecriture?: string | null;
+}
+
+export interface VerdictRetouche {
+  /**
+   * Motif qui interdit de supprimer la ligne ou d'en changer les montants, la
+   * date, le journal ou la référence (null = ligne libre). Le compte et le
+   * libellé restent corrigeables : un reclassement ne défait aucune pièce.
+   */
+  verrou: string | null;
+  /** La ligne appartient à un exercice antérieur à l'exercice actif. */
+  exerciceAnterieur: boolean;
+}
+
+/** Champs dont la modification défait la pièce : interdits sur une ligne verrouillée. */
+export const CHAMPS_STRUCTURANTS = ["debit", "credit", "date_ecriture", "journal_code", "reference_piece"] as const;
+
+export function verdictRetouche(e: EcritureRetouchee, exerciceActif?: BornesExercice | null): VerdictRetouche {
+  const journal = txt(e.journal_code).toUpperCase();
+  const ref = txt(e.reference_piece);
+  let verrou: string | null = null;
+  if (txt(e.lettrage_code)) {
+    verrou = `écriture lettrée (${txt(e.lettrage_code)}) — délettrez-la d'abord depuis l'onglet Lettrage`;
+  } else if ((JOURNAUX_FACTURATION as readonly string[]).includes(journal)) {
+    verrou = "écriture d'une facture — corrigez la pièce d'origine (avoir) plutôt que son écriture";
+  } else if (journal === "AN") {
+    verrou = "écriture d'à-nouveau — elle se régénère depuis la clôture de l'exercice précédent";
+  } else if (PREFIXES_PIECES_TVA_DUE.some((p) => ref.startsWith(p))) {
+    verrou = "déclaration ou régularisation de TVA — passez par l'onglet Déclaration de la Fiscalité";
+  } else if (txt(e.transaction_id) || txt(e.paiement_id) || txt(e.facture_id)) {
+    verrou = "écriture d'un règlement ou d'un rapprochement — annulez le règlement plutôt que son écriture";
+  }
+  const d = jourIso(e.date_ecriture);
+  const exerciceAnterieur = !!exerciceActif && !!d && d < exerciceActif.debut;
+  return { verrou, exerciceAnterieur };
+}
+
 // ─── VERROU 4 — unicité de la référence entre VTE et ACH ─────────────────────
 
 export interface CollisionReference {
@@ -430,8 +484,10 @@ export function controlerMouvementsTvaDue(lignes: LigneEcriture[]): ControleRegi
 // ─── VERROU 7 — pas de bascule de TVA sans règlement constaté ────────────────
 //
 // La bascule est le geste qui rend la TVA exigible (ou déductible). Son fait
-// générateur est le MOUVEMENT D'ARGENT : elle n'a de sens que s'il existe, à sa
-// date ou avant, une écriture de trésorerie rattachée à la même pièce.
+// générateur est le RÈGLEMENT : un mouvement d'argent (écriture de trésorerie
+// BQ / CAI) ou, exception documentée, une COMPENSATION de créances réciproques
+// recevable (OD COMP-<n°>, convention originale signée des deux parties, même
+// personne juridique — cf. controlerPieceCompensation), datée de la signature.
 //
 // Le contrôle du journal (`journalReglement` dans `genererOdBasculeTva`) ne
 // suffisait pas : il vérifie que l'appelant PRÉTEND passer par BQ ou CAI, pas
@@ -439,8 +495,9 @@ export function controlerMouvementsTvaDue(lignes: LigneEcriture[]): ControleRegi
 // des rapprochements fictifs — antérieurs à la facture, ou sans relevé.
 //
 // La preuve admise est celle du projet : une écriture BQ/CAI reliée à la pièce
-// par sa RÉFÉRENCE, par son CODE DE LETTRAGE, ou par `facture_id`. Une ligne de
-// `paiements` ne suffit pas — elle dit l'intention, pas le mouvement.
+// par sa RÉFÉRENCE, par son CODE DE LETTRAGE, ou par `facture_id` — ou une
+// compensation recevable rattachée de la même façon. Une ligne de `paiements`
+// ne suffit pas — elle dit l'intention, pas le règlement.
 
 /** Ligne de trésorerie servant de preuve à une bascule. */
 export interface LigneTresoreriePreuve extends LigneEcriture {
@@ -462,8 +519,187 @@ export function estBasculeTva(lignes: LigneEcriture[]): boolean {
   return attente && mouvantes.some((l) => estTvaExigible(l.compte_numero));
 }
 
+// ─── Conditions du droit à déduction : la facture ────────────────────────────
+
+export interface MentionsFacture {
+  fournisseur_nom?: string | null;
+  ice_fournisseur?: string | null;
+  if_fournisseur?: string | null;
+  numero?: string | null;
+  date_facture?: string | null;
+  /** Désignations des lignes : la nature de ce qui est facturé. */
+  designations?: (string | null | undefined)[] | null;
+  montant_ht?: number | null;
+  montant_tva?: number | null;
+  montant_ttc?: number | null;
+}
+
+/**
+ * Mentions sans lesquelles la facture ne fonde pas le droit à déduction
+ * (art. 145-III et 146 CGI) : identité du fournisseur (raison sociale, IF, ICE),
+ * numéro et date, nature des biens ou services, montants HT, TVA et TTC
+ * cohérents. Ce n'est PAS l'ICE et le numéro seuls ; et ce n'est pas non plus le
+ * format de dépôt SIMPL-TVA (cf. `champsManquantsSimplTva`), qui se contrôle à part.
+ *
+ * Non contrôlables ici faute de donnée : l'adresse du fournisseur et le mode de
+ * paiement justifié — à vérifier sur la pièce.
+ */
+export function controlerMentionsFacture(f: MentionsFacture): { conforme: boolean; manquantes: string[] } {
+  const manquantes: string[] = [];
+  if (!txt(f.fournisseur_nom)) manquantes.push("raison sociale du fournisseur");
+  if (!/^\d{15}$/.test(txt(f.ice_fournisseur).replace(/\s/g, ""))) manquantes.push("ICE du fournisseur (15 chiffres)");
+  if (!txt(f.if_fournisseur)) manquantes.push("identifiant fiscal (IF) du fournisseur");
+  if (!txt(f.numero)) manquantes.push("numéro de facture");
+  if (!jourIso(f.date_facture)) manquantes.push("date de facture");
+  if (!(f.designations ?? []).some((d) => txt(d))) manquantes.push("désignation des biens ou services");
+  const ht = r2(f.montant_ht), tva = r2(f.montant_tva), ttc = r2(f.montant_ttc);
+  if (!(ht > 0) || !(ttc > 0)) manquantes.push("montants HT et TTC");
+  else if (Math.abs(r2(ht + tva - ttc)) > 0.05) manquantes.push("cohérence HT + TVA = TTC");
+  return { conforme: manquantes.length === 0, manquantes };
+}
+
+// ─── Compensation de créances réciproques ────────────────────────────────────
+//
+// Une créance et une dette réciproques peuvent s'éteindre par COMPENSATION : le
+// client est aussi fournisseur, on solde l'une par l'autre, sans mouvement
+// d'argent. C'est un mode de règlement (code DGI 6 « compensation ») : il rend la
+// TVA exigible et ouvre le droit à déduction comme un paiement — à condition
+// d'être DOCUMENTÉ par une convention datée et signée.
+//
+// Représentation, dans les modules existants :
+//   • la convention : un justificatif de catégorie `convention_compensation`, dont
+//     le numéro de pièce porte la référence, `date_signature` la date réelle de
+//     signature, `signature_parties` l'attestation des deux signatures, et
+//     `fichier_original_url` l'original numérisé ;
+//   • l'écriture : une OD référencée COMP-<n° de convention>,
+//       D 4411x (la dette fournisseur s'éteint) / C 342x (la créance client s'éteint).
+
+/** Préfixe de référence des OD de compensation : COMP-<n° de la convention>. */
+export const PREFIXE_COMPENSATION = "COMP-";
+/** Catégorie du justificatif qui porte la convention de compensation. */
+export const CATEGORIE_CONVENTION_COMPENSATION = "convention_compensation";
+
+export interface ConventionCompensation {
+  numero_piece?: string | null;
+  date_document?: string | null;
+  /** Date RÉELLE de signature : le fait générateur de la TVA compensée. */
+  date_signature?: string | null;
+  /** Signée par les DEUX parties (attestation de l'utilisateur sur l'original). */
+  signature_parties?: boolean | null;
+  categorie_pcm?: string | null;
+  /** Montant convenu — plafond de tout ce qui se compense sous cette convention. */
+  montant_ttc?: number | null;
+  /** Original numérisé de la convention : sans lui, rien n'est probant. */
+  fichier_original_url?: string | null;
+  url_fichier?: string | null;
+}
+
+/** Identité fiscale d'un tiers, lue sur sa fiche (client ou fournisseur). */
+export interface IdentiteTiers {
+  nom?: string | null;
+  ice?: string | null;
+  if_fiscal?: string | null;
+}
+
+const ice15 = (v: unknown) => { const s = txt(v).replace(/\s/g, ""); return /^\d{15}$/.test(s) ? s : ""; };
+
+/**
+ * Les deux comptes compensés désignent-ils la MÊME personne juridique ? Une
+ * compensation n'éteint que des créances RÉCIPROQUES : le client doit être le
+ * fournisseur. ICE identique d'abord ; à défaut d'ICE d'un côté, identifiant
+ * fiscal identique. Deux ICE différents — deux sociétés distinctes, fussent-elles
+ * du même groupe — sont REFUSÉS ; une identité non établie aussi.
+ */
+export function memePersonneJuridique(a: IdentiteTiers | null | undefined, b: IdentiteTiers | null | undefined): { ok: boolean; motif: string } {
+  if (!a || !b) return { ok: false, motif: "identité d'un des tiers introuvable (compte collectif ou fiche absente)" };
+  const iceA = ice15(a.ice), iceB = ice15(b.ice);
+  if (iceA && iceB) {
+    return iceA === iceB ? { ok: true, motif: "ICE identique" }
+      : { ok: false, motif: `ICE différents (${iceA} / ${iceB}) : deux personnes juridiquement distinctes` };
+  }
+  const ifA = txt(a.if_fiscal), ifB = txt(b.if_fiscal);
+  if (ifA && ifB) {
+    return ifA === ifB ? { ok: true, motif: "identifiant fiscal identique" }
+      : { ok: false, motif: `identifiants fiscaux différents (${ifA} / ${ifB}) : deux personnes juridiquement distinctes` };
+  }
+  return { ok: false, motif: "identité juridique non établie : ni ICE ni IF renseignés des deux côtés" };
+}
+
+/**
+ * Une pièce de compensation prouve-t-elle un règlement ? Conditions cumulatives :
+ *   1. une convention de compensation, retrouvée par son numéro (COMP-<n°>) ;
+ *   2. l'ORIGINAL numérisé de la convention est joint ;
+ *   3. elle est signée par les DEUX parties, et sa date réelle de signature est
+ *      connue — c'est elle, et non la date comptable de l'OD ni sa date de
+ *      saisie, qui fixe le fait générateur ; l'OD ne peut pas la précéder ;
+ *   4. l'OD éteint une dette fournisseur (débit 441x) ET une créance client
+ *      (crédit 342x), pour le même montant, sans banque ni caisse ;
+ *   5. le client et le fournisseur sont la MÊME personne juridique ;
+ *   6. le total compensé sous la convention (toutes OD COMP-<n°>, compensations
+ *      partielles comprises) ne dépasse pas le montant convenu — pas de double
+ *      comptabilisation.
+ */
+export function controlerPieceCompensation(
+  lignes: LigneEcriture[],
+  convention: ConventionCompensation | null | undefined,
+  contexte: {
+    /** Identité du tiers de chaque compte auxiliaire mouvementé. */
+    tiersDuCompte?: (compte: string) => IdentiteTiers | null | undefined;
+  } = {},
+): ControleRegime {
+  const v: string[] = [];
+  const ref = txt(lignes[0]?.reference_piece);
+  if (!convention || txt(convention.categorie_pcm) !== CATEGORIE_CONVENTION_COMPENSATION) {
+    v.push(`Compensation « ${ref} » sans convention de compensation enregistrée (justificatif ${ref.slice(PREFIXE_COMPENSATION.length) || "?"}).`);
+  } else {
+    if (!txt(convention.fichier_original_url) && !txt(convention.url_fichier)) {
+      v.push(`Convention « ${txt(convention.numero_piece)} » : l'original numérisé n'est pas joint.`);
+    }
+    if (convention.signature_parties !== true) {
+      v.push(`Convention « ${txt(convention.numero_piece)} » : signature des deux parties non attestée.`);
+    }
+    const signature = jourIso(convention.date_signature);
+    if (!signature) v.push(`Convention « ${txt(convention.numero_piece)} » : date de signature manquante.`);
+    const dates = lignes.map((l) => jourIso(l.date_ecriture)).filter(Boolean).sort();
+    if (signature && dates[0] && dates[0] < signature) {
+      v.push(`OD de compensation datée du ${dates[0]}, avant la signature du ${signature}.`);
+    }
+  }
+  const clients = lignes.filter((l) => txt(l.compte_numero).startsWith(RACINES_TIERS.client));
+  const fourns = lignes.filter((l) => txt(l.compte_numero).startsWith(RACINES_PCM.FOURNISSEURS));
+  const debitFourn = r2(fourns.reduce((s, l) => s + r2(l.debit) - r2(l.credit), 0));
+  const creditClient = r2(clients.reduce((s, l) => s + r2(l.credit) - r2(l.debit), 0));
+  if (!(debitFourn > 0.005) || !(creditClient > 0.005)) {
+    v.push("Une compensation éteint une dette fournisseur (débit 441x) ET une créance client (crédit 342x).");
+  } else if (Math.abs(debitFourn - creditClient) > 0.005) {
+    v.push(`Compensation déséquilibrée : ${debitFourn.toFixed(2)} de dette contre ${creditClient.toFixed(2)} de créance.`);
+  }
+  if (lignes.some((l) => estTresorerieHorsOd(l.compte_numero))) v.push("Une compensation ne mouvemente ni banque ni caisse.");
+
+  // Identité juridique des parties : chaque couple client / fournisseur compensé.
+  if (contexte.tiersDuCompte) {
+    for (const c of new Set(clients.map((l) => txt(l.compte_numero)))) {
+      for (const f of new Set(fourns.map((l) => txt(l.compte_numero)))) {
+        const id = memePersonneJuridique(contexte.tiersDuCompte(c), contexte.tiersDuCompte(f));
+        if (!id.ok) v.push(`Compensation ${c} / ${f} refusée : ${id.motif}.`);
+      }
+    }
+  } else {
+    v.push("Identité juridique des parties non vérifiée : fiches clients et fournisseurs indisponibles.");
+  }
+
+  // Montant : le total compensé sous la convention ne dépasse pas le convenu.
+  const convenu = r2(convention?.montant_ttc);
+  if (convention && convenu > 0 && creditClient > convenu + 0.005) {
+    v.push(`Montant compensé ${creditClient.toFixed(2)} supérieur au montant de la convention ${convenu.toFixed(2)} : double comptabilisation ou dépassement.`);
+  }
+  return v.length ? { ok: false, violations: v } : conforme;
+}
+
 export function controlerPreuveBascule(
   lignes: LigneEcriture[], tresorerie: LigneTresoreriePreuve[],
+  /** Lignes de pièces de compensation RECEVABLES (cf. `controlerPieceCompensation`). */
+  compensations: LigneTresoreriePreuve[] = [],
 ): ControleRegime {
   if (!estBasculeTva(lignes)) return conforme;
 
@@ -478,14 +714,17 @@ export function controlerPreuveBascule(
   const dates = lignes.map((l) => txt(l.date_ecriture).slice(0, 10)).filter(Boolean).sort();
   const auPlusTard = dates[dates.length - 1] ?? "";
 
-  const preuve = (tresorerie ?? []).some((t) => {
-    if (!estJournalReglement(t.journal_code) || !mouvementee(t)) return false;
+  const rattachee = (t: LigneTresoreriePreuve) => {
     const d = txt(t.date_ecriture).slice(0, 10);
     if (auPlusTard && d && d > auPlusTard) return false;
     return refs.has(txt(t.reference_piece))
       || (txt(t.lettrage_code) !== "" && lettrages.has(txt(t.lettrage_code)))
       || (txt(t.facture_id) !== "" && factures.has(txt(t.facture_id)));
-  });
+  };
+  const preuve = (tresorerie ?? []).some((t) => estJournalReglement(t.journal_code) && mouvementee(t) && rattachee(t))
+    // Compensation documentée : un règlement sans mouvement d'argent, mais un
+    // règlement — rattachée de la même façon (code de lettrage, référence).
+    || (compensations ?? []).some((t) => mouvementee(t) && rattachee(t));
   if (preuve) return conforme;
 
   const ref = [...refs][0] ?? "sans référence";
@@ -493,10 +732,11 @@ export function controlerPreuveBascule(
     ok: false,
     violations: [
       `Bascule de TVA sans règlement constaté (pièce « ${ref} »${auPlusTard ? `, ${auPlusTard}` : ""}). `
-      + `Sous le régime des encaissements le fait générateur est le mouvement d'argent : `
+      + `Sous le régime des encaissements le fait générateur est le règlement : `
       + `il faut une écriture ${JOURNAUX_REGLEMENT.join(" ou ")} rattachée à cette pièce — par `
       + `sa référence, son code de lettrage ou son facture_id — et datée au plus tard du `
-      + `même jour. Sans elle, la TVA devient exigible alors qu'aucun euro n'a bougé.`,
+      + `même jour, ou une compensation (${PREFIXE_COMPENSATION}…) adossée à une convention datée et signée. `
+      + `Sans elle, la TVA devient exigible alors qu'aucun règlement n'a eu lieu.`,
     ],
   };
 }
@@ -524,6 +764,8 @@ export interface OptionsControleRegime extends OptionsCutoff {
    * dans la lib et effectif à la frontière.
    */
   tresorerie?: LigneTresoreriePreuve[];
+  /** Lignes des pièces de compensation RECEVABLES : un règlement sans argent, mais documenté. */
+  compensations?: LigneTresoreriePreuve[];
 }
 
 export interface VerdictRegime extends ControleRegime {
@@ -548,7 +790,7 @@ export function controlerEcrituresRegime(
     ...controlerSensReglement(lignes).violations,
     ...controlerMouvementsTvaDue(lignes).violations,
     // Verrou 7 seulement si l'appelant a fourni le grand livre de trésorerie.
-    ...(opts.tresorerie ? controlerPreuveBascule(lignes, opts.tresorerie).violations : []),
+    ...(opts.tresorerie ? controlerPreuveBascule(lignes, opts.tresorerie, opts.compensations ?? []).violations : []),
     ...(opts.uniciteNonBloquante ? [] : unicite.violations),
   ];
   const alertes = opts.uniciteNonBloquante ? [...unicite.violations] : [];
@@ -605,11 +847,119 @@ export interface ContexteEcrituresAchat {
   code_auxiliaire?: string | null;
   /** Compte de tiers imposé, s'il est déjà connu (prime sur `code_auxiliaire`). */
   compte_tiers?: string | null;
+  /**
+   * Décision EXPLICITE sur la TVA (art. 106 CGI) : `true` = non récupérable,
+   * `false` = récupérable. Absente → `classerTvaAchat` tranche sur la nature de
+   * la dépense ; s'il ne peut pas trancher (`a_confirmer`), la TVA reste en
+   * attente au 3458 et c'est à l'appelant de faire confirmer l'utilisateur.
+   */
+  tva_non_recuperable?: boolean | null;
+  /** Désignations des lignes / libellé : la NATURE de la dépense, lue par `classerTvaAchat`. */
+  designations?: string[] | null;
+  /** Secteur d'activité du dossier : porte les exceptions (gasoil des transporteurs). */
+  secteur_activite?: string | null;
+  /** `avoir` : avoir fournisseur — écriture inverse de l'achat, journal ACH-AVR. */
+  type?: "facture" | "avoir" | null;
+}
+
+/** Journal des avoirs fournisseurs (déjà déclaré dans JOURNAUX_FACTURATION). */
+export const JOURNAL_AVOIRS_FOURNISSEURS = "ACH-AVR";
+
+export type StatutTvaAchat = "deductible" | "non_recuperable" | "a_confirmer";
+
+export interface ClassementTvaAchat {
+  statut: StatutTvaAchat;
+  /** Pourquoi — affiché à l'utilisateur et porté au libellé de l'écriture. */
+  motif: string;
+}
+
+const norm = (s: unknown) => txt(s).toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+const RX_RECEPTION = /\b(RECEPTIONS?|REPRESENTATION|RESTAURANT|RESTAURATION|REPAS|DEJEUNERS?|DINERS?|TRAITEUR|BANQUET|COCKTAIL|SEMINAIRE FESTIF)\b/;
+const RX_LIBERALITE = /\b(CADEAUX?|DONS?|LIBERALITES?|GRATIFICATIONS?)\b/;
+const RX_MISSION = /\b(MISSIONS?|DEPLACEMENTS?|VOYAGES?|HOTELS?|HEBERGEMENT|NUITEES?|BILLETS?|AVION|TRAIN|TAXI|PEAGES?)\b/;
+const RX_VEHICULE_PERSONNES = /\b(VOITURES?|VEHICULES? (DE TOURISME|PARTICULIERS?|DE SERVICE)|VP|BERLINE|SUV|LOCATION (DE )?(VOITURE|VEHICULE)|LEASING (AUTO|VEHICULE)|LLD|LOA)\b/;
+const RX_NON_EXPLOITATION = /\b(PERSONNEL(LE)?S? DU GERANT|PRIVEE?S?|FAMILIALE?S?|DOMICILE|VACANCES|USAGE PERSONNEL)\b/;
+const RX_CARBURANT = /\b(CARBURANTS?|GASOIL|GAZOIL|GAZOLE|DIESEL|ESSENCE|SANS PLOMB|STATION[- ]?SERVICE)\b/;
+const RX_GASOIL = /\b(GASOIL|GAZOIL|GAZOLE|DIESEL)\b/;
+const RX_COMBUSTIBLE = /\b(FIOUL|FUEL OIL|PROPANE|BUTANE|GAZ INDUSTRIEL|COMBUSTIBLES?|CHAUDIERE|FOUR|GROUPE ELECTROGENE)\b/;
+const RX_SECTEUR_TRANSPORT = /\b(TRANSPORTS?|TRANSPORTEUR|LOGISTIQUE|MESSAGERIE|FRET|TAXI|AUTOCAR|AERIEN|FERROVIAIRE)\b/;
+
+/**
+ * Classement de la TVA d'un achat au regard de l'art. 106 CGI. Le module ne
+ * présume JAMAIS la déduction : un achat n'est « deductible » que s'il est
+ * positivement identifié — nature décrite, aucune exclusion ni ambiguïté. La
+ * CONFORMITÉ de la facture se contrôle à part (controlerMentionsFacture) et
+ * bloque la bascule de TVA tant qu'elle n'est pas établie.
+ *
+ *   EXCLUSIONS (non_recuperable) — quand la nature est sans ambiguïté :
+ *     • frais de réception, de représentation, de restauration ;
+ *     • libéralités : cadeaux, dons, gratifications ;
+ *     • carburant de véhicule, hors entreprise de transport (cf. plus bas) ;
+ *   (une dépense marquée personnelle / privée passe en « à confirmer » : le
+ *    libellé seul ne prouve pas qu'elle est étrangère à l'exploitation).
+ *
+ *   À CONFIRMER (a_confirmer) — le module ne tranche pas :
+ *     • aucune désignation exploitable : la nature de la dépense est inconnue ;
+ *     • frais de mission et de déplacement (hôtel, billets, taxi, péage) ;
+ *     • véhicule de transport de personnes (achat, location, leasing, entretien) :
+ *       exclu sauf véhicule utilitaire, transport public ou transport collectif
+ *       du personnel — une affectation à justifier. L'activité de LOCATION de
+ *       véhicules n'est PAS retenue comme exception : aucune base vérifiée ;
+ *     • gasoil d'une entreprise de TRANSPORT : déductible seulement s'il alimente
+ *       des véhicules affectés au transport (routier, ferroviaire, aérien) ; le
+ *       secteur du dossier ne le prouve pas, un justificatif d'utilisation oui ;
+ *     • compte 6143 ou 61223 sans nature identifiée.
+ *
+ *   DÉDUCTIBLE : facture conforme, désignation présente, aucune exclusion ni
+ *   ambiguïté — combustible d'exploitation (fioul, gaz, four) compris.
+ */
+export function classerTvaAchat(p: {
+  compte?: string | null;
+  designations?: (string | null | undefined)[] | null;
+  secteur_activite?: string | null;
+}): ClassementTvaAchat {
+  const compte = txt(p.compte);
+  const texte = norm((p.designations ?? []).filter(Boolean).join(" "));
+  const transporteur = RX_SECTEUR_TRANSPORT.test(norm(p.secteur_activite));
+  const carburant = RX_CARBURANT.test(texte);
+
+  // 1. Exclusions sans ambiguïté.
+  if (RX_RECEPTION.test(texte)) return { statut: "non_recuperable", motif: "frais de réception / représentation (art. 106 CGI)" };
+  if (RX_LIBERALITE.test(texte)) return { statut: "non_recuperable", motif: "libéralité : cadeau, don ou gratification (art. 106 CGI)" };
+  if (carburant && !(transporteur && RX_GASOIL.test(texte))) {
+    return { statut: "non_recuperable", motif: "carburant de véhicule — produit pétrolier non utilisé comme combustible (art. 106 CGI)" };
+  }
+
+  // 2. La CONFORMITÉ de la facture ne se décide pas ici : elle ne se « confirme »
+  //    pas, elle s'établit (cf. controlerMentionsFacture). Une facture incomplète
+  //    garde sa TVA en attente au 3458, et la bascule au paiement la refuse.
+
+  // 3. Situations ambiguës : l'utilisateur tranche, pièce d'utilisation à l'appui.
+  if (RX_NON_EXPLOITATION.test(texte)) {
+    return { statut: "a_confirmer", motif: "dépense peut-être étrangère à l'exploitation (usage personnel / privé) : exclue si c'est le cas (art. 106 CGI)" };
+  }
+  if (carburant) {
+    return { statut: "a_confirmer", motif: "gasoil d'une entreprise de transport : déductible s'il alimente des véhicules affectés au transport — justifier l'utilisation" };
+  }
+  if (RX_VEHICULE_PERSONNES.test(texte)) {
+    return { statut: "a_confirmer", motif: "véhicule de transport de personnes : exclu sauf véhicule utilitaire, transport public ou transport collectif du personnel — justifier l'affectation" };
+  }
+  if (RX_MISSION.test(texte)) return { statut: "a_confirmer", motif: "frais de mission ou de déplacement : confirmer la déductibilité" };
+  if (compte.startsWith(PCM.DEPLACEMENTS_MISSIONS_RECEPTIONS)) {
+    return { statut: "a_confirmer", motif: "compte 6143 sans nature identifiée : réception (exclue) ou déplacement / mission ?" };
+  }
+  if (compte.startsWith(PCM.ACHATS_COMBUSTIBLES) && !RX_COMBUSTIBLE.test(texte)) {
+    return { statut: "a_confirmer", motif: "compte 61223 sans nature identifiée : carburant de véhicule (exclu) ou combustible ?" };
+  }
+  if (!texte.trim()) return { statut: "a_confirmer", motif: "nature de la dépense non décrite : aucune désignation exploitable" };
+
+  // 4. Identifié, conforme, sans exclusion.
+  return { statut: "deductible", motif: RX_COMBUSTIBLE.test(texte) ? "combustible utilisé pour l'exploitation" : "achat d'exploitation identifié" };
 }
 
 export interface LigneAchat {
   dossier_id: string;
-  journal_code: "ACH";
+  journal_code: "ACH" | typeof JOURNAL_AVOIRS_FOURNISSEURS;
   compte_numero: string;
   date_ecriture: string;
   libelle: string;
@@ -629,47 +979,70 @@ export const COMPTE_CHARGE_DEFAUT_ACHAT = PCM.CHARGE_DEFAUT;
  *   D 3458   TVA   TVA en attente — le droit à déduction ne naît qu'au paiement
  *   C 4411x  TTC   dette envers le fournisseur (auxiliaire quand il est codé)
  *
- * La ligne de TVA est OMISE quand la TVA est nulle : un achat exonéré, hors
- * champ ou non récupérable ne doit pas produire une ligne 3458 à 0,00 que la
- * bascule irait ensuite chercher. La pièce reste équilibrée — l'appelant a
- * alors HT = TTC.
+ * TVA non récupérable : D 6xxx TTC / C 4411x TTC — aucune ligne 3458.
+ * AVOIR fournisseur (journal ACH-AVR) : l'écriture inverse —
+ *   D 4411x TTC / C 6xxx HT / C 3458 TVA  (ou C 6xxx TTC si non récupérable).
+ *
+ * La ligne de TVA est OMISE quand la TVA est nulle : un achat exonéré ou hors
+ * champ ne doit pas produire une ligne 3458 à 0,00 que la bascule irait chercher.
  */
 export function genererEcrituresAchat(ctx: ContexteEcrituresAchat): LigneAchat[] {
-  const ht = r2(ctx.montant_ht);
-  const tva = r2(ctx.montant_tva);
-  const ttc = r2(ctx.montant_ttc);
+  const avoir = ctx.type === "avoir";
+  // Un avoir peut arriver en négatif (import) : le sens est porté par D / C.
+  const ht = Math.abs(r2(ctx.montant_ht));
+  const tva = Math.abs(r2(ctx.montant_tva));
+  const ttc = Math.abs(r2(ctx.montant_ttc));
   const ref = txt(ctx.reference) || txt(ctx.facture_id);
   const nom = txt(ctx.fournisseur_nom) || "Fournisseur";
   const suffixe = `${nom} ${ref}`.trim();
+  const journal: LigneAchat["journal_code"] = avoir ? JOURNAL_AVOIRS_FOURNISSEURS : "ACH";
 
   const base = {
     dossier_id: ctx.dossier_id,
-    journal_code: "ACH" as const,
+    journal_code: journal,
     date_ecriture: ctx.date_facture,
     reference_piece: ref,
     valide: true as const,
   };
 
-  const lignes: LigneAchat[] = [
-    {
-      ...base, compte_numero: txt(ctx.compte_charge) || COMPTE_CHARGE_DEFAUT_ACHAT,
-      libelle: `Achat ${suffixe}`.slice(0, 200), debit: ht, credit: 0,
-    },
-  ];
+  const compteCharge = txt(ctx.compte_charge) || COMPTE_CHARGE_DEFAUT_ACHAT;
+  const compteTiers = txt(ctx.compte_tiers) || compteTiersAuxiliaire("fournisseur", ctx.code_auxiliaire ?? null);
+  // Une TVA figurant sur la facture n'est pas, par là même, récupérable : exclue
+  // du droit à déduction, elle alourdit la charge. Posée au 3458, elle aurait
+  // basculé en 34552 au paiement et été DÉDUITE à tort.
+  const classement = classerTvaAchat({ compte: compteCharge, designations: ctx.designations, secteur_activite: ctx.secteur_activite });
+  const nonRecuperable = tva > 0.005
+    // Une exclusion réglementaire ne se lève pas par une confirmation : seul un
+    // « true » explicite peut AJOUTER une exclusion, jamais un « false » en retirer.
+    && (ctx.tva_non_recuperable === true || classement.statut === "non_recuperable");
+  // D / C selon le sens de la pièce : un avoir inverse chaque ligne.
+  const sens = (montant: number, auDebit: boolean) =>
+    (auDebit !== avoir) ? { debit: montant, credit: 0 } : { debit: 0, credit: montant };
+  const etiquette = avoir ? "Avoir" : "Achat";
 
+  if (nonRecuperable) {
+    return [
+      {
+        ...base, compte_numero: compteCharge,
+        libelle: `${etiquette} ${suffixe} — TVA non récupérable incluse (art. 106 CGI)`.slice(0, 200),
+        // Le TTC, et non HT + TVA : la pièce reste équilibrée au centime même
+        // quand l'arrondi ligne à ligne écarte les deux.
+        ...sens(ttc, true),
+      },
+      { ...base, compte_numero: compteTiers, libelle: `${avoir ? "Avoir" : "Dette"} ${suffixe}`.slice(0, 200), ...sens(ttc, false) },
+    ];
+  }
+
+  const lignes: LigneAchat[] = [
+    { ...base, compte_numero: compteCharge, libelle: `${etiquette} ${suffixe}`.slice(0, 200), ...sens(ht, true) },
+  ];
   if (tva > 0.005) {
     lignes.push({
       ...base, compte_numero: COMPTE_TVA_ATTENTE.achat,
-      libelle: `TVA en attente ${suffixe}`.slice(0, 200), debit: tva, credit: 0,
+      libelle: `TVA ${avoir ? "avoir " : ""}en attente ${suffixe}`.slice(0, 200), ...sens(tva, true),
     });
   }
-
-  lignes.push({
-    ...base,
-    compte_numero: txt(ctx.compte_tiers) || compteTiersAuxiliaire("fournisseur", ctx.code_auxiliaire ?? null),
-    libelle: `Dette ${suffixe}`.slice(0, 200), debit: 0, credit: ttc,
-  });
-
+  lignes.push({ ...base, compte_numero: compteTiers, libelle: `${avoir ? "Avoir" : "Dette"} ${suffixe}`.slice(0, 200), ...sens(ttc, false) });
   return lignes;
 }
 
@@ -696,13 +1069,24 @@ export function controlerLignesAchat(lignes: LigneEcriture[]): ControleLignesAch
 
   const debitCharge = lignes.reduce(
     (s, l) => txt(l.compte_numero).startsWith(RACINES_PCM.CHARGES) ? s + r2(l.debit) - r2(l.credit) : s, 0);
-  if (r2(debitCharge) <= 0.005) {
+  // Avoir fournisseur : le MIROIR de l'achat — la charge est créditée, le
+  // fournisseur débité. Les contrôles s'inversent avec lui.
+  const avoir = lignes.length > 0 && lignes.every((l) => txt(l.journal_code) === JOURNAL_AVOIRS_FOURNISSEURS);
+  if (avoir) {
+    if (r2(-debitCharge) <= 0.005) violations.push("Un avoir fournisseur doit créditer une charge de classe 6.");
+    for (const l of lignes) {
+      if (r2(l.debit) > 0.005 && !validatePcmAccount(l.compte_numero, { usage: "fournisseur" }).ok) {
+        violations.push(`Compte ${txt(l.compte_numero)} débité sur un avoir fournisseur : l'avoir réduit la dette `
+          + `d'un compte fournisseur (${RACINES_PCM.FOURNISSEURS}x).`);
+      }
+    }
+  } else if (r2(debitCharge) <= 0.005) {
     violations.push("Aucune charge de classe 6 débitée : cet achat n'apparaîtrait pas au compte de résultat.");
   }
 
   // La dette d'une facture d'achat se porte sur un compte FOURNISSEUR (441x) :
   // un crédit sur un compte client ou de produit ferait naître la dette ailleurs.
-  for (const l of lignes) {
+  for (const l of avoir ? [] : lignes) {
     if (r2(l.credit) > 0.005 && !validatePcmAccount(l.compte_numero, { usage: "fournisseur" }).ok) {
       violations.push(`Compte ${txt(l.compte_numero)} crédité sur un achat : la dette se porte sur `
         + `un compte fournisseur (${RACINES_PCM.FOURNISSEURS}x).`);
@@ -769,9 +1153,10 @@ export const estJournalReglement = (code: string | null | undefined): boolean =>
  * premier serait sous-évalué), mais ne peut jamais dépasser ce qui reste dû.
  */
 export function genererOdBasculeTva(ctx: ContexteBasculeTva): LigneOD[] {
-  // Le fait générateur est le mouvement d'argent. Un « règlement » passé en VTE
-  // ou en OD n'en est pas un : basculer sur sa foi rendrait la TVA exigible sans
-  // qu'aucun euro ait bougé.
+  // Le fait générateur est le règlement. Un « règlement » passé en VTE ou en OD
+  // n'en est pas un (la compensation, seule exception, ne passe pas par ici :
+  // elle est prouvée par controlerPreuveBascule) : basculer sur sa foi rendrait
+  // la TVA exigible sans règlement.
   if (ctx.journalReglement != null && !estJournalReglement(ctx.journalReglement)) return [];
 
   const regle = r2(ctx.montantRegle);

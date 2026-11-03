@@ -46,12 +46,15 @@ const estAcompteClient = (compte: unknown): boolean =>
   COMPTES_ACOMPTES_CLIENTS.some((c) => String(compte ?? "").startsWith(c));
 
 /** Nature de la pièce de vente. Tout ce qui n'est pas connu est ORDINAIRE. */
-export type TypeFactureVente = "facture" | "acompte" | "solde";
+export type TypeFactureVente = "facture" | "acompte" | "solde" | "avoir";
+
+/** Journal des avoirs clients (déjà déclaré dans JOURNAUX_FACTURATION et dans l'écran Comptabilité). */
+export const JOURNAL_AVOIRS_CLIENTS = "VTE-AVR";
 
 /** Une ligne d'écriture prête à insérer — le sous-ensemble qui nous concerne. */
 export interface LigneVente {
   dossier_id: string;
-  journal_code: "VTE" | "OD";
+  journal_code: "VTE" | "OD" | typeof JOURNAL_AVOIRS_CLIENTS;
   compte_numero: string;
   date_ecriture: string;
   libelle: string;
@@ -89,6 +92,9 @@ export function normaliserTypeVente(v: string | null | undefined): TypeFactureVe
   const t = String(v ?? "").trim().toLowerCase();
   if (t === "acompte") return "acompte";
   if (t === "solde") return "solde";
+  // L'avoir était rabattu sur « facture » : validé, il était comptabilisé comme une
+  // VENTE (D 3421 / C 7xxx / C 4458) et gonflait le CA et la TVA au lieu de les réduire.
+  if (t === "avoir") return "avoir";
   return "facture";
 }
 
@@ -127,6 +133,26 @@ export function lignesEcrituresVente(ctx: ContexteEcrituresVente): LigneVente[] 
     ...base, journal_code: "VTE", compte_numero: COMPTES_TVA.client.attente,
     libelle, debit: 0, credit: tva,
   });
+
+  if (ctx.type === "avoir") {
+    // AVOIR (réduction ou annulation de la vente) : l'écriture inverse de la
+    // vente, au journal des avoirs. Montants pris en valeur ABSOLUE : la pièce peut
+    // être saisie en positif (formulaire) ou en négatif (import), le sens est porté
+    // par le débit / crédit, jamais par le signe.
+    //   D 7xxx HT   (le chiffre d'affaires diminue)
+    //   D 4458 TVA  (la TVA en attente diminue — régime de l'encaissement)
+    //   C 3421 TTC  (la créance client diminue)
+    const htA = Math.abs(ht), tvaA = Math.abs(tva), ttcA = Math.abs(ttc);
+    const avr = { ...base, journal_code: JOURNAL_AVOIRS_CLIENTS as typeof JOURNAL_AVOIRS_CLIENTS };
+    const lignes: LigneVente[] = [
+      { ...avr, compte_numero: ctx.compte_produit, libelle: `Avoir ${ref}`, debit: htA, credit: 0 },
+    ];
+    if (tvaA > 0.005) {
+      lignes.push({ ...avr, compte_numero: COMPTES_TVA.client.attente, libelle: `TVA avoir en attente ${ref}`, debit: tvaA, credit: 0 });
+    }
+    lignes.push({ ...avr, compte_numero: ctx.compte_client, libelle: `Avoir ${ref}`, debit: 0, credit: ttcA });
+    return lignes;
+  }
 
   if (ctx.type === "acompte") {
     return [
@@ -187,6 +213,28 @@ export function controlerLignesVente(
 ): ControleLignesVente {
   const violations: string[] = [];
   const estAcompte = type === "acompte";
+
+  if (type === "avoir") {
+    // L'avoir est le MIROIR de la vente : il débite le produit (et la TVA en
+    // attente) et crédite le client. Aucun crédit de produit, aucun débit client.
+    const debitProduit = lignes.reduce(
+      (s, l) => String(l.compte_numero).startsWith("7") ? s + Number(l.debit || 0) - Number(l.credit || 0) : s, 0);
+    if (r2(debitProduit) <= 0.005) violations.push("Un avoir doit débiter un compte de produit de classe 7.");
+    for (const l of lignes) {
+      const c = String(l.compte_numero ?? "");
+      if (Number(l.credit) > 0.005 && !validatePcmAccount(c, { usage: "client" }).ok) {
+        violations.push(`Compte ${c} crédité sur un avoir : l'avoir réduit la créance d'un compte client (342x).`);
+      }
+      if (Number(l.debit) > 0.005 && !c.startsWith(COMPTES_TVA.client.attente) && !validatePcmAccount(c, { usage: "produit" }).ok) {
+        violations.push(`Compte ${c} débité sur un avoir : ni produit de classe 7, ni TVA en attente (${COMPTES_TVA.client.attente}).`);
+      }
+      if (estAcompteClient(c)) violations.push(`Un avoir ne mouvemente pas le compte d'acomptes ${COMPTE_ACOMPTES_CLIENTS}.`);
+    }
+    const ecartAvr = r2(lignes.reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0));
+    if (Math.abs(ecartAvr) > 0.005) violations.push(`Partie double déséquilibrée de ${ecartAvr.toFixed(2)} MAD.`);
+    violations.push(...controlerComptesPcm(lignes).violations);
+    return { ok: violations.length === 0, violations, ecart: ecartAvr };
+  }
 
   const creditAcompte = lignes.filter(
     (l) => estAcompteClient(l.compte_numero) && Number(l.credit) > 0.005,

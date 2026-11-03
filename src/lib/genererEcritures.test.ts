@@ -8,7 +8,10 @@ import {
   controlerSensReglement, controlerMouvementsTvaDue, controlerPreuveBascule,
   estBasculeTva, RACINES_TIERS, RACINE_TVA_DUE, PREFIXES_PIECES_TVA_DUE,
   LIBELLE_PAIEMENT_DGI_MIROIR,
+  classerTvaAchat, verdictRetouche, controlerPieceCompensation, PREFIXE_COMPENSATION,
+  controlerMentionsFacture, memePersonneJuridique, controlerLignesVente, normaliserTypeVente,
 } from "@/lib/genererEcritures";
+import { rapprocherCaProduits } from "@/lib/coherence-ventes";
 import {
   COMPTE_TVA_DUE, LIBELLE_PAIEMENT_DGI,
   PREFIXE_DECLARATION_TVA, PREFIXE_REGULARISATION_TVA,
@@ -605,5 +608,268 @@ describe("controlerEcrituresRegime — les sept verrous", () => {
         debit: 0, credit: 20160, reference_piece: "ACH-1" },
     ]);
     expect(v.violations).toEqual([]);
+  });
+});
+
+
+// ─── Audit 2026-11-03 : avoirs, TVA non récupérable, retouches ────────────────
+describe("avoir client", () => {
+  const ctx = {
+    dossier_id: "d", facture_id: "f", reference: "AV-001", date_facture: "2026-06-10",
+    montant_ht: 1000, montant_tva: 200, montant_ttc: 1200,
+    compte_client: "34210002", compte_produit: "7124", type: normaliserTypeVente("avoir"),
+  };
+
+  it("n'est plus rabattu sur une vente ordinaire", () => {
+    expect(normaliserTypeVente("avoir")).toBe("avoir");
+  });
+
+  it("contrepasse la vente au journal des avoirs : D 7xxx / D 4458 / C 342x", () => {
+    const l = genererEcrituresVente(ctx);
+    expect(l.map((x) => [x.journal_code, x.compte_numero, x.debit, x.credit])).toEqual([
+      ["VTE-AVR", "7124", 1000, 0],
+      ["VTE-AVR", "4458", 200, 0],
+      ["VTE-AVR", "34210002", 0, 1200],
+    ]);
+    expect(controlerLignesVente(l, "avoir").ok).toBe(true);
+  });
+
+  it("donne les mêmes écritures qu'il soit saisi en positif ou en négatif", () => {
+    const negatif = genererEcrituresVente({ ...ctx, montant_ht: -1000, montant_tva: -200, montant_ttc: -1200 });
+    expect(negatif).toEqual(genererEcrituresVente(ctx));
+  });
+
+  it("vient en diminution du chiffre d'affaires rapproché", () => {
+    const factures = [
+      { id: "v1", numero: "FA-1", type: "facture", statut: "conforme", montant_ht: 5000 },
+      { id: "a1", numero: "AV-1", type: "avoir", statut: "conforme", montant_ht: 1000 },
+    ] as any[];
+    const lignes = [
+      { compte_numero: "7124", debit: 0, credit: 5000, facture_id: "v1", reference_piece: "FA-1" },
+      { compte_numero: "7124", debit: 1000, credit: 0, facture_id: "a1", reference_piece: "AV-1" },
+    ] as any[];
+    const r = rapprocherCaProduits(factures, lignes);
+    expect(r.caHt).toBe(4000);
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("achat à TVA non récupérable (art. 106 CGI)", () => {
+  const base = {
+    dossier_id: "d", facture_id: "ff1", date_facture: "2026-05-02",
+    montant_ht: 1000, montant_tva: 100, montant_ttc: 1100, fournisseur_nom: "STATION", code_auxiliaire: "F0003",
+  };
+
+  it("incorpore la TVA à la charge et ne passe jamais par le 3458", () => {
+    const l = genererEcrituresAchat({ ...base, compte_charge: "61223", designations: ["Gasoil véhicule de service"] });
+    expect(l.map((x) => [x.compte_numero, x.debit, x.credit])).toEqual([["61223", 1100, 0], ["44110003", 0, 1100]]);
+    expect(l.some((x) => x.compte_numero.startsWith("3458"))).toBe(false);
+    expect(controlerLignesAchat(l).ok).toBe(true);
+  });
+
+  it("laisse la TVA récupérable d'un achat ordinaire en attente au 3458", () => {
+    const l = genererEcrituresAchat({ ...base, compte_charge: "6125" });
+    expect(l.find((x) => x.compte_numero === "3458")?.debit).toBe(100);
+  });
+
+  it("honore un choix explicite de l'appelant", () => {
+    const l = genererEcrituresAchat({ ...base, compte_charge: "6125", tva_non_recuperable: true });
+    expect(l.some((x) => x.compte_numero === "3458")).toBe(false);
+  });
+});
+
+describe("verdictRetouche — intégrité des écritures validées", () => {
+  const actif = bornesExercice(2026, null);
+
+  it("verrouille les écritures de facture, lettrées, de règlement et de déclaration TVA", () => {
+    expect(verdictRetouche({ journal_code: "VTE" }, actif).verrou).toMatch(/facture/);
+    expect(verdictRetouche({ journal_code: "BQ", lettrage_code: "AA" }, actif).verrou).toMatch(/lettrée/);
+    expect(verdictRetouche({ journal_code: "BQ", transaction_id: "t" }, actif).verrou).toMatch(/règlement/);
+    expect(verdictRetouche({ journal_code: "OD", reference_piece: "DECL-TVA-2026-04" }, actif).verrou).toMatch(/TVA/);
+    expect(verdictRetouche({ journal_code: "AN" }, actif).verrou).toMatch(/à-nouveau/);
+  });
+
+  it("laisse libre une OD saisie à la main, et signale l'exercice antérieur", () => {
+    expect(verdictRetouche({ journal_code: "OD", date_ecriture: "2026-03-01" }, actif)).toEqual({ verrou: null, exerciceAnterieur: false });
+    expect(verdictRetouche({ journal_code: "OD", date_ecriture: "2025-12-31" }, actif).exerciceAnterieur).toBe(true);
+  });
+
+  it("refuse une pièce déséquilibrée", () => {
+    const v = controlerEcrituresRegime([
+      { journal_code: "OD", compte_numero: "6125", date_ecriture: "2026-02-01", debit: 100, credit: 0 },
+      { journal_code: "OD", compte_numero: "44110001", date_ecriture: "2026-02-01", debit: 0, credit: 90 },
+    ] as any);
+    expect(v.ok).toBe(false);
+    expect(v.violations.join(" ")).toMatch(/déséquilibrée/);
+  });
+});
+
+
+describe("classerTvaAchat — nature de la dépense, utilisation, exceptions (art. 106 CGI)", () => {
+  it("exclut les frais de réception et le carburant des véhicules", () => {
+    expect(classerTvaAchat({ compte: "6143", designations: ["Repas d'affaires restaurant"] }).statut).toBe("non_recuperable");
+    expect(classerTvaAchat({ compte: "61223", designations: ["Gasoil"] }).statut).toBe("non_recuperable");
+    expect(classerTvaAchat({ compte: "6125", designations: ["Carburant sans plomb"] }).statut).toBe("non_recuperable");
+  });
+
+  it("le gasoil d'une entreprise de transport est à confirmer : le secteur ne prouve pas l'affectation", () => {
+    expect(classerTvaAchat({ compte: "61223", designations: ["Gasoil"], secteur_activite: "Transport routier de marchandises" }).statut).toBe("a_confirmer");
+    // L'exception vise le GASOIL : l'essence d'un transporteur reste exclue.
+    expect(classerTvaAchat({ compte: "61223", designations: ["Essence"], secteur_activite: "Transport" }).statut).toBe("non_recuperable");
+  });
+
+  it("garde déductible un combustible d'exploitation", () => {
+    expect(classerTvaAchat({ compte: "61223", designations: ["Fioul chaudière atelier"] }).statut).toBe("deductible");
+  });
+
+  it("ne devine pas quand le compte seul ne dit rien de la nature", () => {
+    expect(classerTvaAchat({ compte: "61430000", designations: ["Divers"] }).statut).toBe("a_confirmer");
+    expect(classerTvaAchat({ compte: "61223", designations: [] }).statut).toBe("a_confirmer");
+    expect(classerTvaAchat({ compte: "6143", designations: ["Billet avion mission Casablanca"] }).statut).toBe("a_confirmer");
+  });
+
+  it("laisse déductible un achat ordinaire", () => {
+    expect(classerTvaAchat({ compte: "6125", designations: ["Fournitures de bureau"] }).statut).toBe("deductible");
+  });
+
+  it("une TVA « à confirmer » reste en attente au 3458 tant que l'utilisateur n'a pas tranché", () => {
+    const l = genererEcrituresAchat({
+      dossier_id: "d", facture_id: "f", date_facture: "2026-05-02", montant_ht: 1000, montant_tva: 200, montant_ttc: 1200,
+      compte_charge: "6143",
+    });
+    expect(l.some((x) => x.compte_numero === "3458")).toBe(true);
+  });
+});
+
+describe("avoir fournisseur", () => {
+  const ctx = {
+    dossier_id: "d", facture_id: "av1", date_facture: "2026-05-10", montant_ht: 500, montant_tva: 100, montant_ttc: 600,
+    compte_charge: "6125", code_auxiliaire: "F0002", type: "avoir" as const,
+  };
+
+  it("contrepasse l'achat au journal ACH-AVR : D 4411 / C 6xxx / C 3458", () => {
+    const l = genererEcrituresAchat(ctx);
+    expect(l.map((x) => [x.journal_code, x.compte_numero, x.debit, x.credit])).toEqual([
+      ["ACH-AVR", "6125", 0, 500],
+      ["ACH-AVR", "3458", 0, 100],
+      ["ACH-AVR", "44110002", 600, 0],
+    ]);
+    expect(controlerLignesAchat(l).ok).toBe(true);
+  });
+
+  it("donne la même écriture en montants négatifs", () => {
+    expect(genererEcrituresAchat({ ...ctx, montant_ht: -500, montant_tva: -100, montant_ttc: -600 })).toEqual(genererEcrituresAchat(ctx));
+  });
+
+  it("refuse un avoir qui ne crédite aucune charge", () => {
+    const l = genererEcrituresAchat(ctx).map((x) => x.compte_numero === "6125" ? { ...x, compte_numero: "3458" } : x);
+    expect(controlerLignesAchat(l).ok).toBe(false);
+  });
+});
+
+
+describe("classerTvaAchat — autres exclusions de l'art. 106 et absence de présomption", () => {
+  it("exclut les libéralités", () => {
+    expect(classerTvaAchat({ compte: "6125", designations: ["Cadeaux clients fin d'année"] }).statut).toBe("non_recuperable");
+    expect(classerTvaAchat({ compte: "6182", designations: ["Don association"] }).statut).toBe("non_recuperable");
+  });
+
+  it("met à confirmer véhicules de personnes, missions et usage privé", () => {
+    expect(classerTvaAchat({ compte: "6131", designations: ["Location voiture"] }).statut).toBe("a_confirmer");
+    expect(classerTvaAchat({ compte: "6143", designations: ["Hôtel mission Agadir"] }).statut).toBe("a_confirmer");
+    expect(classerTvaAchat({ compte: "6125", designations: ["Usage personnel du gérant"] }).statut).toBe("a_confirmer");
+  });
+
+  it("ne présume pas déductible un achat non décrit", () => {
+    expect(classerTvaAchat({ compte: "6125", designations: [] }).statut).toBe("a_confirmer");
+  });
+
+  it("ne retient pas la location de véhicules comme exception", () => {
+    const c = classerTvaAchat({ compte: "6131", designations: ["Location voiture"], secteur_activite: "Location de voitures" });
+    expect(c.statut).toBe("a_confirmer");
+    expect(c.motif).not.toMatch(/location —/);
+  });
+
+  it("une confirmation ne lève pas une exclusion : le générateur l'impose", () => {
+    const l = genererEcrituresAchat({
+      dossier_id: "d", facture_id: "f", date_facture: "2026-05-02", montant_ht: 1000, montant_tva: 100, montant_ttc: 1100,
+      compte_charge: "6143", designations: ["Repas clients"], tva_non_recuperable: false,
+    });
+    expect(l.some((x) => x.compte_numero === "3458")).toBe(false);
+  });
+});
+
+describe("controlerMentionsFacture — conditions du droit à déduction (art. 145-146)", () => {
+  const ok = {
+    fournisseur_nom: "ACME", ice_fournisseur: "001234567000089", if_fournisseur: "1234567", numero: "F-1",
+    date_facture: "2026-04-02", designations: ["Fournitures"], montant_ht: 1000, montant_tva: 200, montant_ttc: 1200,
+  };
+  it("accepte une facture complète", () => {
+    expect(controlerMentionsFacture(ok)).toEqual({ conforme: true, manquantes: [] });
+  });
+  it("ne repose pas sur le seul ICE et le seul numéro", () => {
+    const r = controlerMentionsFacture({ ...ok, if_fournisseur: "", designations: [], montant_ttc: 1300 });
+    expect(r.conforme).toBe(false);
+    expect(r.manquantes).toEqual(expect.arrayContaining(["identifiant fiscal (IF) du fournisseur", "désignation des biens ou services", "cohérence HT + TVA = TTC"]));
+  });
+  it("signale une facture sans ICE", () => {
+    expect(controlerMentionsFacture({ ...ok, ice_fournisseur: "12" }).manquantes).toContain("ICE du fournisseur (15 chiffres)");
+  });
+});
+
+describe("compensation de créances réciproques", () => {
+  const od = [
+    { journal_code: "OD", compte_numero: "44110003", date_ecriture: "2026-05-20", debit: 5000, credit: 0, reference_piece: `${PREFIXE_COMPENSATION}CV-7` },
+    { journal_code: "OD", compte_numero: "34210002", date_ecriture: "2026-05-20", debit: 0, credit: 5000, reference_piece: `${PREFIXE_COMPENSATION}CV-7` },
+  ];
+  const convention = {
+    numero_piece: "CV-7", date_signature: "2026-05-18", signature_parties: true, categorie_pcm: "convention_compensation",
+    montant_ttc: 8000, fichier_original_url: "https://x/cv7.pdf",
+  };
+  const meme = { ice: "001234567000089", if_fiscal: "1234567" };
+  const tiers = (client: any, fourn: any) => ({ tiersDuCompte: (c: string) => (c.startsWith("342") ? client : fourn) });
+
+  it("est recevable : original, deux signatures, même personne juridique, montant convenu", () => {
+    expect(controlerPieceCompensation(od, convention, tiers(meme, meme)).ok).toBe(true);
+  });
+
+  it("refuse deux sociétés juridiquement distinctes, même d'un groupe", () => {
+    const v = controlerPieceCompensation(od, convention, tiers(meme, { ice: "009999999000011" }));
+    expect(v.ok).toBe(false);
+    expect(v.violations.join(" ")).toMatch(/juridiquement distinctes/);
+  });
+
+  it("à défaut d'ICE, retient l'IF ; sans identifiant, refuse", () => {
+    expect(controlerPieceCompensation(od, convention, tiers({ if_fiscal: "77" }, { if_fiscal: "77" })).ok).toBe(true);
+    expect(controlerPieceCompensation(od, convention, tiers({}, {})).ok).toBe(false);
+    expect(memePersonneJuridique(null, meme).ok).toBe(false);
+  });
+
+  it("refuse sans original, sans signature des deux parties, sans date ou OD antérieure à la signature", () => {
+    expect(controlerPieceCompensation(od, { ...convention, fichier_original_url: null }, tiers(meme, meme)).ok).toBe(false);
+    expect(controlerPieceCompensation(od, { ...convention, signature_parties: false }, tiers(meme, meme)).ok).toBe(false);
+    expect(controlerPieceCompensation(od, { ...convention, date_signature: null }, tiers(meme, meme)).ok).toBe(false);
+    expect(controlerPieceCompensation(od, { ...convention, date_signature: "2026-05-25" }, tiers(meme, meme)).ok).toBe(false);
+  });
+
+  it("admet une compensation partielle, refuse le dépassement du montant convenu", () => {
+    expect(controlerPieceCompensation(od, { ...convention, montant_ttc: 5000 }, tiers(meme, meme)).ok).toBe(true);
+    const v = controlerPieceCompensation([...od, ...od], { ...convention, montant_ttc: 8000 }, tiers(meme, meme));
+    expect(v.violations.join(" ")).toMatch(/double comptabilisation|supérieur/);
+  });
+
+  it("doit éteindre une dette fournisseur ET une créance client, sans trésorerie", () => {
+    const deuxClients = od.map((l) => ({ ...l, compte_numero: l.compte_numero.replace("4411", "3421") }));
+    expect(controlerPieceCompensation(deuxClients, convention, tiers(meme, meme)).ok).toBe(false);
+  });
+
+  it("prouve la bascule de TVA comme un règlement, via le code de lettrage", () => {
+    const bascule = [
+      { journal_code: "OD", compte_numero: "4458", date_ecriture: "2026-05-20", debit: 833.33, credit: 0, reference_piece: "FA-9", lettrage_code: "AC" },
+      { journal_code: "OD", compte_numero: "44551", date_ecriture: "2026-05-20", debit: 0, credit: 833.33, reference_piece: "FA-9", lettrage_code: "AC" },
+    ];
+    const comp = od.map((l) => ({ ...l, lettrage_code: "AC" }));
+    expect(controlerPreuveBascule(bascule as any, [], comp as any).ok).toBe(true);
+    expect(controlerPreuveBascule(bascule as any, [], []).ok).toBe(false);
   });
 });

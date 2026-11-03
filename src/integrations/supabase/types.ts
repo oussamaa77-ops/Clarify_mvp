@@ -577,6 +577,7 @@ export type Database = {
           classe_tp: number | null
           taux_cm: number | null
           regime_is: string | null
+          ajustements_fiscaux: Json | null
           compte_caisse: string | null
           compte_banque: string | null
           patente: string | null
@@ -602,6 +603,7 @@ export type Database = {
           classe_tp?: number | null
           taux_cm?: number | null
           regime_is?: string | null
+          ajustements_fiscaux?: Json | null
           compte_caisse?: string | null
           compte_banque?: string | null
           patente?: string | null
@@ -627,6 +629,7 @@ export type Database = {
           classe_tp?: number | null
           taux_cm?: number | null
           regime_is?: string | null
+          ajustements_fiscaux?: Json | null
           compte_caisse?: string | null
           compte_banque?: string | null
           patente?: string | null

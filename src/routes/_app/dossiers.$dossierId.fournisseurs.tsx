@@ -24,7 +24,7 @@ import {
 import { toast } from "sonner";
 import { downloadSageTiers, nextCodeAuxiliaire } from "@/lib/sage-export";
 import { referencesPiece } from "@/services/lettrage";
-import { assertLignesAchat, genererEcrituresAchat } from "@/lib/genererEcritures";
+import { assertLignesAchat, classerTvaAchat, controlerMentionsFacture, genererEcrituresAchat } from "@/lib/genererEcritures";
 import { useServerFn } from "@tanstack/react-start";
 import { ocrFacture, matcherDocumentAvecTransactions } from "@/server/factures.functions";
 import { memoriserTiers } from "@/server/tiers-memoire.functions";
@@ -219,6 +219,9 @@ function FournisseursPage() {
   const [montantTva, setMontantTva] = useState(0);
   const [montantTtc, setMontantTtc] = useState(0);
   const [modeReglement, setModeReglement] = useState("virement");
+  // Nature de la pièce : un AVOIR fournisseur se comptabilise à l'inverse d'un achat
+  // (journal ACH-AVR). Rabattu sur « facture », il gonflait les charges et la TVA déductible.
+  const [typePiece, setTypePiece] = useState<"facture" | "avoir">("facture");
   const [lignes, setLignes] = useState<any[]>([
     { designation: "", quantite: 1, prix_unitaire: 0, taux_tva: 20 },
   ]);
@@ -555,6 +558,7 @@ function FournisseursPage() {
       if (r.montant_tva) setMontantTva(r.montant_tva);
       if (r.montant_ttc) setMontantTtc(r.montant_ttc);
       if (r.mode_reglement) setModeReglement(r.mode_reglement);
+      setTypePiece(r.type_facture === "avoir" ? "avoir" : "facture");
       setNotesManuscrites(r.notes_manuscrites ?? null);
       if (r.lignes?.length) {
         setLignes(
@@ -647,6 +651,47 @@ function FournisseursPage() {
     const totalEcheances = echeancesPayload.reduce((s, e) => s + e.montant_attendu, 0);
     if (totalEcheances - montantTtc > 0.01)
       return toast.error("La somme des tranches dépasse le montant TTC de la facture");
+    // ── TVA de l'achat : récupérable ou non (art. 106 CGI) ? ──────────────────
+    // Classée sur la NATURE de la dépense (désignations, fournisseur, secteur du
+    // dossier), pas sur le seul compte. Quand le module ne peut pas trancher, il
+    // ne devine pas : l'utilisateur décide, et sa décision fait l'écriture.
+    let tvaNonRecuperable: boolean | null = null;
+    if (Math.abs(montantTva) > 0.005) {
+      const classement = classerTvaAchat({
+        compte: compteCharge,
+        designations: [...lignes.map((l: any) => l.designation), fournisseurNom, newFournPending?.nom ?? ""],
+        secteur_activite: dossier?.secteur_activite ?? null,
+      });
+      if (classement.statut === "a_confirmer") {
+        // La confirmation tranche la NATURE de la dépense, rien d'autre : elle ne
+        // lève aucune exclusion (une exclusion certaine n'arrive jamais ici), et
+        // elle ne rend pas la TVA déductible — celle-ci reste en attente au 3458
+        // tant que la facture n'est pas conforme et payée.
+        tvaNonRecuperable = !window.confirm(
+          `TVA de ${montantTva.toFixed(2)} MAD — ${classement.motif}\n\n`
+          + "OK : dépense d'exploitation, justificatif d'utilisation disponible (affectation du véhicule, "
+          + "ordre de mission…) — la TVA reste EN ATTENTE jusqu'au paiement d'une facture conforme\n"
+          + "Annuler : la TVA est NON RÉCUPÉRABLE — elle est incluse dans la charge",
+        );
+      } else {
+        tvaNonRecuperable = classement.statut === "non_recuperable";
+        if (tvaNonRecuperable) toast.info(`TVA non récupérable : ${classement.motif}`);
+      }
+      // Droit à déduction : mentions obligatoires de la facture (art. 145-146 CGI).
+      const fiche = fournisseurs.find((f) => f.id === fournisseurId) as any;
+      const mentions = controlerMentionsFacture({
+        fournisseur_nom: fournisseurNom || newFournPending?.nom,
+        ice_fournisseur: fournisseurIce || newFournPending?.ice || fiche?.ice,
+        if_fournisseur: fiche?.if_fiscal,
+        numero, date_facture: dateFacture,
+        designations: lignes.map((l: any) => l.designation),
+        montant_ht: montantHt, montant_tva: montantTva, montant_ttc: montantTtc,
+      });
+      if (!tvaNonRecuperable && !mentions.conforme) {
+        toast.warning(`TVA conservée en attente (3458) : facture incomplète — ${mentions.manquantes.join(", ")}. `
+          + "Elle ne sera déduite qu'une fois la fiche fournisseur et la facture complétées.");
+      }
+    }
     setProcessing("save");
     try {
       // Create supplier if pending (new one detected by OCR or typed manually)
@@ -695,10 +740,18 @@ function FournisseursPage() {
           // Métadonnées OCR conservées pour le détail (annotations manuscrites lues
           // sur le document : « Payé », visa, n° de chèque…). Colonne JSONB existante.
           ocr_data: notesManuscrites ? { notes_manuscrites: notesManuscrites } : null,
+          // La colonne n'existe qu'après la migration 20261103130000 : on ne l'écrit
+          // que pour un avoir, une facture ordinaire reste enregistrable sans elle.
+          ...(typePiece === "avoir" ? { type: "avoir" } : {}),
         })
         .select("id")
         .single();
-      if (errFact) throw errFact;
+      if (errFact) {
+        if (typePiece === "avoir" && /type/i.test(errFact.message ?? "")) {
+          throw new Error("Avoir fournisseur non enregistrable : appliquez la migration 20261103130000.");
+        }
+        throw errFact;
+      }
 
       const factureId = (newFacture as any).id;
       const ref = numero || nomFourn;
@@ -759,6 +812,10 @@ function FournisseursPage() {
         // sinon le collectif 4411 : la balance auxiliaire distingue alors chaque
         // fournisseur, et le lettrage (préfixe « 4411 ») fonctionne à l'identique.
         code_auxiliaire: fournAux,
+        type: typePiece,
+        tva_non_recuperable: tvaNonRecuperable,
+        designations: lignes.map((l: any) => l.designation),
+        secteur_activite: dossier?.secteur_activite ?? null,
       });
       assertLignesAchat(ecrituresAchat);
       // Supabase REND l'erreur au lieu de la lever : sans ce contrôle, une
@@ -789,8 +846,9 @@ function FournisseursPage() {
       resetForm();
       load();
       setTab("factures");
-      // Matcher automatique avec une transaction bancaire ouverte
-      matchFn({ data: {
+      // Matcher automatique avec une transaction bancaire ouverte — jamais pour un
+      // avoir : il ne se règle pas par un décaissement.
+      if (typePiece !== "avoir") matchFn({ data: {
         dossier_id: dossierId, document_id: factureId, document_type: "facture_fournisseur",
         montant_ttc: montantTtc, nom_tiers: nomFourn, date_document: dateFacture, mode_reglement: modeReglement ?? "",
         numero_piece: numero || "",
@@ -926,6 +984,7 @@ function FournisseursPage() {
     setMontantTva(0);
     setMontantTtc(0);
     setModeReglement("virement");
+    setTypePiece("facture");
     if (!keepPreview) { setPdfPreviewUrl(null); setPreviewFileType(null); setPdfPages([]); }
     // Le fichier scanné meurt avec le formulaire. Sans cette ligne il survivait à
     // l'enregistrement : une saisie MANUELLE enchaînée après un scan archivait le
@@ -1414,6 +1473,16 @@ function FournisseursPage() {
                     onChange={(e) => setNumero(e.target.value)}
                     placeholder="FAC-2026-001"
                   />
+                </div>
+                <div className="space-y-2">
+                  <Label>Nature de la pièce</Label>
+                  <Select value={typePiece} onValueChange={(v) => setTypePiece(v === "avoir" ? "avoir" : "facture")}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="facture">Facture</SelectItem>
+                      <SelectItem value="avoir">Avoir (réduit la charge et la TVA déductible)</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <Label>Mode règlement</Label>

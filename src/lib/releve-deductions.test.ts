@@ -4,8 +4,9 @@ import {
   codeModePaiementDGI, construireReleveDeductions, designationAchat, designationDGI,
   indexerComptesCharge, resoudreIdentiteFiscale, tauxTvaFacture,
   ligneVersCellules, totauxReleveDeductions, type AchatDeduction,
-  quotePartReglement,
+  quotePartReglement, qualifierLigneEdi, champsManquantsSimplTva,
 } from "./releve-deductions";
+import { classerDeductibiliteAchats } from "./dashboard-fiscal";
 
 /** Achat 1000 HT + 200 TVA = 1200 TTC, soldé, du fournisseur F1. */
 const achat = (o: Partial<AchatDeduction> = {}): AchatDeduction => ({
@@ -30,7 +31,7 @@ describe("colonnes DGI", () => {
   });
 
   it("sérialise une ligne en 14 cellules alignées sur les en-têtes", () => {
-    const [l] = construireReleveDeductions({ achats: [achat()], fournisseurs: FOURNISSEURS });
+    const [l] = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat()], fournisseurs: FOURNISSEURS });
     const cellules = ligneVersCellules(l);
     expect(cellules).toHaveLength(COLONNES_RELEVE_DEDUCTIONS.length);
     expect(cellules).toEqual([
@@ -57,13 +58,13 @@ describe("codeModePaiementDGI", () => {
   });
 
   it("lit le mode depuis l'index des règlements, sinon depuis la facture", () => {
-    const parIndex = construireReleveDeductions({
+    const parIndex = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat()], fournisseurs: FOURNISSEURS,
       modes: new Map([["A1", "cheque" as const]]),
     });
     expect(parIndex[0].idModePaiement).toBe(2);
 
-    const parFacture = construireReleveDeductions({
+    const parFacture = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat({ mode_reglement: "virement" })], fournisseurs: FOURNISSEURS,
     });
     expect(parFacture[0].idModePaiement).toBe(4);
@@ -76,7 +77,7 @@ describe("règlements échelonnés", () => {
       { facture_fournisseur_id: "A1", montant: 300, date_paiement: "2026-06-10" },
       { facture_fournisseur_id: "A1", montant: 900, date_paiement: "2026-07-05" },
     ];
-    const lignes = construireReleveDeductions({ achats: [achat()], paiements, fournisseurs: FOURNISSEURS });
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat()], paiements, fournisseurs: FOURNISSEURS });
     expect(lignes).toHaveLength(2);
     expect(lignes[0]).toMatchObject({ ordre: 1, montantTtc: 300, montantHt: 250, montantTva: 50, datePaiement: "2026-06-10" });
     expect(lignes[1]).toMatchObject({ ordre: 2, montantTtc: 900, montantHt: 750, montantTva: 150, datePaiement: "2026-07-05" });
@@ -91,7 +92,7 @@ describe("règlements échelonnés", () => {
       { facture_fournisseur_id: "A1", montant: 300, date_paiement: "2026-06-10" },
       { facture_fournisseur_id: "A1", montant: 900, date_paiement: "2026-07-05" },
     ];
-    const juin = construireReleveDeductions({
+    const juin = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat()], paiements, fournisseurs: FOURNISSEURS,
       debut: "2026-06-01", fin: "2026-06-30",
     });
@@ -103,7 +104,7 @@ describe("règlements échelonnés", () => {
   it("complète un règlement partiel non daté sans dépasser la part réglée", () => {
     // 300 datés, mais la facture est soldée (1200) → 900 reconstitués.
     const paiements = [{ facture_fournisseur_id: "A1", montant: 300, date_paiement: "2026-06-10" }];
-    const lignes = construireReleveDeductions({ achats: [achat()], paiements, fournisseurs: FOURNISSEURS });
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat()], paiements, fournisseurs: FOURNISSEURS });
     expect(lignes).toHaveLength(2);
     expect(totauxReleveDeductions(lignes).totalTtc).toBe(1200);
     expect(lignes.find(l => !l.reglementDate)?.montantTtc).toBe(900);
@@ -115,7 +116,7 @@ describe("règlements échelonnés", () => {
       { facture_fournisseur_id: "A1", montant: 1200, date_paiement: "2026-06-10" },
       { facture_fournisseur_id: "A1", montant: 1200, date_paiement: "2026-06-11" },
     ];
-    const t = totauxReleveDeductions(construireReleveDeductions({ achats: [achat()], paiements }));
+    const t = totauxReleveDeductions(construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat()], paiements }));
     expect(t.totalTtc).toBe(1200); // pas 2400
     expect(t.totalTva).toBe(200);
   });
@@ -126,7 +127,7 @@ describe("règlements échelonnés", () => {
       // Un paiement de VENTE ne doit jamais entrer dans le relevé des déductions.
       { facture_id: "A1", montant: 600, date_paiement: "2026-06-10" },
     ];
-    const lignes = construireReleveDeductions({ achats: [achat()], paiements });
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat()], paiements });
     expect(lignes).toHaveLength(1);
     expect(lignes[0].reglementDate).toBe(false); // repli sur la date de la facture
     expect(lignes[0].montantTtc).toBe(1200);
@@ -136,16 +137,16 @@ describe("règlements échelonnés", () => {
 describe("périmètre du relevé", () => {
   it("écarte les achats non réglés (aucun droit à déduction)", () => {
     const impaye = achat({ montant_paye: 0, montant_restant: 1200, statut_paiement: "non_payee", date_paiement: null });
-    expect(construireReleveDeductions({ achats: [impaye] })).toEqual([]);
+    expect(construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [impaye] })).toEqual([]);
   });
 
   it("écarte les achats sans TVA (exonérés / hors champ)", () => {
-    expect(construireReleveDeductions({ achats: [achat({ montant_tva: 0 })] })).toEqual([]);
+    expect(construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat({ montant_tva: 0 })] })).toEqual([]);
   });
 
   it("ne retient qu'un prorata de règlement partiel", () => {
     const partiel = achat({ montant_paye: 600, montant_restant: 600, statut_paiement: "partielle" });
-    const [l] = construireReleveDeductions({ achats: [partiel] });
+    const [l] = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [partiel] });
     expect(l.montantTtc).toBe(600);
     expect(l.montantTva).toBe(100);
   });
@@ -155,7 +156,7 @@ describe("périmètre du relevé", () => {
       { facture_fournisseur_id: "A1", montant: 1200, date_paiement: "2026-08-01" },
       { facture_fournisseur_id: "A2", montant: 1200, date_paiement: "2026-06-01" },
     ];
-    const lignes = construireReleveDeductions({
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat(), achat({ id: "A2", numero: "FA-002" })], paiements,
     });
     expect(lignes.map(l => [l.ordre, l.numeroFacture, l.datePaiement])).toEqual([
@@ -167,14 +168,14 @@ describe("périmètre du relevé", () => {
 
 describe("identité du fournisseur — jointure dynamique sur l'annuaire", () => {
   it("reprend IF et ICE de la fiche fournisseur", () => {
-    const [l] = construireReleveDeductions({ achats: [achat()], fournisseurs: FOURNISSEURS });
+    const [l] = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat()], fournisseurs: FOURNISSEURS });
     expect(l.ifFournisseur).toBe("12345678");
     expect(l.iceFournisseur).toBe("001234567000045");
     expect(l.nomFournisseur).toBe("ACME SARL");
   });
 
   it("préfère la fiche À JOUR au nom figé sur la facture", () => {
-    const [l] = construireReleveDeductions({
+    const [l] = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat({ fournisseur_nom: "ACME (ancien nom)" })],
       fournisseurs: [{ id: "F1", nom: "ACME MAROC SARL", ice: "001", if_fiscal: "999" }],
     });
@@ -182,7 +183,7 @@ describe("identité du fournisseur — jointure dynamique sur l'annuaire", () =>
   });
 
   it("rattache par raison sociale quand fournisseur_id est absent", () => {
-    const [l] = construireReleveDeductions({
+    const [l] = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat({ fournisseur_id: null, fournisseur_nom: "  acme   sarl " })],
       fournisseurs: FOURNISSEURS,
     });
@@ -196,7 +197,7 @@ describe("identité du fournisseur — jointure dynamique sur l'annuaire", () =>
       { id: "F1", nom: "PRO-FLUIDES MAROC SARL", ice: "002145896000188", if_fiscal: null },
       { id: "F2", nom: "PRO-FLUIDES MAROC SARL", ice: "002145896000188", if_fiscal: "40404040" },
     ];
-    const [l] = construireReleveDeductions({
+    const [l] = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat({ fournisseur_id: "F1", fournisseur_nom: "PRO-FLUIDES MAROC SARL" })],
       fournisseurs: annuaire,
     });
@@ -214,7 +215,7 @@ describe("identité du fournisseur — jointure dynamique sur l'annuaire", () =>
   });
 
   it("laisse IF/ICE vides plutôt que d'inventer, et garde le nom de la facture", () => {
-    const [l] = construireReleveDeductions({ achats: [achat({ fournisseur_id: null })] });
+    const [l] = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat({ fournisseur_id: null })] });
     expect(l.ifFournisseur).toBe("");
     expect(l.iceFournisseur).toBe("");
     expect(l.nomFournisseur).toBe("ACME SARL");
@@ -251,7 +252,7 @@ describe("designationDGI", () => {
   });
 
   it("n'émet JAMAIS de désignation vide dans le relevé", () => {
-    const lignes = construireReleveDeductions({
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat({ lignes: null }), achat({ id: "A2", numero: "FA-002", lignes: [{ quantite: 2 }] })],
       comptesCharge: new Map([["A2", "6133"]]),
     });
@@ -291,7 +292,7 @@ describe("indexerComptesCharge", () => {
 
 describe("contrôles avant dépôt", () => {
   it("compte les lignes sans IF ni ICE (motif de rejet DGI)", () => {
-    const lignes = construireReleveDeductions({
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [
         achat(),
         // Fournisseur totalement absent de l'annuaire : ni id, ni nom connu.
@@ -303,7 +304,7 @@ describe("contrôles avant dépôt", () => {
   });
 
   it("ne signale pas un fournisseur identifié par le seul ICE", () => {
-    const lignes = construireReleveDeductions({
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat()], fournisseurs: [{ id: "F1", nom: "ACME", ice: "001234567000045", if_fiscal: "" }],
     });
     expect(totauxReleveDeductions(lignes).sansIdentiteFiscale).toBe(0);
@@ -311,12 +312,12 @@ describe("contrôles avant dépôt", () => {
 
   it("repère un règlement antérieur à la facture", () => {
     const paiements = [{ facture_fournisseur_id: "A1", montant: 1200, date_paiement: "2024-07-16" }];
-    const lignes = construireReleveDeductions({ achats: [achat()], paiements });
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false,  achats: [achat()], paiements });
     expect(totauxReleveDeductions(lignes).paiementAvantFacture).toBe(1);
   });
 
   it("ne signale rien sur un relevé sain", () => {
-    const t = totauxReleveDeductions(construireReleveDeductions({
+    const t = totauxReleveDeductions(construireReleveDeductions({ exigerChampsObligatoires: false, 
       achats: [achat()], fournisseurs: FOURNISSEURS,
       paiements: [{ facture_fournisseur_id: "A1", montant: 1200, date_paiement: "2026-05-20" }],
     }));
@@ -372,5 +373,80 @@ describe("quotePartReglement — une ligne par règlement, jamais la facture ent
 
   it("rend le document tel quel sans TTC exploitable", () => {
     expect(quotePartReglement({ ht: 100, tva: 20, ttc: 0 }, 50)).toEqual({ ht: 100, tva: 20, ttc: 0 });
+  });
+});
+
+
+describe("relevé des déductions — TVA non récupérable exclue (audit 2026-11-03)", () => {
+  it("n'inscrit pas un achat dont la TVA a été incorporée à la charge", () => {
+    const ecritures = [
+      { journal_code: "ACH", compte_numero: "61223", debit: 1100, credit: 0, reference_piece: "ff-carbu" },
+      { journal_code: "ACH", compte_numero: "44110001", debit: 0, credit: 1100, reference_piece: "ff-carbu" },
+      { journal_code: "ACH", compte_numero: "6125", debit: 1000, credit: 0, reference_piece: "ff-ok" },
+      { journal_code: "ACH", compte_numero: "3458", debit: 200, credit: 0, reference_piece: "ff-ok" },
+      { journal_code: "ACH", compte_numero: "44110002", debit: 0, credit: 1200, reference_piece: "ff-ok" },
+    ];
+    const achats = [
+      { id: "ff-carbu", numero: "C1", montant_ht: 1000, montant_tva: 100, montant_ttc: 1100, statut_paiement: "payee", montant_paye: 1100, date_facture: "2026-04-02" },
+      { id: "ff-ok", numero: "F2", montant_ht: 1000, montant_tva: 200, montant_ttc: 1200, statut_paiement: "payee", montant_paye: 1200, date_facture: "2026-04-03" },
+    ] as AchatDeduction[];
+    const paiements = [
+      { facture_fournisseur_id: "ff-carbu", montant: 1100, date_paiement: "2026-04-10" },
+      { facture_fournisseur_id: "ff-ok", montant: 1200, date_paiement: "2026-04-11" },
+    ] as any[];
+    const lignes = construireReleveDeductions({ exigerChampsObligatoires: false,  achats, paiements, achatsExclus: classerDeductibiliteAchats(achats, ecritures).exclus });
+    expect(lignes.map((l) => l.numeroFacture)).toEqual(["F2"]);
+  });
+});
+
+
+describe("qualifierLigneEdi — seules les TVA déductibles et justifiées", () => {
+  const ff = { nature: "facture_fournisseur" as const, id: "f1", ht: 1000, tva: 200, ttc: 1200 };
+
+  it("retient la quote-part réglée d'une facture fournisseur déductible", () => {
+    expect(qualifierLigneEdi({ type: "debit", montant: 600, document: ff })).toEqual({ ok: true, ht: 500, tva: 100, ttc: 600 });
+  });
+
+  it("écarte un encaissement, une facture client, un avoir, un achat exclu", () => {
+    expect(qualifierLigneEdi({ type: "credit", montant: 1200, document: ff }).ok).toBe(false);
+    expect(qualifierLigneEdi({ type: "debit", montant: 1200, document: { nature: "facture_client" } }).ok).toBe(false);
+    expect(qualifierLigneEdi({ type: "debit", montant: 1200, document: { ...ff, type: "avoir" } }).ok).toBe(false);
+    expect(qualifierLigneEdi({ type: "debit", montant: 1200, document: ff, achatsExclus: new Set(["f1"]) }).ok).toBe(false);
+  });
+
+  it("écarte un justificatif non éligible ou sans TVA", () => {
+    expect(qualifierLigneEdi({ type: "debit", montant: 100, document: { nature: "justificatif", ht: 100, tva: 0, ttc: 100 } }).ok).toBe(false);
+    expect(qualifierLigneEdi({ type: "debit", montant: 120, document: { nature: "justificatif", ht: 100, tva: 20, ttc: 120, eligible_edi: false } }).ok).toBe(false);
+  });
+
+  it("ne retient des frais bancaires que si leur TVA figure au relevé", () => {
+    expect(qualifierLigneEdi({ type: "debit", montant: 50, document: null, fraisBancaires: true, tvaFraisAuReleve: null }).ok).toBe(false);
+    expect(qualifierLigneEdi({ type: "debit", montant: 50, document: null, fraisBancaires: true, tvaFraisAuReleve: { ht: 50, tva: 5 } }))
+      .toEqual({ ok: true, ht: 50, tva: 5, ttc: 55 });
+    expect(qualifierLigneEdi({ type: "debit", montant: 50, document: null, fraisBancaires: false }).ok).toBe(false);
+  });
+});
+
+
+describe("relevé SIMPL-TVA — champs obligatoires et compensation", () => {
+  it("écarte et signale un achat dont l'IF ou l'ICE manque", () => {
+    const rejets: string[] = [];
+    const lignes = construireReleveDeductions({ achats: [achat()], fournisseurs: [{ id: "F1", nom: "ACME SARL", ice: "001234567000045", if_fiscal: "" }], rejets });
+    expect(lignes).toEqual([]);
+    expect(rejets[0]).toMatch(/IF du fournisseur/);
+  });
+
+  it("code 6 un règlement par compensation, daté de la signature", () => {
+    const lignes = construireReleveDeductions({
+      achats: [achat({ id: "A1" })], fournisseurs: FOURNISSEURS,
+      paiements: [{ facture_fournisseur_id: "A1", montant: 1200, date_paiement: "2026-05-18", origine: "compensation" }],
+    });
+    expect(lignes).toHaveLength(1);
+    expect(lignes[0]).toMatchObject({ idModePaiement: MODE_PAIEMENT_DGI.compensation, datePaiement: "2026-05-18" });
+  });
+
+  it("champsManquantsSimplTva liste les champs requis", () => {
+    expect(champsManquantsSimplTva({ ifFournisseur: "1", iceFournisseur: "001234567000045", nomFournisseur: "A", numeroFacture: "F", dateFacture: "01/05/2026", tauxTva: 20 })).toEqual([]);
+    expect(champsManquantsSimplTva({})).toHaveLength(6);
   });
 });

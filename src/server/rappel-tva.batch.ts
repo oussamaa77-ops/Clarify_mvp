@@ -21,6 +21,11 @@ import { sendMail } from "./mailer";
 import { rappelEcheanceTVA } from "./email.templates";
 import { COMPTES_TVA } from "../services/lettrage";
 import { proxyFetch } from "./proxy-fetch";
+import {
+  calendrierTva, echeanceSimplTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva,
+} from "../lib/dashboard-fiscal";
+import { PREFIXE_DECLARATION_TVA } from "../lib/liquidation-tva";
+
 
 // fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
 function getSupabase(): SupabaseClient {
@@ -60,7 +65,8 @@ export async function executerRappelsTVAJ3(
 
   // 1) Dossiers actifs + comptes de TVA + accès + profils (résolution du gérant).
   const [{ data: dossiers }, { data: acces }] = await Promise.all([
-    (sb as any).from("dossiers").select("id,nom_societe,created_by,email_societe").eq("statut", "actif"),
+    // `*` : périodicité TVA et début d'activité, colonnes ajoutées par migration.
+    (sb as any).from("dossiers").select("*").eq("statut", "actif"),
     (sb as any).from("dossier_access").select("dossier_id,user_id,role"),
   ]);
 
@@ -112,24 +118,50 @@ export async function executerRappelsTVAJ3(
       COMPTES_TVA.client.exigible, COMPTES_TVA.fournisseur.exigible, "44551", "34552",
     ];
     const COLLECTEE = new Set([COMPTES_TVA.client.exigible, "44551"]);
+    // Période rappelée : l'échéance qui demande une action dans le CALENDRIER
+    // déclaratif — périodicité de chaque année (art. 108), état RÉEL de la
+    // période. Une OD de liquidation sans récépissé de dépôt ne fait PAS
+    // disparaître le rappel ; une période sans opération ou en crédit se déclare aussi.
+    const { data: decl } = await (sb as any).from("ecritures_comptables")
+      .select("reference_piece,compte_numero,debit,credit").eq("dossier_id", d.id).like("reference_piece", `${PREFIXE_DECLARATION_TVA}%`);
+    let recepisses: string[] = [];
+    try {
+      const { data: rec } = await (sb as any).storage.from("quittances-tva").list(d.id, { limit: 1000 });
+      recepisses = ((rec ?? []) as any[]).map((x) => x.name);
+    } catch { /* sans bucket : aucune déclaration n'est réputée déposée */ }
+    const { data: caRows } = await (sb as any).from("ecritures_comptables")
+      .select("compte_numero,debit,credit,date_ecriture,journal_code").eq("dossier_id", d.id)
+      .or("compte_numero.like.711%,compte_numero.like.712%").gte("date_ecriture", `${today.getFullYear() - 2}-01-01`).neq("journal_code", "AN");
+    const caParAnnee = new Map<number, number>();
+    for (const l of (caRows ?? []) as any[]) {
+      const a = Number(String(l.date_ecriture).slice(0, 4));
+      caParAnnee.set(a, (caParAnnee.get(a) ?? 0) + Number(l.credit || 0) - Number(l.debit || 0));
+    }
+    const due = prochaineEcheanceTva(calendrierTva({
+      periodicite: (annee) => periodiciteTva(d, annee, caParAnnee.get(annee - 1) ?? null).periodicite, aujourdhui: today,
+      etats: etatsDeclarationsTva((decl ?? []) as any[], recepisses),
+      dateDebutActivite: d.date_debut_activite ?? null,
+    }));
+    if (!due) { res.details.push({ dossier: nomSociete, periode: null, montant: 0, echeance: null, jours: null, statut: "déclarations à jour" }); res.ignores++; continue; }
+    const periode = due.periode;
     const { data: ecr } = await (sb as any).from("ecritures_comptables")
-      .select("compte_numero,debit,credit,date_ecriture")
-      .eq("dossier_id", d.id).in("compte_numero", COMPTES_TVA_DECLARATION);
+      .select("compte_numero,debit,credit,date_ecriture,reference_piece")
+      .eq("dossier_id", d.id).in("compte_numero", COMPTES_TVA_DECLARATION)
+      .gte("date_ecriture", due.debut).lte("date_ecriture", due.fin);
 
-    const mois = [...new Set((ecr ?? []).map((e: any) => e.date_ecriture?.slice(0, 7)).filter(Boolean))].sort() as string[];
-    const periode = mois[mois.length - 1] ?? null;
-    if (!periode) { res.details.push({ dossier: nomSociete, periode: null, montant: 0, echeance: null, jours: null, statut: "aucune écriture TVA" }); res.ignores++; continue; }
-
-    const ecrMois = (ecr ?? []).filter((e: any) => e.date_ecriture?.startsWith(periode));
-    const collectee = ecrMois.filter((e: any) => COLLECTEE.has(e.compte_numero)).reduce((s: number, e: any) => s + Number(e.credit) - Number(e.debit), 0);
-    const recup = ecrMois.filter((e: any) => !COLLECTEE.has(e.compte_numero)).reduce((s: number, e: any) => s + Number(e.debit) - Number(e.credit), 0);
+    // L'OD de liquidation (DECL-TVA-…) solde 44551 / 34552 en fin de période : la
+    // compter ramènerait la TVA de la période à zéro.
+    const ecrPeriode = (ecr ?? []).filter((e: any) => !String(e.reference_piece ?? "").startsWith(PREFIXE_DECLARATION_TVA));
+    const collectee = ecrPeriode.filter((e: any) => COLLECTEE.has(e.compte_numero)).reduce((s: number, e: any) => s + Number(e.credit) - Number(e.debit), 0);
+    const recup = ecrPeriode.filter((e: any) => !COLLECTEE.has(e.compte_numero)).reduce((s: number, e: any) => s + Number(e.debit) - Number(e.credit), 0);
     const nette = Number((collectee - recup).toFixed(2));
-    // Échéance = 20 du mois SUIVANT le mois déclaré (JS month index = Number(MM)).
-    const echeance = new Date(Number(periode.slice(0, 4)), Number(periode.slice(5, 7)), 20);
+    // Échéance de télédéclaration (art. 110 CGI) : fin du mois suivant la période
+    // — la même règle que le tableau de bord et l'écran Fiscalité.
+    const echeance = echeanceSimplTva(periode)!;
     const jours = Math.ceil((echeance.getTime() - today.getTime()) / 86400000);
     const echStr = ddmmyyyy(echeance);
 
-    if (nette <= 0) { res.details.push({ dossier: nomSociete, periode, montant: nette, echeance: echStr, jours, statut: "crédit / pas de TVA due" }); res.ignores++; continue; }
+    // Pas d'exclusion des périodes en crédit ou néant : la déclaration reste due.
     // Fenêtre J-<fenetreJours> : on déclenche dès qu'il reste ≤ N jours (≥ 0),
     // ce qui rattrape un éventuel jour de cron manqué ; l'idempotence évite les doublons.
     if (!(jours >= 0 && jours <= fenetreJours)) { res.details.push({ dossier: nomSociete, periode, montant: nette, echeance: echStr, jours, statut: `hors fenêtre (J-${jours})` }); res.ignores++; continue; }

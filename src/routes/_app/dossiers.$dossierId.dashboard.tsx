@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { TrendingUp, Wallet, FileText, ShoppingCart, AlertCircle, CheckCircle, Clock, AlertTriangle, Users, Building2, Receipt, Mail, Loader2, Landmark, ArrowLeftRight, ExternalLink, FileCheck2 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, BarChart, Bar } from "recharts";
 import {
-  synthetiserTva, tvaRecuperableEnCours, echeanceSimplTva, joursAvant,
+  synthetiserTva, tvaRecuperableEnCours, echeanceSimplTva, joursAvant, classerDeductibiliteAchats,
+  calendrierTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva,
   ventilerChargesParCompte, ventilerVentesParCompte, balanceAgeeDashboard, calculerCashFlow,
 } from "@/lib/dashboard-fiscal";
 import { RepartitionDepensesPcm } from "@/components/RepartitionDepensesPcm";
@@ -72,6 +73,10 @@ async function chargerFluxNonLettres(dossierId: string): Promise<FluxNonLettres>
 function DashboardPage() {
   const { dossierId } = Route.useParams();
   const [dossier, setDossier] = useState<any>(null);
+  // Récépissés SIMPL-TVA : la preuve de dépôt d'une déclaration (bucket quittances-tva).
+  const [recepissesTva, setRecepissesTva] = useState<string[]>([]);
+  // CA taxable (711 + 712) des années précédentes : il fixe la périodicité TVA (art. 108).
+  const [caParAnnee, setCaParAnnee] = useState<Map<number, number>>(new Map());
   const [factures, setFactures] = useState<any[]>([]);
   const [ff, setFf] = useState<any[]>([]);
   const [alertes, setAlertes] = useState<any[]>([]);
@@ -113,12 +118,13 @@ function DashboardPage() {
   useEffect(() => {
     (async () => {
       const [{ data: d }, { data: f }, { data: ffData }, { data: al }, { data: cb }, { data: rel }, fluxNonLettres, { data: charges }, { data: pcm }, { data: glTiers }, { data: millesimes }] = await Promise.all([
-        supabase.from("dossiers").select("nom_societe,ice,statut").eq("id", dossierId).single(),
+        // `*` : périodicité TVA et début d'activité (colonnes ajoutées par migration).
+        supabase.from("dossiers").select("*").eq("id", dossierId).single(),
         // Ajouter montant_paye et montant_restant pour calculs corrects + tiers pour les alertes
         supabase.from("factures").select("numero,statut,statut_paiement,montant_ht,montant_ttc,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,clients(nom)").eq("dossier_id", dossierId),
         // montant_ht / montant_tva servent au suivi TVA (régime de l'encaissement)
         // et au cash-flow, qui raisonnent tous deux hors taxes.
-        supabase.from("factures_fournisseurs").select("numero,fournisseur_nom,statut_paiement,montant_ht,montant_tva,montant_ttc,montant_paye,montant_restant,date_echeance,date_facture").eq("dossier_id", dossierId),
+        supabase.from("factures_fournisseurs").select("*").eq("dossier_id", dossierId),
         supabase.from("alertes").select("*").eq("dossier_id", dossierId).eq("lue", false).order("created_at", { ascending: false }).limit(5),
         // Comptes & flux bancaires : TOUS les comptes du dossier + relevés + transactions
         // non lettrées comptées par relevé (cf. chargerFluxNonLettres).
@@ -169,6 +175,21 @@ function DashboardPage() {
       // à-nouveaux y feraient doublon avec les lignes qu'ils reportent. Ils ne
       // valent que dans une vue bornée à UN exercice, où l'origine est absente.
       setEcrTiers(sansANouveaux((glTiers ?? []) as LigneGrandLivre[]));
+      try {
+        const { data: rec } = await supabase.storage.from("quittances-tva").list(dossierId, { limit: 1000 });
+        setRecepissesTva(((rec ?? []) as any[]).map((x) => x.name));
+      } catch { setRecepissesTva([]); }
+      try {
+        const depuis = `${new Date().getFullYear() - 2}-01-01`;
+        const { data: ca } = await supabase.from("ecritures_comptables").select("compte_numero,debit,credit,date_ecriture,journal_code")
+          .eq("dossier_id", dossierId).or("compte_numero.like.711%,compte_numero.like.712%").gte("date_ecriture", depuis).neq("journal_code", "AN");
+        const m = new Map<number, number>();
+        for (const l of (ca ?? []) as any[]) {
+          const a = Number(String(l.date_ecriture).slice(0, 4));
+          m.set(a, (m.get(a) ?? 0) + Number(l.credit || 0) - Number(l.debit || 0));
+        }
+        setCaParAnnee(m);
+      } catch { setCaParAnnee(new Map()); }
       setExercicesDispo(exercicesDisponibles(((millesimes ?? []) as any[]).map((x) => x.date_ecriture)));
       setLoading(false);
     })();
@@ -299,16 +320,25 @@ function DashboardPage() {
   // Calculé sur les FACTURES et leur règlement effectif, et non sur les écritures
   // 44551/34552 : celles-ci suivent le fait générateur comptable, alors que
   // l'exigibilité, sous ce régime, naît de l'encaissement.
-  const syntheseTva = synthetiserTva(factures, ff);
-  const tvaEnCours = tvaRecuperableEnCours(ff);
+  // Même source que l'écran Fiscalité : TVA posée en banque sans facture comprise,
+  // TVA non récupérable (achat sans 3458 au grand livre) exclue.
+  const achatsExclusTva = classerDeductibiliteAchats(ff as any[], ecrTiers as any[]).exclus;
+  const syntheseTva = synthetiserTva(factures, ff, { ecritures: ecrTiers as any[], achatsExclus: achatsExclusTva });
+  const tvaEnCours = tvaRecuperableEnCours(ff.filter((x: any) => !achatsExclusTva.has(String(x.id))));
 
-  // Période déclarée = dernier mois clos ayant des factures ; l'échéance de
-  // télédéclaration SIMPL-TVA tombe le dernier jour du mois suivant.
-  const moisFactures = [...new Set(
-    [...factures, ...ff].map(x => (x.date_facture ?? "").slice(0, 7)).filter(Boolean),
-  )].sort() as string[];
-  const periodeSimpl = moisFactures[moisFactures.length - 1] ?? null;
-  const echeanceSimpl = periodeSimpl ? echeanceSimplTva(periodeSimpl) : null;
+  // Échéance SIMPL-TVA : lue sur le CALENDRIER déclaratif du dossier (périodicité
+  // mensuelle ou trimestrielle, état de déclaration au grand livre), et non sur
+  // l'existence de factures — une période sans opération se déclare aussi.
+  // Périodicité de chaque année (art. 108) et état RÉEL des périodes : une OD de
+  // liquidation sans récépissé de dépôt laisse la période « à déclarer ».
+  const calendrierDossier = calendrierTva({
+    periodicite: (annee) => periodiciteTva(dossier as any, annee, caParAnnee.get(annee - 1) ?? null).periodicite, aujourdhui: today,
+    etats: etatsDeclarationsTva(ecrTiers as any[], recepissesTva),
+    dateDebutActivite: (dossier as any)?.date_debut_activite ?? null,
+  });
+  const echeanceDue = prochaineEcheanceTva(calendrierDossier);
+  const periodeSimpl = echeanceDue?.periode ?? null;
+  const echeanceSimpl = echeanceDue ? echeanceSimplTva(echeanceDue.periode) : null;
   const joursSimpl = echeanceSimpl ? joursAvant(echeanceSimpl, today) : null;
 
   // ── Graphiques : ventilation PCM + balance âgée ─────────────────────────────

@@ -18,6 +18,7 @@ import { logAudit } from "@/lib/audit";
 import { puHtToTtc } from "@/lib/tva";
 import { PCM_MAP } from "@/lib/comptabilite-bq";
 import { PCM } from "@/lib/pcm-referentiel";
+import { CATEGORIE_CONVENTION_COMPENSATION, PREFIXE_COMPENSATION, classerTvaAchat } from "@/lib/genererEcritures";
 import { preparerImagePourOcr, journaliserPayload } from "@/lib/image-optimize";
 import { PuTtcInput } from "@/components/PuTtcInput";
 import { ocrFacture, matcherDocumentAvecTransactions, lettrerJustificatif } from "@/server/factures.functions";
@@ -121,6 +122,9 @@ const CATEGORIES_PCM = [
   { value: "frais_douane",          label: "Droits de douane",                     code: PCM_MAP.frais_douane.code },
   { value: "taxe_professionnelle",  label: "Taxe professionnelle",                 code: PCM_MAP.taxe_professionnelle.code },
   { value: "droits_timbre",         label: "Droits de timbre fiscaux",             code: "61671" },
+  // Convention de compensation de créances réciproques (pièce probante, aucune
+  // écriture par elle-même) : elle rend recevable l'OD COMP-<n° de pièce>.
+  { value: CATEGORIE_CONVENTION_COMPENSATION, label: "Convention de compensation (créances réciproques)", code: PCM.CLIENTS },
   { value: "autre",                 label: "Autre",                                code: PCM_MAP.autre.code },
 ];
 
@@ -139,6 +143,13 @@ type FiscalRule = {
 };
 
 const FISCAL_RULES: Partial<Record<string, FiscalRule>> = {
+  [CATEGORIE_CONVENTION_COMPENSATION]: {
+    tva_non_deductible: false,
+    edi_bloque:         true,
+    tva_zero_doc:       true,
+    ht_egal_ttc:        true,
+    alerte: "ℹ️ Convention de compensation — à DATER et SIGNER. Elle rend recevable l'OD de compensation référencée COMP-<n° de pièce> (D 4411x / C 342x) : la TVA devient exigible / déductible au jour de la compensation, comme pour un règlement.",
+  },
   frais_representation: {
     tva_non_deductible: true,
     edi_bloque:         true,
@@ -208,8 +219,17 @@ const applyFiscalRules = (
   docType: string,
   ttc: number,
   currentForm: typeof EMPTY_FORM,
+  secteurActivite?: string | null,
 ): Partial<typeof EMPTY_FORM> => {
-  const rule = FISCAL_RULES[cat];
+  // Exception de l'art. 106-I CGI : le gasoil d'une entreprise de TRANSPORT reste
+  // déductible. La règle « gasoil » ne s'applique donc qu'aux autres dossiers.
+  const gasoilTransporteur = cat === "gasoil"
+    // Le secteur ne PROUVE pas l'affectation du gasoil (« a_confirmer ») : chez un
+    // transporteur, la règle « non déductible » n'est donc plus imposée d'office —
+    // la case « éligible EDI » reste à la décision de l'utilisateur, justificatif
+    // d'utilisation à l'appui. Ailleurs, l'exclusion s'applique.
+    && classerTvaAchat({ compte: PCM.ACHATS_COMBUSTIBLES, designations: ["gasoil"], secteur_activite: secteurActivite }).statut !== "non_recuperable";
+  const rule = gasoilTransporteur ? undefined : FISCAL_RULES[cat];
   const isBL = docType === "bon_livraison";
 
   const overrides: Partial<typeof EMPTY_FORM> = {
@@ -244,6 +264,8 @@ interface LigneJustif {
 const EMPTY_LIGNE: LigneJustif = { designation: "", quantite: 1, prix_unitaire: 0, taux_tva: null };
 
 interface Justificatif {
+  date_signature?: string | null;
+  signature_parties?: boolean | null;
   id: string;
   type_document: string;
   flux_type: string;
@@ -284,6 +306,10 @@ const EMPTY_FORM = {
   categorie_pcm:   "paiement_fournisseur",
   compte_pcm:      "4411",
   eligible_edi:    false,
+  /** Convention de compensation : date de signature (preuve de l'accord). */
+  date_signature:  "",
+  /** Convention signée par les DEUX parties (attestée sur l'original). */
+  signature_parties: false,
 };
 
 // ─── Organisme social / public émetteur ───────────────────────────────────────
@@ -463,6 +489,7 @@ function JustificatifsPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const [justificatifs, setJustificatifs] = useState<Justificatif[]>([]);
+  const [secteurActivite, setSecteurActivite] = useState<string | null>(null);
   const [open, setOpen]           = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [saving, setSaving]       = useState(false);
@@ -481,6 +508,9 @@ function JustificatifsPage() {
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   const load = async () => {
+    // Secteur du dossier : porte l'exception « gasoil des transporteurs » (art. 106 CGI).
+    const { data: dos } = await (supabase.from("dossiers") as any).select("secteur_activite").eq("id", dossierId).maybeSingle();
+    setSecteurActivite(dos?.secteur_activite ?? null);
     const { data } = await (supabase.from("justificatifs") as any)
       .select("*")
       .eq("dossier_id", dossierId)
@@ -679,7 +709,7 @@ function JustificatifsPage() {
         rawCat;
 
       const ttc = result.montant_ttc > 0 ? result.montant_ttc : 0;
-      const fiscalOverrides = applyFiscalRules(cat, finalType, ttc, EMPTY_FORM);
+      const fiscalOverrides = applyFiscalRules(cat, finalType, ttc, EMPTY_FORM, secteurActivite);
 
       // N° pièce des avis de débit (droits de timbre, frais sur effets/chèques) :
       // priorité au N° de LCN ou de chèque mentionné dans le libellé — c'est lui qui
@@ -784,6 +814,8 @@ function JustificatifsPage() {
       categorie_pcm:   j.categorie_pcm   ?? "paiement_fournisseur",
       compte_pcm:      j.compte_pcm      ?? "4411",
       eligible_edi:    j.eligible_edi,
+      date_signature:  j.date_signature ?? "",
+      signature_parties: j.signature_parties === true,
     });
     setLignes(j.lignes ?? []);
     setDatesRef([]);
@@ -821,7 +853,15 @@ function JustificatifsPage() {
         compte_pcm:      form.compte_pcm,
         eligible_edi:    FISCAL_RULES[form.categorie_pcm]?.edi_bloque ? false : form.eligible_edi,
         lignes:          lignes.length > 0 ? lignes : null,
+        // Colonne livrée par la migration 20261103140000 : écrite seulement pour une convention.
+        ...(form.categorie_pcm === CATEGORIE_CONVENTION_COMPENSATION
+          ? { date_signature: form.date_signature || null, signature_parties: form.signature_parties } : {}),
       };
+      if (form.categorie_pcm === CATEGORIE_CONVENTION_COMPENSATION) {
+        if (!form.numero_piece.trim()) { toast.error("Une convention de compensation doit porter un numéro (référence de l'OD COMP-<n°>)."); return; }
+        if (!form.date_signature || !form.signature_parties) toast.warning("Convention sans date de signature ou sans signature des deux parties : la compensation ne sera pas recevable.");
+        if (!editId && !scanFile) toast.warning("Joignez l'original signé de la convention : sans lui, la compensation n'est pas recevable.");
+      }
 
       if (editId) {
         const { error } = await (supabase.from("justificatifs") as any)
@@ -1226,6 +1266,21 @@ function JustificatifsPage() {
                 onChange={e => setForm({ ...form, date_document: e.target.value })} />
             </div>
 
+            {form.categorie_pcm === CATEGORIE_CONVENTION_COMPENSATION && (
+              <div className="space-y-2">
+                <Label>Date de signature de la convention</Label>
+                <Input type="date" value={form.date_signature}
+                  onChange={e => setForm({ ...form, date_signature: e.target.value })} />
+                <label className="flex items-center gap-2 text-xs">
+                  <Checkbox checked={form.signature_parties} onCheckedChange={v => setForm({ ...form, signature_parties: !!v })} />
+                  Signée par les deux parties (vérifié sur l'original joint)
+                </label>
+                <p className="text-[11px] text-muted-foreground">
+                  Écriture à passer : OD « {PREFIXE_COMPENSATION}{form.numero_piece || "<n° de pièce>"} », D 4411x / C 342x, datée au plus tôt de la signature.
+                </p>
+              </div>
+            )}
+
             {/* Dates OCR */}
             {datesRef.length > 0 && (
               <div className="col-span-2 space-y-1.5">
@@ -1478,7 +1533,7 @@ function JustificatifsPage() {
                   ...form,
                   categorie_pcm: v,
                   compte_pcm:    PCM_CODE[v] ?? PCM.CHARGE_DEFAUT,
-                  ...applyFiscalRules(v, form.type_document, form.montant_ttc, form),
+                  ...applyFiscalRules(v, form.type_document, form.montant_ttc, form, secteurActivite),
                 })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>

@@ -14,13 +14,43 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Download, Calculator, AlertCircle, CheckCircle, Clock, Settings2, Info, Loader2, ShieldCheck, FileSpreadsheet } from "lucide-react";
 import { toast } from "sonner";
 import {
-  BAREME_IS, CLASSES_TP, CLASSE_TP_DEFAUT, REGIME_TVA_LABEL, TAUX_CM_DROIT_COMMUN,
-  TAUX_IS_SPECIFIQUE, calculerIS, calculerTP, formatDateFr, lireParametresFiscaux, statutTva,
-  type RegimeIS,
+  baremeIS, CLASSES_TP, CLASSE_TP_DEFAUT, REGIME_TVA_LABEL, TAUX_CM_DROIT_COMMUN,
+  TAUX_IS_ETABLISSEMENT_CREDIT, TAUX_IS_SPECIFIQUE, agregatsFiscaux, calculerIS, calculerTP, imputerDeficits,
+  formatDateFr, lireAjustementsFiscaux, lireParametresFiscaux, normaliserRegimeIS, resultatFiscal,
+  statutTva, type RegimeIS,
 } from "@/lib/fiscalite-ma";
 import {
-  synthetiserTva, tvaRecuperableEnCours, periodesTva, bornesDuMois,
+  synthetiserTva, tvaRecuperableEnCours, periodesTva, bornesDuMois, echeanceSimplTva, classerDeductibiliteAchats,
+  calendrierTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva, reglementsParCompensation,
+  type PeriodiciteTva, type SituationTva,
 } from "@/lib/dashboard-fiscal";
+
+/** Taille de page PostgREST : au-delà, une requête unique est tronquée en silence. */
+const PAGE_ECRITURES = 1000;
+
+/**
+ * TOUTES les écritures du dossier, page par page. Une lecture unique plafonnait
+ * à 1 000 lignes : sur un dossier actif, le résultat fiscal et l'IS étaient
+ * calculés sur une partie du grand livre seulement, sans aucun avertissement.
+ */
+async function chargerToutesEcritures(dossierId: string): Promise<any[]> {
+  const toutes: any[] = [];
+  for (let debut = 0; ; debut += PAGE_ECRITURES) {
+    const { data, error } = await supabase.from("ecritures_comptables").select("*")
+      .eq("dossier_id", dossierId).order("id", { ascending: true })
+      .range(debut, debut + PAGE_ECRITURES - 1);
+    if (error) throw error;
+    toutes.push(...(data ?? []));
+    if (!data || data.length < PAGE_ECRITURES) return toutes;
+  }
+}
+
+/** Date locale → AAAA-MM-JJ (sans passer par l'UTC, qui décalerait d'un jour). */
+function isoLocal(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+
 import {
   COLONNES_RELEVE_DEDUCTIONS, construireReleveDeductions, indexerComptesCharge,
   ligneVersCellules, totauxReleveDeductions,
@@ -51,6 +81,10 @@ function FiscalitePage() {
   const [ventes, setVentes] = useState<any[]>([]);
   const [achats, setAchats] = useState<any[]>([]);
   const [paiements, setPaiements] = useState<any[]>([]);
+  // Récépissés SIMPL-TVA (bucket quittances-tva) : la preuve de DÉPÔT d'une déclaration.
+  const [recepisses, setRecepisses] = useState<string[]>([]);
+  // Conventions de compensation : n° de pièce → date réelle de signature.
+  const [signaturesCompensation, setSignaturesCompensation] = useState<Map<string, string>>(new Map());
   const [dossier, setDossier] = useState<any>(null);
   const [tab, setTab] = useState(recherche.tab ?? "tva");
   const [periodeTVA, setPeriodeTVA] = useState("all");
@@ -60,9 +94,18 @@ function FiscalitePage() {
   // exonérations du module, on ne veut pas obliger à ressortir vers /dossiers).
   const [openParams, setOpenParams] = useState(false);
   const [savingParams, setSavingParams] = useState(false);
-  const [formParams, setFormParams] = useState<{ date_debut_activite: string | null; valeur_locative_tp: string; classe_tp: string; regime_is: RegimeIS }>(
-    { date_debut_activite: null, valeur_locative_tp: "", classe_tp: String(CLASSE_TP_DEFAUT), regime_is: "droit_commun" },
-  );
+  const [formParams, setFormParams] = useState<{
+    date_debut_activite: string | null; valeur_locative_tp: string; classe_tp: string; regime_is: RegimeIS;
+    // Ajustements de l'EXERCICE affiché (tableau de passage + base des acomptes).
+    reintegrations: string; deductions: string; is_du_precedent: string; deficits_anterieurs: string;
+    /** Situation déclarative (art. 108 CGI) — "" = droit commun. */
+    situation_tva: "" | SituationTva;
+    /** Périodicité RETENUE pour l'exercice affiché — "" = déterminée par les règles. */
+    periodicite_exercice: "" | PeriodiciteTva;
+  }>({
+    date_debut_activite: null, valeur_locative_tp: "", classe_tp: String(CLASSE_TP_DEFAUT), regime_is: "droit_commun",
+    reintegrations: "", deductions: "", is_du_precedent: "", deficits_anterieurs: "", situation_tva: "", periodicite_exercice: "",
+  });
 
   const chargerDossier = async () => {
     // select("*") : les colonnes fiscales peuvent ne pas encore exister en base
@@ -76,17 +119,22 @@ function FiscalitePage() {
   // page. Sans relecture, l'onglet voisin resterait sur l'état d'avant l'OD.
   const chargerDonnees = useCallback(async () => {
     {
-      const [{ data: ecr }, { data: v }, { data: a }, { data: p }] = await Promise.all([
+      const [ecr, { data: v }, { data: a }, { data: p }] = await Promise.all([
         // Écritures : base du résultat fiscal et de l'IS (les factures ne portent
-        // ni compte ni charge — seul le grand livre le fait).
-        supabase.from("ecritures_comptables").select("*").eq("dossier_id", dossierId),
+        // ni compte ni charge — seul le grand livre le fait). Paginé : cf.
+        // chargerToutesEcritures.
+        chargerToutesEcritures(dossierId).catch((e) => {
+          toast.error(`Lecture du grand livre incomplète : ${e?.message ?? e}`);
+          return [] as any[];
+        }),
         // TVA : régime de l'encaissement → factures + leurs règlements, jamais
         // les comptes 44551/34552 qui suivent le fait générateur comptable.
         supabase.from("factures")
           .select("id,numero,statut,statut_paiement,montant_ht,montant_tva,montant_ttc,montant_paye,montant_restant,type,date_facture,date_echeance")
           .eq("dossier_id", dossierId),
         supabase.from("factures_fournisseurs")
-          .select("id,numero,statut_paiement,montant_ht,montant_tva,montant_ttc,montant_paye,montant_restant,date_facture,date_echeance")
+          // `*` : la colonne `type` (avoir fournisseur) n'existe qu'après la migration 20261103130000.
+          .select("*")
           .eq("dossier_id", dossierId),
         // Règlements datés : donnent au mois d'EXIGIBILITÉ sa vraie date. La table
         // peut ne pas exister (migration du moteur de paiement non appliquée) —
@@ -103,6 +151,19 @@ function FiscalitePage() {
       setVentes((v ?? []).filter((f: any) => f.statut !== "rejetee"));
       setAchats(a ?? []);
       setPaiements(p ?? []);
+      // Lectures tolérantes : sans bucket ou sans colonne (migration), rien n'est
+      // présumé — aucune déclaration n'est réputée déposée, aucune compensation admise.
+      try {
+        const { data: fichiers } = await supabase.storage.from("quittances-tva").list(dossierId, { limit: 1000 });
+        setRecepisses(((fichiers ?? []) as any[]).map((x) => x.name));
+      } catch { setRecepisses([]); }
+      try {
+        const { data: conv, error: eConv } = await (supabase.from("justificatifs") as any)
+          .select("numero_piece,date_signature,signature_parties").eq("dossier_id", dossierId).eq("categorie_pcm", "convention_compensation");
+        setSignaturesCompensation(new Map(eConv ? [] : ((conv ?? []) as any[])
+          .filter((c) => c.date_signature && c.signature_parties === true)
+          .map((c) => [String(c.numero_piece ?? "").trim(), String(c.date_signature).slice(0, 10)])));
+      } catch { setSignaturesCompensation(new Map()); }
     }
   }, [dossierId]);
 
@@ -113,13 +174,22 @@ function FiscalitePage() {
   }, [dossierId]);
 
   const parametres = useMemo(() => lireParametresFiscaux(dossier), [dossier]);
+  const ajustements = useMemo(() => lireAjustementsFiscaux(dossier, Number(exercice)), [dossier, exercice]);
 
   const ouvrirParams = () => {
+    const brut = (dossier?.ajustements_fiscaux ?? {})[exercice] ?? {};
+    const champ = (v: unknown) => (v == null || v === "" ? "" : String(v));
     setFormParams({
       date_debut_activite: parametres.dateDebutActivite,
       valeur_locative_tp: parametres.valeurLocative != null ? String(parametres.valeurLocative) : "",
       classe_tp: String(parametres.classeTP ?? CLASSE_TP_DEFAUT),
       regime_is: parametres.regimeIS,
+      reintegrations: champ(brut.reintegrations),
+      deductions: champ(brut.deductions),
+      is_du_precedent: champ(brut.is_du_precedent),
+      deficits_anterieurs: champ(brut.deficits_anterieurs),
+      situation_tva: ["option_mensuelle", "saisonniere", "non_resident"].includes(dossier?.periodicite_tva) ? dossier.periodicite_tva : "",
+      periodicite_exercice: brut.periodicite_tva === "mensuel" || brut.periodicite_tva === "trimestriel" ? brut.periodicite_tva : "",
     });
     setOpenParams(true);
   };
@@ -128,16 +198,46 @@ function FiscalitePage() {
     e.preventDefault();
     setSavingParams(true);
     try {
-      const vl = formParams.valeur_locative_tp.trim().replace(",", ".");
-      const { error } = await (supabase.from("dossiers") as any).update({
+      const nombre = (s: string) => {
+        const t = s.trim().replace(/\s/g, "").replace(",", ".");
+        return t === "" ? null : Number(t);
+      };
+      const saisis = [formParams.valeur_locative_tp, formParams.reintegrations, formParams.deductions, formParams.is_du_precedent, formParams.deficits_anterieurs];
+      if (saisis.some((s) => { const x = nombre(s); return x !== null && (!isFinite(x) || x < 0); })) {
+        toast.error("Les montants doivent être des nombres positifs.");
+        return;
+      }
+      const base = {
         date_debut_activite: formParams.date_debut_activite || null,
-        valeur_locative_tp: vl === "" ? null : Number(vl),
+        valeur_locative_tp: nombre(formParams.valeur_locative_tp),
         classe_tp: Number(formParams.classe_tp),
         regime_is: formParams.regime_is,
-      }).eq("id", dossierId);
+      };
+      // Ajustements rangés par millésime : modifier 2026 ne touche pas 2025.
+      const ajustementsFiscaux = {
+        ...(dossier?.ajustements_fiscaux ?? {}),
+        [exercice]: {
+          reintegrations: nombre(formParams.reintegrations),
+          deductions: nombre(formParams.deductions),
+          is_du_precedent: nombre(formParams.is_du_precedent),
+          deficits_anterieurs: nombre(formParams.deficits_anterieurs),
+          // Figée pour CETTE année : un changement ultérieur de CA ou de situation
+          // ne réécrit pas l'historique déclaratif.
+          periodicite_tva: formParams.periodicite_exercice || null,
+        },
+      };
+      let { error } = await (supabase.from("dossiers") as any)
+        .update({ ...base, ajustements_fiscaux: ajustementsFiscaux, periodicite_tva: formParams.situation_tva || null }).eq("id", dossierId);
+      if (error && /ajustements_fiscaux|periodicite_tva/i.test(error.message ?? "")) {
+        // Migrations 20261103120000 / 20261103130000 non appliquées : on enregistre le reste.
+        ({ error } = await (supabase.from("dossiers") as any).update(base).eq("id", dossierId));
+        if (!error) toast.warning("Ajustements fiscaux ou périodicité TVA non enregistrés : appliquez les migrations 20261103120000 et 20261103130000.");
+      }
       if (error) {
         // Cause la plus probable : migration des paramètres fiscaux non appliquée.
-        toast.error(`Enregistrement impossible : ${error.message}`);
+        toast.error(/regime_is_check/i.test(error.message ?? "")
+          ? "Régime « établissement de crédit » refusé par la base : appliquez la migration 20261103120000."
+          : `Enregistrement impossible : ${error.message}`);
         return;
       }
       toast.success("Paramètres fiscaux enregistrés ✓");
@@ -154,60 +254,86 @@ function FiscalitePage() {
     ? bornesDuMois(periodeTVA)
     : { debut: `${exercice}-01-01`, fin: `${exercice}-12-31` };
 
-  const synthese = synthetiserTva(ventes, achats, { ...bornesPeriode, paiements });
+  // `ecritures` : ajoute la TVA née en trésorerie sans facture (frais bancaires,
+  // justificatifs) — elle figure dans l'OD de liquidation, elle doit figurer ici.
+  // Achats dont la TVA n'est pas déductible, lus au grand livre : la synthèse, le
+  // relevé des déductions et l'OD de liquidation s'appuient sur la même source.
+  const deductibilite = classerDeductibiliteAchats(achats, ecritures);
+  const achatsExclus = deductibilite.exclus;
+  const achatsNonClasses = achats.filter((f: any) => deductibilite.nonClasses.has(String(f.id)));
+  // Règlements par COMPENSATION (OD COMP- lettrées avec la facture), datés de la
+  // signature de la convention : la table paiements ne les porte pas.
+  const paiementsComplets = [
+    ...paiements,
+    ...reglementsParCompensation(ecritures, ventes, "client", signaturesCompensation),
+    ...reglementsParCompensation(ecritures, achats, "fournisseur", signaturesCompensation),
+  ];
+  const synthese = synthetiserTva(ventes, achats, { ...bornesPeriode, paiements: paiementsComplets, ecritures, achatsExclus });
   const collectee = synthese.collectee;
   const recuperable = synthese.deductible;
   const statutNet = statutTva(synthese.nette);
   // TVA des achats reçus mais NON réglés : pas encore déductible, elle le deviendra
   // au décaissement. Distincte de la déductible du mois, jamais confondue avec elle.
-  const tvaEnCours = tvaRecuperableEnCours(achats);
+  const tvaEnCours = tvaRecuperableEnCours(achats.filter((f: any) => !achatsExclus.has(String(f.id))));
 
   // Périodes = mois d'exigibilité (encaissement daté, ou facture à défaut).
-  const moisDisponibles = periodesTva(ventes, achats, paiements);
+  const moisDisponibles = periodesTva(ventes, achats, paiements, ecritures);
   const tvaMensuelle = moisDisponibles.map(m => {
     const bornes = bornesDuMois(m)!;
-    const s = synthetiserTva(ventes, achats, { ...bornes, paiements });
+    const s = synthetiserTva(ventes, achats, { ...bornes, paiements: paiementsComplets, ecritures, achatsExclus });
     return { mois: m, collectee: s.collectee, recuperable: s.deductible, statut: statutTva(s.nette) };
   });
 
   // ── Agrégats comptables par exercice ─────────────────────────────────────────
   const anneeN = Number(exercice);
-  const agregats = (annee: number) => {
-    const e = ecritures.filter(x => x.date_ecriture?.startsWith(String(annee)));
-    const solde = (predicat: (c: string) => boolean, sens: "debit" | "credit") =>
-      e.filter(x => predicat(String(x.compte_numero ?? ""))).reduce(
-        (s, x) => s + (sens === "credit" ? Number(x.credit) - Number(x.debit) : Number(x.debit) - Number(x.credit)), 0);
-    const produits = solde(c => c.startsWith("7"), "credit");
-    const charges = solde(c => c.startsWith("6"), "debit");
-    return {
-      produits, charges, resultat: produits - charges,
-      // CA au sens strict : ventes de l'exercice (71x). La base de la cotisation
-      // minimale est plus large (produits d'exploitation, financiers et non courants).
-      ca: solde(c => c.startsWith("71"), "credit"),
-      nbEcritures: e.length,
-    };
-  };
-  const agrN = agregats(anneeN);
-  const agrN1 = agregats(anneeN - 1);
+  // Résultat AVANT impôt (l'IS comptabilisé en 67 n'ampute pas sa propre base),
+  // base de CM limitée aux produits visés par l'art. 144-I-B — cf. agregatsFiscaux.
+  const agrN = agregatsFiscaux(ecritures, anneeN);
+  const agrN1 = agregatsFiscaux(ecritures, anneeN - 1);
+
+  // ── Calendrier déclaratif TVA ────────────────────────────────────────────────
+  // Échéances lues sur la PÉRIODICITÉ du dossier (paramètre, sinon CA N-1, art.
+  // 108 CGI), les dates et l'état de déclaration au grand livre — jamais sur
+  // l'existence de factures : une période sans opération se déclare aussi.
+  // Périodicité de CHAQUE année (art. 108) : CA taxable de l'année précédente lu
+  // au grand livre (711 + 712), situation du dossier, périodicité figée par année.
+  const caTaxable = (annee: number) => { const a = agregatsFiscaux(ecritures, annee); return a.nbEcritures > 0 ? a.ca : null; };
+  const periodiciteDe = (annee: number) => periodiciteTva(dossier, annee, caTaxable(annee - 1));
+  const periodicite = periodiciteDe(anneeN);
+  const etatsTva = etatsDeclarationsTva(ecritures, recepisses);
+  const calendrier = calendrierTva({
+    periodicite: (annee) => periodiciteDe(annee).periodicite,
+    etats: etatsTva,
+    dateDebutActivite: parametres.dateDebutActivite,
+  });
+  const echeanceDue = prochaineEcheanceTva(calendrier);
+  const LIBELLE_STATUT_TVA = { en_cours: "En cours", a_declarer: "À déclarer", en_retard: "Non déposée — en retard", a_payer: "Déposée — à payer", reglee: "Déposée et réglée" } as const;
+  const ajustementsN1 = lireAjustementsFiscaux(dossier, anneeN - 1);
+  const imputationN = imputerDeficits(agrN, ajustements);
+  const resultatFiscalN = imputationN.resultatFiscal;
 
   // ── Calculs IS ───────────────────────────────────────────────────────────────
-  // Les acomptes versés en N s'assoient sur l'IS DÛ DE N-1 : on liquide donc
-  // d'abord l'exercice précédent (sans acompte, seule sa dette d'impôt compte).
+  // Les acomptes versés en N s'assoient sur l'IS DÛ DE N-1. Ordre de priorité de
+  // cette base : le montant SAISI (IS réellement liquidé sur la liasse N-1, seul
+  // à faire foi), à défaut le recalcul sur le grand livre N-1 s'il existe, à
+  // défaut rien — et l'écran le signale au lieu d'afficher des acomptes à zéro.
   const donneesN1 = agrN1.nbEcritures > 0;
   const isN1 = calculerIS({
     exercice: anneeN - 1,
-    resultatFiscal: agrN1.resultat,
-    baseCotisationMinimale: agrN1.produits,
+    resultatFiscal: resultatFiscal(agrN1, ajustementsN1),
+    baseCotisationMinimale: agrN1.baseCotisationMinimale,
     dateDebutActivite: parametres.dateDebutActivite,
     tauxCotisationMinimale: parametres.tauxCM ?? undefined,
     regime: parametres.regimeIS,
   });
+  const baseAcomptesSaisie = ajustements.isDuPrecedent != null;
+  const baseAcomptesInconnue = !baseAcomptesSaisie && !donneesN1;
   const is = calculerIS({
     exercice: anneeN,
-    resultatFiscal: agrN.resultat,
-    baseCotisationMinimale: agrN.produits,
+    resultatFiscal: resultatFiscalN,
+    baseCotisationMinimale: agrN.baseCotisationMinimale,
     dateDebutActivite: parametres.dateDebutActivite,
-    isDuExercicePrecedent: donneesN1 ? isN1.isDu : 0,
+    isDuExercicePrecedent: baseAcomptesSaisie ? ajustements.isDuPrecedent! : donneesN1 ? isN1.isDu : 0,
     tauxCotisationMinimale: parametres.tauxCM ?? undefined,
     regime: parametres.regimeIS,
   });
@@ -255,7 +381,7 @@ function FiscalitePage() {
         // l'export, plutôt qu'au chargement de la page : `lignes` est un jsonb
         // volumineux qui n'a d'utilité que pour la désignation DGI.
         supabase.from("factures_fournisseurs")
-          .select("id,numero,fournisseur_id,fournisseur_nom,mode_reglement,date_paiement,lignes")
+          .select("*")
           .eq("dossier_id", dossierId),
         // Annuaire COMPLET : la jointure consolide les fiches en double, il ne
         // faut donc pas le restreindre au seul fournisseur pointé par la facture.
@@ -275,9 +401,11 @@ function FiscalitePage() {
       const detail = new Map(((detailAchats ?? []) as any[]).map(d => [d.id, d]));
       const achatsComplets = achats.map(f => ({ ...f, ...(detail.get(f.id) ?? {}) }));
 
+      const rejets: string[] = [];
       const lignes = construireReleveDeductions({
         achats: achatsComplets,
-        paiements,
+        // Compensations comprises : un règlement codé 6, daté de la signature.
+        paiements: paiementsComplets,
         fournisseurs: (fournisseurs ?? []) as any[],
         modes: indexerModesPaiement("fournisseur", { transactions: tx ?? [], encaissements: enc ?? [] }),
         // `ecritures_comptables.reference_piece` porte l'id de la facture : c'est
@@ -285,8 +413,16 @@ function FiscalitePage() {
         comptesCharge: indexerComptesCharge(ecritures),
         intitulesPcm: Object.fromEntries(((pcm ?? []) as any[]).map(c => [c.numero, c.intitule])),
         ...bornesPeriode,
+        achatsExclus,
+        rejets,
       });
+      if (rejets.length) {
+        toast.warning(`${rejets.length} achat(s) écarté(s) du relevé — champs SIMPL-TVA obligatoires manquants : ${rejets.slice(0, 3).join(" · ")}${rejets.length > 3 ? " …" : ""}`);
+      }
 
+      if (achatsNonClasses.length) {
+        toast.warning(`${achatsNonClasses.length} achat(s) non comptabilisé(s) exclu(s) du relevé : leur TVA reste à valider.`);
+      }
       if (!lignes.length) {
         toast.error("Aucun règlement d'achat soumis à TVA sur la période — relevé vide");
         return;
@@ -468,12 +604,30 @@ function FiscalitePage() {
             </Card>
           )}
 
+          {/* Achats portant de la TVA sans AUCUNE écriture d'achat : leur droit à
+              déduction n'a jamais été établi. Ils ne sont pas présumés déductibles. */}
+          {achatsNonClasses.length > 0 && (
+            <Card className="border-amber-300 bg-amber-50 dark:bg-amber-950/20">
+              <CardContent className="pt-3 pb-3 text-xs text-amber-800 dark:text-amber-300 space-y-1">
+                <p className="font-medium">
+                  ⚠️ {achatsNonClasses.length} facture(s) d'achat non comptabilisée(s) — TVA de {fmtMAD(achatsNonClasses.reduce((t: number, f: any) => t + (Number(f.montant_tva) || 0), 0))} écartée de la déduction, à valider.
+                </p>
+                <p>{achatsNonClasses.slice(0, 8).map((f: any) => f.numero || f.fournisseur_nom || String(f.id).slice(0, 8)).join(" · ")}{achatsNonClasses.length > 8 ? " …" : ""}</p>
+                <p>Sans écriture au journal des achats, rien n'établit que leur TVA est récupérable : comptabilisez-les depuis l'écran Fournisseurs pour qu'elles entrent dans la déclaration.</p>
+              </CardContent>
+            </Card>
+          )}
+
           {statutNet.cle === "a_payer" && (
             <Card className="border-orange-300 bg-orange-50 dark:bg-orange-950/20">
               <CardContent className="pt-4 pb-4 text-sm text-orange-700 dark:text-orange-300">
                 <p className="font-bold mb-1">📋 À verser à la DGI : {fmtMAD(statutNet.montant)}</p>
-                <p className="text-xs">Régime mensuel : avant le 20 du mois suivant</p>
-                <p className="text-xs">Régime trimestriel : avant le 20 du mois suivant le trimestre</p>
+                {periodeTVA !== "all" && echeanceSimplTva(periodeTVA) && (
+                  <p className="text-xs font-medium">
+                    Échéance de la période {periodeTVA} : {formatDateFr(isoLocal(echeanceSimplTva(periodeTVA)!))}
+                  </p>
+                )}
+                <p className="text-xs">Régime {periodicite.periodicite} : avant la fin du mois suivant la période (télédéclaration, art. 110 CGI)</p>
                 <p className="text-xs mt-1">Télédéclaration : <a href="https://simpl.tax.gov.ma" target="_blank" rel="noopener" className="underline font-medium">simpl.tax.gov.ma</a></p>
               </CardContent>
             </Card>
@@ -552,11 +706,16 @@ function FiscalitePage() {
               {is.regime === "taux_specifique" && (
                 <Badge variant="outline" className="text-violet-700 border-violet-300">Statut spécifique — 20 % plafonné</Badge>
               )}
+              {is.regime === "etablissement_credit" && (
+                <Badge variant="outline" className="text-violet-700 border-violet-300">Établissement de crédit / assurance — 40 %</Badge>
+              )}
             </div>
-            {/* Le résultat comptable n'est pas le résultat fiscal : réintégrations,
-                déductions et reports déficitaires n'arrivent qu'à la liasse. */}
+            {/* Le résultat comptable n'est pas le résultat fiscal : sans ajustements
+                saisis, le calcul reste celui du résultat comptable avant impôt. */}
             <Badge variant="secondary" className="mt-2 font-normal text-muted-foreground">
-              Calcul indicatif au fil de l'eau (avant retraitements extra-comptables de fin d'exercice).
+              {ajustements.reintegrations > 0 || ajustements.deductions > 0 || ajustements.deficitsAnterieurs > 0
+                ? "Résultat fiscal = résultat avant impôt + réintégrations − déductions − déficits imputés."
+                : "Aucun retraitement saisi : résultat fiscal = résultat comptable avant impôt."}
             </Badge>
           </div>
 
@@ -566,15 +725,25 @@ function FiscalitePage() {
               <CardContent>
                 <div className="space-y-3">
                   {[
-                    { label: "Chiffre d'affaires HT (71)", value: fmtMAD(agrN.ca) },
+                    { label: "Chiffre d'affaires HT (711 + 712)", value: fmtMAD(agrN.ca) },
                     { label: "Total produits (classe 7)", value: fmtMAD(agrN.produits) },
-                    { label: "Total charges (classe 6)", value: fmtMAD(agrN.charges) },
+                    { label: "Total charges (classe 6, hors IS)", value: fmtMAD(agrN.charges) },
+                    ...(agrN.impotsResultats !== 0
+                      ? [{ label: "IS comptabilisé en charge (67) — exclu de la base", value: fmtMAD(agrN.impotsResultats) }]
+                      : []),
+                    { label: "Résultat avant impôt", value: fmtMAD(agrN.resultatAvantImpot) },
+                    { label: "+ Réintégrations", value: fmtMAD(ajustements.reintegrations) },
+                    { label: "− Déductions", value: fmtMAD(ajustements.deductions) },
+                    ...(ajustements.deficitsAnterieurs > 0
+                      ? [{ label: "− Déficits antérieurs imputés (art. 12 CGI)", value: fmtMAD(imputationN.deficitImpute) }]
+                      : []),
                     { label: "Résultat fiscal", value: fmtMAD(is.resultatFiscal), bold: true },
                     { label: `Taux IS (${is.tranche.label})`, value: pourcent(is.tranche.taux) },
                     { label: "IS théorique", value: fmtMAD(is.isTheorique) },
+                    { label: "Base de la cotisation minimale (art. 144-I-B)", value: fmtMAD(agrN.baseCotisationMinimale) },
                     {
                       label: is.cotisationMinimale.applicable
-                        ? `Cotisation minimale (${pourcent(is.cotisationMinimale.taux)} des produits)`
+                        ? `Cotisation minimale (${pourcent(is.cotisationMinimale.taux)} de la base)`
                         : "Cotisation minimale — exonérée",
                       value: fmtMAD(is.cotisationMinimale.montant),
                     },
@@ -588,6 +757,11 @@ function FiscalitePage() {
                   {!is.cotisationMinimale.applicable && is.cotisationMinimale.motif && (
                     <p className="text-xs text-emerald-700 dark:text-emerald-400 flex items-start gap-1.5">
                       <ShieldCheck className="h-3.5 w-3.5 shrink-0 mt-0.5" />{is.cotisationMinimale.motif}
+                    </p>
+                  )}
+                  {imputationN.deficitReportable > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Déficit reportable à l'ouverture de {anneeN + 1} : <strong>{fmtMAD(imputationN.deficitReportable)}</strong> (4 exercices, sans limite pour la part liée aux amortissements).
                     </p>
                   )}
                   {is.cotisationMinimale.plancherApplique && (
@@ -651,9 +825,18 @@ function FiscalitePage() {
                         Chaque acompte = IS {anneeN - 1} ÷ 4 = <strong>{fmtMAD(is.acomptes.montantUnitaire)}</strong>.
                         Le résultat de {exercice}, inconnu au moment des versements, n'entre pas dans ce calcul.
                       </p>
-                      {!donneesN1 && (
+                      {baseAcomptesSaisie ? (
+                        <p className="text-muted-foreground mt-1">Base saisie dans les paramètres fiscaux (IS liquidé sur la liasse {anneeN - 1}).</p>
+                      ) : baseAcomptesInconnue ? (
                         <p className="text-amber-700 dark:text-amber-400 mt-1">
-                          Aucune écriture sur l'exercice {anneeN - 1} : base d'acomptes calculée à 0.
+                          Aucune écriture sur l'exercice {anneeN - 1} : les acomptes ne peuvent pas être calculés.{" "}
+                          <Button variant="link" size="sm" className="h-auto p-0 text-xs text-amber-800 dark:text-amber-300" onClick={ouvrirParams}>
+                            Saisir l'IS dû de {anneeN - 1}
+                          </Button>
+                        </p>
+                      ) : (
+                        <p className="text-muted-foreground mt-1">
+                          Base recalculée sur le grand livre {anneeN - 1}. Si l'IS liquidé sur la liasse diffère, saisissez-le dans les paramètres fiscaux.
                         </p>
                       )}
                     </div>
@@ -680,12 +863,17 @@ function FiscalitePage() {
                 )}
 
                 <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-950/20 rounded text-xs text-blue-700 dark:text-blue-300">
-                  <p className="font-medium">Barème IS Maroc {exercice} (LF 2026) :</p>
-                  {BAREME_IS.map(t => (
+                  <p className="font-medium">Barème IS Maroc {exercice}{anneeN < 2026 ? " (barème transitoire LF 2023)" : ""} :</p>
+                  {baremeIS(anneeN).map(t => (
                     <p key={t.label}>{t.label} → {pourcent(t.taux)}</p>
                   ))}
                   <p>Statut spécifique (export, ZAI, CFC…) → {pourcent(TAUX_IS_SPECIFIQUE)} plafonné</p>
-                  <p className="mt-1">CM = {pourcent(TAUX_CM_DROIT_COMMUN)} des produits (art. 144 CGI), minimum 3 000 MAD.</p>
+                  <p>Établissements de crédit, BAM, CDG, assurances → {pourcent(TAUX_IS_ETABLISSEMENT_CREDIT)}</p>
+                  <p className="mt-1">
+                    CM = {pourcent(TAUX_CM_DROIT_COMMUN)} du chiffre d'affaires, des autres produits d'exploitation,
+                    des produits financiers et des subventions (art. 144 CGI), minimum 3 000 MAD. Reprises et
+                    cessions d'immobilisations exclues.
+                  </p>
                   <p>Exonération de CM pendant les 36 premiers mois d'activité.</p>
                   <p>Acomptes : fin des 3e, 6e, 9e et 12e mois de l'exercice, sur l'IS de N-1 (art. 170 CGI).</p>
                 </div>
@@ -741,13 +929,35 @@ function FiscalitePage() {
 
             {/* TVA mensuelle récurrente */}
             <div className="p-4 rounded-xl border bg-muted/30">
-              <p className="font-medium text-sm mb-1">🔄 Déclaration TVA mensuelle</p>
-              <p className="text-xs text-muted-foreground">Avant le 20 de chaque mois (régime mensuel) ou le 20 du mois suivant le trimestre (régime trimestriel)</p>
-              <p className="text-xs mt-1 font-medium text-orange-600">
-                Prochain : 20/{String(now.getMonth() + 2).padStart(2, "0")}/{now.getFullYear()} — {
-                  tvaMensuelle[0] ? `${fmtMAD(tvaMensuelle[0].statut.montant)} (${tvaMensuelle[0].statut.label})` : fmtMAD(0)
-                }
+              <p className="font-medium text-sm mb-1">
+                🔄 Déclaration TVA {periodicite.periodicite === "mensuel" ? "mensuelle" : "trimestrielle"} — {exercice}
+                <span className={`ml-2 text-xs font-normal ${periodicite.source === "defaut" ? "text-amber-700" : "text-muted-foreground"}`}>
+                  ({periodicite.motif})
+                </span>
               </p>
+              <p className="text-xs text-muted-foreground">
+                Télédéclaration avant la fin du mois suivant la période (art. 110 CGI). Une période sans
+                opération ou en crédit se déclare aussi.
+              </p>
+              {echeanceDue ? (
+                <p className={`text-xs mt-1 font-medium ${echeanceDue.statut === "en_retard" ? "text-red-600" : "text-orange-600"}`}>
+                  {echeanceDue.statut === "en_retard" ? "En retard" : echeanceDue.statut === "a_payer" ? "À payer" : "Prochaine échéance"} : {formatDateFr(echeanceDue.echeance)} (période {echeanceDue.periode})
+                  {echeanceDue.liquidee && !echeanceDue.deposee ? " — liquidée en comptabilité, mais aucun récépissé de dépôt enregistré" : ""}
+                </p>
+              ) : (
+                <p className="text-xs mt-1 font-medium text-emerald-600">Toutes les périodes closes sont déposées et réglées.</p>
+              )}
+              <div className="mt-2 flex flex-wrap gap-1">
+                {calendrier.slice(-6).map((e) => (
+                  <Badge key={e.periode} variant="outline" className={`text-[11px] ${
+                    e.statut === "en_retard" ? "border-red-300 text-red-700"
+                    : e.statut === "reglee" ? "border-emerald-300 text-emerald-700"
+                    : e.statut === "a_declarer" || e.statut === "a_payer" ? "border-orange-300 text-orange-700" : "text-muted-foreground"}`}
+                    title={e.recepisse ? `Récépissé : ${e.recepisse}` : e.liquidee ? "Liquidée, non déposée" : undefined}>
+                    {e.periode} · {LIBELLE_STATUT_TVA[e.statut]}{e.liquidee && !e.deposee ? " (liquidée)" : ""}
+                  </Badge>
+                ))}
+              </div>
             </div>
 
             <div className="p-4 rounded-xl border bg-muted/30">
@@ -848,18 +1058,70 @@ function FiscalitePage() {
               </p>
             </div>
             <div className="space-y-2">
+              <Label>Situation déclarative TVA (art. 108 CGI)</Label>
+              <Select value={formParams.situation_tva || "droit_commun"} onValueChange={(v) => setFormParams({ ...formParams, situation_tva: v === "droit_commun" ? "" : v as SituationTva })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="droit_commun">Droit commun — nouvelle entreprise : trimestrielle ; puis CA N-1 ≥ 1 MDH : mensuelle</SelectItem>
+                  <SelectItem value="option_mensuelle">Option pour la déclaration mensuelle</SelectItem>
+                  <SelectItem value="saisonniere">Activité saisonnière, périodique ou occasionnelle — trimestrielle</SelectItem>
+                  <SelectItem value="non_resident">Non-résident sans établissement au Maroc — mensuelle</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">Périodicité {exercice} : {periodicite.periodicite} — {periodicite.motif}.</p>
+              <Label className="text-xs">Périodicité retenue pour {exercice} (fige l'historique)</Label>
+              <Select value={formParams.periodicite_exercice || "auto"} onValueChange={(v) => setFormParams({ ...formParams, periodicite_exercice: v === "auto" ? "" : v as PeriodiciteTva })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Selon les règles ci-dessus</SelectItem>
+                  <SelectItem value="mensuel">Mensuelle</SelectItem>
+                  <SelectItem value="trimestriel">Trimestrielle</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
               <Label>Régime d'imposition IS</Label>
-              <Select value={formParams.regime_is} onValueChange={(v) => setFormParams({ ...formParams, regime_is: v as RegimeIS })}>
+              <Select value={formParams.regime_is} onValueChange={(v) => setFormParams({ ...formParams, regime_is: normaliserRegimeIS(v) })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="droit_commun">Droit commun — 20 % (&lt; 100 MDH) puis 35 %</SelectItem>
                   <SelectItem value="taux_specifique">Statut spécifique — 20 % plafonné (export, ZAI, CFC)</SelectItem>
+                  <SelectItem value="etablissement_credit">Établissement de crédit / assurance — 40 %</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
                 Les PME relèvent du droit commun : tout bénéfice inférieur à 100 MDH y est imposé à 20 %.
                 Le statut spécifique maintient ce taux au-delà de 100 MDH.
               </p>
+            </div>
+            <div className="space-y-2 rounded-lg border p-3">
+              <Label>Ajustements fiscaux de l'exercice {exercice}</Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Réintégrations</p>
+                  <Input inputMode="decimal" placeholder="0" value={formParams.reintegrations}
+                    onChange={(e) => setFormParams({ ...formParams, reintegrations: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Déductions</p>
+                  <Input inputMode="decimal" placeholder="0" value={formParams.deductions}
+                    onChange={(e) => setFormParams({ ...formParams, deductions: e.target.value })} />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Réintégrations : charges non déductibles (amendes, pénalités, dons au-delà du plafond…).
+                Déductions : produits non imposables (dividendes exonérés…). Les déficits se saisissent à part.
+              </p>
+              <div className="space-y-1 pt-1">
+                <p className="text-xs text-muted-foreground">Déficits antérieurs encore reportables à l'ouverture de {exercice}</p>
+                <Input inputMode="decimal" placeholder="0" value={formParams.deficits_anterieurs}
+                  onChange={(e) => setFormParams({ ...formParams, deficits_anterieurs: e.target.value })} />
+              </div>
+              <div className="space-y-1 pt-1">
+                <p className="text-xs text-muted-foreground">IS dû au titre de {Number(exercice) - 1} (base des acomptes)</p>
+                <Input inputMode="decimal" placeholder="Laisser vide pour le recalculer" value={formParams.is_du_precedent}
+                  onChange={(e) => setFormParams({ ...formParams, is_du_precedent: e.target.value })} />
+              </div>
             </div>
             <div className="space-y-2">
               <Label>Valeur locative annuelle (base TP)</Label>

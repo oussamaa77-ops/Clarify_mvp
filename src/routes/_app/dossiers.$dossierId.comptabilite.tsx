@@ -1,11 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { compteTiersAuxiliaire, suffixeAuxiliaire } from "@/lib/comptes-auxiliaires";
 import { synthetiserBalance, ventilerSolde, type LigneBalance as LigneBalanceLib } from "@/lib/balance-comptable";
 import { normaliserNumeroCompte } from "@/lib/numero-compte";
 import { validatePcmAccount } from "@/lib/pcm-referentiel";
 import { bornesExercice, exerciceParDefaut, exercicesDisponibles, lireDatesEcritures } from "@/lib/exercice-comptable";
 import { JOURNAL_AN, sansANouveaux } from "@/lib/a-nouveaux";
+import {
+  CHAMPS_STRUCTURANTS, bornesExerciceActif, controlerJournalOd, controlerTvaOrigine, verdictRetouche,
+} from "@/lib/genererEcritures";
+import { controlerTvaHorsClasse6 } from "@/lib/garde-tva-classe6";
+import { logAudit } from "@/lib/audit";
+
+/** Taille de page PostgREST : au-delà, une requête unique est tronquée en silence. */
+const PAGE_ECRITURES = 1000;
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,6 +54,15 @@ interface Ecriture {
 }
 
 type LigneBalance = LigneBalanceLib;
+
+/** Ce que la piste d'audit garde d'une écriture retouchée : de quoi la reconstituer. */
+function champsTraces(e: Partial<Ecriture>) {
+  return {
+    id: e.id ?? null, date_ecriture: e.date_ecriture ?? null, journal_code: e.journal_code ?? null,
+    compte_numero: e.compte_numero ?? null, libelle: e.libelle ?? null,
+    debit: Number(e.debit ?? 0), credit: Number(e.credit ?? 0), reference_piece: e.reference_piece ?? null,
+  };
+}
 
 const JOURNAUX = ["AN","BQ","VTE","ACH","CAI","OD","VTE-AVR","ACH-AVR"];
 
@@ -102,6 +119,12 @@ function ComptabilitePage() {
   const [exerciceInitialise, setExerciceInitialise] = useState(false);
 
   const bornes = exercice == null ? null : bornesExercice(exercice, dateDebutActivite);
+  // Exercice ACTIF (celui de l'horloge) : une écriture antérieure appartient à un
+  // exercice dont la liasse est, ou sera, déposée — la retoucher exige un accord
+  // explicite et laisse une trace dans la piste d'audit.
+  const exerciceActif = bornesExerciceActif({ date_debut_activite: dateDebutActivite });
+  // État des écritures TEL QUE LU en base : c'est contre lui qu'on juge une retouche.
+  const originaux = useRef<Map<string, Ecriture>>(new Map());
 
   // Nouvelle écriture
   const [newDate, setNewDate] = useState(new Date().toISOString().slice(0,10));
@@ -136,26 +159,37 @@ function ComptabilitePage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    let query = supabase.from("ecritures_comptables")
-      .select("*").eq("dossier_id", dossierId)
-      // Journal Général : ordre CHRONOLOGIQUE continu (le grand livre, lui,
-      // regroupe par compte dans son propre onglet).
-      .order("date_ecriture", { ascending: true })
-      .order("journal_code").order("created_at", { ascending: true });
-
-    if (filtreJournal !== "TOUS") query = query.eq("journal_code", filtreJournal);
-    if (filtreCompte) query = query.eq("compte_numero", filtreCompte);
     // L'exercice est la borne EXTÉRIEURE : les filtres de date de l'utilisateur
     // ne peuvent que la resserrer, jamais la déborder. Sans cette intersection,
     // saisir une date de début en 2024 rouvrirait un exercice clos dans une vue
     // qui annonce 2026.
     const debut = [bornes?.debut, filtreDateDeb].filter(Boolean).sort().at(-1);
     const fin = [bornes?.fin, filtreDateFin].filter(Boolean).sort().at(0);
-    if (debut) query = query.gte("date_ecriture", debut);
-    if (fin) query = query.lte("date_ecriture", fin);
-
-    const { data, error } = await query.limit(1000);
-    if (error) { toast.error(error.message); setLoading(false); return; }
+    const requete = () => {
+      let query = supabase.from("ecritures_comptables")
+        .select("*").eq("dossier_id", dossierId)
+        // Journal Général : ordre CHRONOLOGIQUE continu (le grand livre, lui,
+        // regroupe par compte dans son propre onglet). `id` départage les
+        // ex æquo : sans clé totale, deux pages pourraient se recouvrir.
+        .order("date_ecriture", { ascending: true })
+        .order("journal_code").order("created_at", { ascending: true }).order("id", { ascending: true });
+      if (filtreJournal !== "TOUS") query = query.eq("journal_code", filtreJournal);
+      if (filtreCompte) query = query.eq("compte_numero", filtreCompte);
+      if (debut) query = query.gte("date_ecriture", debut);
+      if (fin) query = query.lte("date_ecriture", fin);
+      return query;
+    };
+    // Lecture PAGINÉE : la lecture unique s'arrêtait à 1 000 lignes, si bien que le
+    // journal, le grand livre et la balance d'un dossier actif étaient tronqués —
+    // une balance qui ne boucle plus, sans aucun avertissement.
+    const data: Ecriture[] = [];
+    for (let de = 0; ; de += PAGE_ECRITURES) {
+      const { data: page, error } = await requete().range(de, de + PAGE_ECRITURES - 1);
+      if (error) { toast.error(error.message); setLoading(false); return; }
+      data.push(...((page ?? []) as Ecriture[]));
+      if (!page || page.length < PAGE_ECRITURES) break;
+    }
+    originaux.current = new Map(data.map((e) => [e.id, { ...e }]));
     // ── Vue MULTI-EXERCICES : les à-nouveaux doivent sortir ────────────────
     // Un solde reporté existe deux fois en base : sur sa ligne d'origine (ACH
     // 16/12/2025) et sur son report (AN 01/01/2026). Bornés à un exercice, les
@@ -208,6 +242,21 @@ function ComptabilitePage() {
   const sauvegarder = async () => {
     const modifiees = ecritures.filter(e => e._modifie && !e._nouveau);
     if (!modifiees.length) { toast.info("Aucune modification"); return; }
+    // Une ligne verrouillée (facture, lettrage, règlement, déclaration de TVA)
+    // accepte un reclassement — compte, libellé — mais pas une retouche qui
+    // défait la pièce : montants, date, journal, référence.
+    const refus: string[] = [];
+    let anterieures = 0;
+    for (const e of modifiees) {
+      const avant = originaux.current.get(e.id) ?? e;
+      const v = verdictRetouche(avant as any, exerciceActif);
+      const structurant = CHAMPS_STRUCTURANTS.some((k) => String((avant as any)[k] ?? "") !== String((e as any)[k] ?? ""));
+      if (v.verrou && structurant) refus.push(`${avant.compte_numero} « ${String(avant.libelle ?? "").slice(0, 40)} » : ${v.verrou}`);
+      if (v.exerciceAnterieur || (e.date_ecriture && e.date_ecriture < exerciceActif.debut)) anterieures++;
+    }
+    if (refus.length) { toast.error(`Modification refusée — ${refus.join(" · ")}`); return; }
+    if (anterieures && !window.confirm(`${anterieures} écriture(s) concernent un exercice antérieur à ${exerciceActif.exercice}. `
+      + "Modifier un exercice dont la liasse est déposée la rend fausse. Confirmer la modification ? (elle sera tracée)")) return;
     setSaving(true);
     try {
       for (const e of modifiees) {
@@ -223,6 +272,9 @@ function ComptabilitePage() {
           reference_piece: e.reference_piece,
         }).eq("id", e.id);
         if (error) throw error;
+        const avant = originaux.current.get(e.id);
+        void logAudit({ dossierId, action: "modification_ecriture", ressourceType: "ecriture", ressourceId: e.id,
+          details: { avant: avant ? champsTraces(avant) : null, apres: champsTraces(e) } });
       }
       toast.success(`${modifiees.length} écriture(s) sauvegardée(s)`);
       load();
@@ -239,6 +291,20 @@ function ComptabilitePage() {
     const verdictCompte = validatePcmAccount(newCompte);
     if (!verdictCompte.ok) { toast.error(verdictCompte.erreurs.join(" ")); return; }
     if (verdictCompte.avertissements.length) toast.warning(verdictCompte.avertissements.join(" "));
+    // Les règles du régime des encaissements valent aussi pour la saisie libre :
+    // pas de TVA exigible en VTE / ACH, pas de banque ni de caisse en OD, pas de
+    // TVA récupérable en charge. Ce sont elles qui gardent la déclaration juste.
+    const ligne = { journal_code: newJournal, compte_numero: normaliserNumeroCompte(newCompte),
+      date_ecriture: newDate, libelle: newLibelle, debit: newDebit || 0, credit: newCredit || 0, reference_piece: newRef || null };
+    if (newJournal === JOURNAL_AN) { toast.error("Le journal des à-nouveaux est réservé à la réouverture de l'exercice."); return; }
+    const griefs = [
+      ...controlerTvaOrigine([ligne]).violations,
+      ...controlerJournalOd([ligne]).violations,
+      ...controlerTvaHorsClasse6([ligne]).violations,
+    ];
+    if (griefs.length) { toast.error(griefs.join(" ")); return; }
+    if (newDate < exerciceActif.debut && !window.confirm(`Cette écriture est datée d'un exercice antérieur à ${exerciceActif.exercice}. `
+      + "Comptabiliser dans un exercice dont la liasse est déposée la rend fausse. Confirmer ? (l'écriture sera tracée)")) return;
     setSaving(true);
     try {
       const { error } = await supabase.from("ecritures_comptables").insert({
@@ -253,6 +319,16 @@ function ComptabilitePage() {
         valide: true,
       });
       if (error) throw error;
+      void logAudit({ dossierId, action: "saisie_ecriture", ressourceType: "ecriture", details: champsTraces(ligne as any) });
+      // Partie double : la saisie se fait ligne à ligne, l'équilibre se juge donc
+      // sur la PIÈCE (même référence) une fois la ligne ajoutée.
+      if (newRef) {
+        const piece = [...ecritures.filter((x) => x.reference_piece === newRef), ligne as any];
+        const ecart = Math.round(piece.reduce((t, x) => t + Number(x.debit || 0) - Number(x.credit || 0), 0) * 100) / 100;
+        if (Math.abs(ecart) > 0.005) toast.warning(`Pièce « ${newRef} » déséquilibrée de ${ecart.toFixed(2)} MAD : complétez la contrepartie.`);
+      } else {
+        toast.warning("Écriture sans référence de pièce : son équilibre ne peut pas être contrôlé.");
+      }
       toast.success("Écriture ajoutée");
       setNewDebit(0); setNewCredit(0); setNewLibelle(""); setNewRef(""); setNewCompte("");
       load();
@@ -263,11 +339,16 @@ function ComptabilitePage() {
   // Suppression sélective
   const supprimerSelection = async () => {
     if (!deleteIds.size) { toast.warning("Aucune écriture sélectionnée"); return; }
+    const cibles = ecritures.filter((e) => deleteIds.has(e.id));
+    const ok = await autoriserSuppression(cibles);
+    if (!ok) return;
     setSaving(true);
     try {
-      const ids = Array.from(deleteIds);
+      const ids = cibles.map((e) => e.id);
       const { error } = await supabase.from("ecritures_comptables").delete().in("id", ids);
       if (error) throw error;
+      void logAudit({ dossierId, action: "suppression_ecritures", ressourceType: "ecriture",
+        details: { nombre: ids.length, ecritures: cibles.map(champsTraces) } });
       toast.success(`${ids.length} écriture(s) supprimée(s)`);
       setDeleteIds(new Set()); setConfirmDelete(false);
       load();
@@ -278,18 +359,44 @@ function ComptabilitePage() {
   // Suppression par lot (journal + date)
   const supprimerLot = async () => {
     if (!deleteLot) return;
+    // Le lot est d'abord LU, puis jugé ligne à ligne : la suppression aveugle par
+    // journal + date emportait les lignes de factures, de règlements lettrés et de
+    // déclarations de TVA du même jour.
+    let lecture = supabase.from("ecritures_comptables").select("*").eq("dossier_id", dossierId);
+    if (deleteLot.journal) lecture = lecture.eq("journal_code", deleteLot.journal);
+    if (deleteLot.date) lecture = lecture.eq("date_ecriture", deleteLot.date);
+    const { data: lot, error: eLot } = await lecture;
+    if (eLot) { toast.error(eLot.message); return; }
+    const cibles = (lot ?? []) as Ecriture[];
+    if (!cibles.length) { toast.info("Aucune écriture dans ce lot"); return; }
+    const ok = await autoriserSuppression(cibles);
+    if (!ok) return;
     setSaving(true);
     try {
-      let query = supabase.from("ecritures_comptables").delete().eq("dossier_id", dossierId);
-      if (deleteLot.journal) query = query.eq("journal_code", deleteLot.journal);
-      if (deleteLot.date) query = query.eq("date_ecriture", deleteLot.date);
-      const { error } = await query;
+      const { error } = await supabase.from("ecritures_comptables").delete().in("id", cibles.map((e) => e.id));
       if (error) throw error;
-      toast.success("Écritures supprimées");
+      void logAudit({ dossierId, action: "suppression_ecritures", ressourceType: "ecriture",
+        details: { lot: deleteLot, nombre: cibles.length, ecritures: cibles.map(champsTraces) } });
+      toast.success(`${cibles.length} écriture(s) supprimée(s)`);
       setDeleteLot(null); setConfirmDelete(false);
       load();
     } catch (e: any) { toast.error(e.message); }
     finally { setSaving(false); }
+  };
+
+  /** Refuse la suppression d'une ligne verrouillée, fait confirmer celle d'un exercice antérieur. */
+  const autoriserSuppression = async (cibles: Ecriture[]): Promise<boolean> => {
+    const verrouillees = cibles.map((e) => ({ e, v: verdictRetouche(e as any, exerciceActif) })).filter((x) => x.v.verrou);
+    if (verrouillees.length) {
+      const exemple = verrouillees[0];
+      toast.error(`Suppression refusée : ${verrouillees.length} écriture(s) protégée(s) — `
+        + `${exemple.e.compte_numero} « ${String(exemple.e.libelle ?? "").slice(0, 40)} » : ${exemple.v.verrou}.`);
+      return false;
+    }
+    const anterieures = cibles.filter((e) => verdictRetouche(e as any, exerciceActif).exerciceAnterieur).length;
+    if (anterieures && !window.confirm(`${anterieures} écriture(s) appartiennent à un exercice antérieur à ${exerciceActif.exercice}. `
+      + "Les supprimer fausse une liasse déjà établie. Confirmer ? (la suppression sera tracée)")) return false;
+    return true;
   };
 
   // Toggle sélection

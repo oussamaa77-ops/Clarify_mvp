@@ -276,6 +276,8 @@ interface Reglement {
   montant: number;
   date: string;
   date_ok: boolean;
+  /** `compensation` : règlement par compensation de créances réciproques (code DGI 6). */
+  origine?: string | null;
 }
 
 /**
@@ -291,7 +293,7 @@ function reglementsDeLaFacture(f: AchatDeduction, paiements: PaiementFiscal[]): 
   const ttc = n(f.montant_ttc);
   const dates = paiements
     .filter((p) => n(p.montant) > 0 && (p.date_paiement ?? "").slice(0, 10))
-    .map((p) => ({ montant: n(p.montant), date: String(p.date_paiement).slice(0, 10), date_ok: true }))
+    .map((p) => ({ montant: n(p.montant), date: String(p.date_paiement).slice(0, 10), date_ok: true, origine: p.origine ?? null }))
     .sort((a, b) => a.date.localeCompare(b.date));
 
   const sommeDatee = dates.reduce((s, r) => s + r.montant, 0);
@@ -304,7 +306,7 @@ function reglementsDeLaFacture(f: AchatDeduction, paiements: PaiementFiscal[]): 
   const reste = round2(regleTotal - retenus.reduce((s, r) => s + r.montant, 0));
   if (reste > 0.005) {
     const date = (f.date_paiement ?? f.date_facture ?? "").slice(0, 10);
-    if (date) retenus.push({ montant: reste, date, date_ok: false });
+    if (date) retenus.push({ montant: reste, date, date_ok: false, origine: null });
   }
   return retenus.sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -324,6 +326,22 @@ export interface OptionsReleveDeductions {
   /** Bornes de la période déclarée (AAAA-MM-JJ, incluses). */
   debut?: string;
   fin?: string;
+  /**
+   * Achats dont la TVA n'ouvre pas droit à déduction (cf. `classerDeductibiliteAchats`) :
+   * une TVA non récupérable (art. 106 CGI) n'a rien à faire au relevé.
+   */
+  achatsExclus?: Set<string>;
+  /**
+   * Reçoit, pour chaque achat écarté faute de champ obligatoire SIMPL-TVA, le
+   * motif en clair (« F-12 : IF du fournisseur manquant »). Les lignes
+   * incomplètes ne partent pas au relevé : le dépôt serait rejeté.
+   */
+  rejets?: string[];
+  /**
+   * Écarter les lignes dont un champ obligatoire SIMPL-TVA manque (défaut : oui).
+   * À `false`, seulement pour inspecter un relevé brut (contrôles avant dépôt).
+   */
+  exigerChampsObligatoires?: boolean;
 }
 
 /**
@@ -375,6 +393,10 @@ export function construireReleveDeductions(opts: OptionsReleveDeductions): Ligne
     const ttc = n(f.montant_ttc);
     const tva = n(f.montant_tva);
     if (tva <= 0 || ttc <= 0) continue;   // hors champ de la déduction
+    if (f.id && opts.achatsExclus?.has(String(f.id))) continue;   // TVA non récupérable
+    // Un AVOIR fournisseur ne fonde aucune déduction : il reprend une TVA déjà
+    // déduite, ce que porte l'OD de reprise au lettrage, pas le relevé.
+    if (String((f as any).type ?? "").trim().toLowerCase() === "avoir") continue;
 
     const identite = resoudreIdentiteFiscale(f, opts.fournisseurs ?? []);
     const mode = (f.id ? opts.modes?.get(f.id) : undefined) ?? normaliserMode(f.mode_reglement);
@@ -396,8 +418,15 @@ export function construireReleveDeductions(opts: OptionsReleveDeductions): Ligne
       dateFacture: (f.date_facture ?? "").slice(0, 10),
     };
 
-    for (const r of reglementsDeLaFacture(f, paiementsParFacture.get(f.id ?? "") ?? [])) {
-      if (!dansPeriode(r.date)) continue;
+    // Champs OBLIGATOIRES du relevé SIMPL-TVA (exigence du dépôt, distincte du
+    // droit à déduction) : sans eux la ligne serait rejetée par le portail.
+    const manquants = champsManquantsSimplTva(commun);
+    const reglements = reglementsDeLaFacture(f, paiementsParFacture.get(f.id ?? "") ?? []).filter((r) => dansPeriode(r.date));
+    if (opts.exigerChampsObligatoires !== false && manquants.length && reglements.length) {
+      opts.rejets?.push(`${commun.numeroFacture || commun.nomFournisseur || "achat"} : ${manquants.join(", ")} manquant(s)`);
+      continue;
+    }
+    for (const r of reglements) {
       const part = quotePartReglement({ ht: n(f.montant_ht), tva, ttc }, r.montant);
       lignes.push({
         ...commun,
@@ -406,6 +435,8 @@ export function construireReleveDeductions(opts: OptionsReleveDeductions): Ligne
         montantTtc: part.ttc,
         datePaiement: r.date,
         reglementDate: r.date_ok,
+        // Une compensation est un règlement à part entière, codé 6 par la DGI.
+        ...(r.origine === "compensation" ? { idModePaiement: MODE_PAIEMENT_DGI.compensation } : {}),
       });
     }
   }
@@ -458,4 +489,90 @@ export function totauxReleveDeductions(lignes: LigneReleveDeduction[]): TotauxRe
       (l) => l.dateFacture && l.datePaiement && l.datePaiement < l.dateFacture,
     ).length,
   };
+}
+
+// ─── Export EDI de l'écran Banque : éligibilité d'une ligne de relevé ─────────
+
+export type DocumentEdi =
+  | { nature: "facture_fournisseur"; id: string; ht: number; tva: number; ttc: number; type?: string | null }
+  | { nature: "facture_client" }
+  | { nature: "justificatif"; ht: number; tva: number; ttc: number; eligible_edi?: boolean | null }
+  | null;
+
+export type QualificationEdi =
+  | { ok: true; ht: number; tva: number; ttc: number }
+  | { ok: false; motif: string };
+
+/**
+ * Une ligne de relevé peut-elle figurer au relevé des déductions, et pour quels
+ * montants ? Seule règle d'éligibilité des deux exports EDI de l'écran Banque,
+ * alignée sur le grand livre :
+ *
+ *   • seul un DÉCAISSEMENT fonde une déduction (régime de l'encaissement) ;
+ *   • une facture CLIENT n'est jamais une pièce de déduction ;
+ *   • une facture fournisseur dont la TVA est non récupérable ou n'a jamais été
+ *     comptabilisée (cf. `classerDeductibiliteAchats`), ou un avoir, est écartée ;
+ *   • un justificatif non éligible (eligible_edi = false) ou sans TVA est écarté ;
+ *   • sans pièce, seuls les frais bancaires dont la TVA FIGURE au relevé (ligne
+ *     de TVA distincte) sont retenus. Une TVA « reconstituée » d'un montant TTC
+ *     n'est justifiée par aucune pièce : le grand livre ne la déduit pas, l'EDI
+ *     non plus.
+ *
+ * Avec pièce, la ligne porte la quote-part RÉGLÉE (cf. `quotePartReglement`) :
+ * une facture payée en deux virements ne fait pas déduire deux fois sa TVA.
+ */
+export function qualifierLigneEdi(p: {
+  type: string | null | undefined;
+  montant: number;
+  document: DocumentEdi;
+  /** Ligne de frais bancaires sans pièce (compte 61473). */
+  fraisBancaires?: boolean;
+  /** Couple frais / TVA trouvé au relevé pour ces frais, sinon null. */
+  tvaFraisAuReleve?: { ht: number; tva: number } | null;
+  /** Achats écartés de la déduction (non récupérables ou non comptabilisés). */
+  achatsExclus?: Set<string>;
+}): QualificationEdi {
+  if (String(p.type ?? "").toLowerCase() !== "debit") return { ok: false, motif: "pas un décaissement" };
+  const d = p.document;
+  if (d?.nature === "facture_client") return { ok: false, motif: "facture client : aucune déduction" };
+  if (d?.nature === "facture_fournisseur") {
+    if (String(d.type ?? "").toLowerCase() === "avoir") return { ok: false, motif: "avoir fournisseur" };
+    if (p.achatsExclus?.has(d.id)) return { ok: false, motif: "TVA non récupérable ou achat non comptabilisé" };
+    if (!(n(d.tva) > 0.005)) return { ok: false, motif: "achat sans TVA" };
+    return { ok: true, ...quotePartReglement({ ht: n(d.ht), tva: n(d.tva), ttc: n(d.ttc) }, Math.abs(n(p.montant))) };
+  }
+  if (d?.nature === "justificatif") {
+    if (d.eligible_edi === false) return { ok: false, motif: "justificatif non éligible (TVA non déductible ou hors champ)" };
+    if (!(n(d.tva) > 0.005)) return { ok: false, motif: "justificatif sans TVA" };
+    return { ok: true, ...quotePartReglement({ ht: n(d.ht), tva: n(d.tva), ttc: n(d.ttc) }, Math.abs(n(p.montant))) };
+  }
+  if (!p.fraisBancaires) return { ok: false, motif: "aucune pièce justificative" };
+  if (!p.tvaFraisAuReleve || !(n(p.tvaFraisAuReleve.tva) > 0.005)) {
+    return { ok: false, motif: "frais bancaires sans TVA distincte au relevé : TVA non justifiée" };
+  }
+  const ht = round2(n(p.tvaFraisAuReleve.ht)), tva = round2(n(p.tvaFraisAuReleve.tva));
+  return { ok: true, ht, tva, ttc: round2(ht + tva) };
+}
+
+// ─── Champs obligatoires du relevé SIMPL-TVA ────────────────────────────────
+
+/**
+ * Champs SANS lesquels une ligne du relevé des déductions est rejetée au dépôt :
+ * identité fiscale du fournisseur (IF, ICE sur 15 chiffres), raison sociale,
+ * numéro et date de facture, taux de TVA. C'est une exigence du FORMAT de dépôt,
+ * distincte du droit à déduction (cf. `controlerMentionsFacture`) — les deux se
+ * contrôlent, l'un ne vaut pas l'autre.
+ */
+export function champsManquantsSimplTva(l: {
+  ifFournisseur?: string | null; iceFournisseur?: string | null; nomFournisseur?: string | null;
+  numeroFacture?: string | null; dateFacture?: string | null; tauxTva?: number | null;
+}): string[] {
+  const m: string[] = [];
+  if (!String(l.ifFournisseur ?? "").trim()) m.push("IF du fournisseur");
+  if (!/^\d{15}$/.test(String(l.iceFournisseur ?? "").replace(/\s/g, ""))) m.push("ICE du fournisseur (15 chiffres)");
+  if (!String(l.nomFournisseur ?? "").trim()) m.push("raison sociale");
+  if (!String(l.numeroFacture ?? "").trim()) m.push("n° de facture");
+  if (!/^(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})/.test(String(l.dateFacture ?? ""))) m.push("date de facture");
+  if (!(Number(l.tauxTva) > 0)) m.push("taux de TVA");
+  return m;
 }

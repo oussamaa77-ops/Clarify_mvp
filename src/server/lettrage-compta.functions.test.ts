@@ -9,7 +9,7 @@
 // ============================================================================
 
 import { describe, it, expect } from "vitest";
-import { basculerTvaSurReglement, comptabiliserReglement, dateDuReglement } from "./lettrage-compta.functions";
+import { basculerTvaSurReglement, comptabiliserReglement, dateDuReglement, reprendreTvaAvoir, compensationsRecevables, lireCompensations } from "./lettrage-compta.functions";
 import { memeCompte } from "@/lib/numero-compte";
 
 // ─── Faux client Supabase sur un grand livre en mémoire ─────────────────────
@@ -438,5 +438,109 @@ describe("dateDuReglement", () => {
 
   it("rend null sur un groupe sans date — l'appelant retombera sur le jour même", () => {
     expect(dateDuReglement([{ date_ecriture: null, journal_code: "BQ" }])).toBeNull();
+  });
+});
+
+
+describe("reprendreTvaAvoir — avoir imputé ou remboursé après encaissement", () => {
+  const avoirClient = (): Partial<Ecriture>[] => [
+    { journal_code: "VTE-AVR", compte_numero: "7124", debit: 1000, credit: 0, reference_piece: "AV-1" },
+    { journal_code: "VTE-AVR", compte_numero: "4458", debit: 200, credit: 0, reference_piece: "AV-1" },
+    { journal_code: "VTE-AVR", compte_numero: "34210001", debit: 0, credit: 1200, reference_piece: "AV-1" },
+    // Remboursement du client : le mouvement d'argent qui fonde la reprise (verrou 7).
+    { journal_code: "BQ", compte_numero: "34210001", debit: 1200, credit: 0, reference_piece: "AV-1", date_ecriture: "2026-03-01" },
+    { journal_code: "BQ", compte_numero: "5141", debit: 0, credit: 1200, reference_piece: "AV-1", date_ecriture: "2026-03-01" },
+  ];
+
+  it("réduit la TVA collectée au remboursement : D 44551 / C 4458", async () => {
+    const sb = fakeSb(avoirClient());
+    const r = await reprendreTvaAvoir(sb, { dossierId: "D1", reference: "AV-1", sens: "client", montantLettre: 1200, date: "2026-03-10" });
+    expect(r).toMatchObject({ tva: 200 });
+    const od = sb.rows.filter((l: Ecriture) => l.journal_code === "OD");
+    expect(od.find((l) => memeCompte(l.compte_numero, "44551"))?.debit).toBe(200);
+    expect(od.find((l) => memeCompte(l.compte_numero, "4458"))?.credit).toBe(200);
+  });
+
+  it("au prorata d'un remboursement partiel, et jamais deux fois", async () => {
+    const sb = fakeSb(avoirClient());
+    expect((await reprendreTvaAvoir(sb, { dossierId: "D1", reference: "AV-1", sens: "client", montantLettre: 600, date: "2026-03-10" })).tva).toBe(100);
+    expect((await reprendreTvaAvoir(sb, { dossierId: "D1", reference: "AV-1", sens: "client", montantLettre: 1200, date: "2026-03-20" })).tva).toBe(100);
+    expect((await reprendreTvaAvoir(sb, { dossierId: "D1", reference: "AV-1", sens: "client", montantLettre: 1200, date: "2026-03-30" })).tva).toBe(0);
+  });
+
+  it("reverse la TVA déduite d'un avoir fournisseur : D 3458 / C 34552", async () => {
+    const sb = fakeSb([
+      { journal_code: "ACH-AVR", compte_numero: "6125", debit: 0, credit: 500, reference_piece: "AVF-1" },
+      { journal_code: "ACH-AVR", compte_numero: "3458", debit: 0, credit: 100, reference_piece: "AVF-1" },
+      { journal_code: "ACH-AVR", compte_numero: "44110001", debit: 600, credit: 0, reference_piece: "AVF-1" },
+      { journal_code: "BQ", compte_numero: "5141", debit: 600, credit: 0, reference_piece: "AVF-1", date_ecriture: "2026-03-01" },
+      { journal_code: "BQ", compte_numero: "44110001", debit: 0, credit: 600, reference_piece: "AVF-1", date_ecriture: "2026-03-01" },
+    ]);
+    const r = await reprendreTvaAvoir(sb, { dossierId: "D1", reference: "AVF-1", sens: "fournisseur", montantLettre: 600, date: "2026-03-10" });
+    expect(r.tva).toBe(100);
+    const od = sb.rows.filter((l: Ecriture) => l.journal_code === "OD");
+    expect(od.find((l) => memeCompte(l.compte_numero, "3458"))?.debit).toBe(100);
+    expect(od.find((l) => memeCompte(l.compte_numero, "34552"))?.credit).toBe(100);
+  });
+
+  it("refuse la reprise sans mouvement d'argent rattaché (verrou du régime des encaissements)", async () => {
+    const sb = fakeSb(avoirClient().filter((l) => l.journal_code !== "BQ"));
+    const r = await reprendreTvaAvoir(sb, { dossierId: "D1", reference: "AV-1", sens: "client", montantLettre: 1200, date: "2026-03-10" });
+    expect(r.tva).toBe(0);
+    expect(r.error).toMatch(/règlement constaté/);
+  });
+
+  it("ne fait rien sur une pièce qui n'est pas un avoir", async () => {
+    const sb = fakeSb([{ journal_code: "VTE", compte_numero: "4458", debit: 0, credit: 200, reference_piece: "FA-1" }]);
+    expect(await reprendreTvaAvoir(sb, { dossierId: "D1", reference: "FA-1", sens: "client", montantLettre: 1200, date: "2026-03-10" })).toEqual({ tva: 0, od: 0 });
+  });
+});
+
+
+describe("compensationsRecevables — lecture des OD COMP-, conventions et fiches tiers", () => {
+  const od = (ref: string, m: number) => [
+    { dossier_id: "D1", journal_code: "OD", compte_numero: "44110003", date_ecriture: "2026-05-25", debit: m, credit: 0, reference_piece: ref },
+    { dossier_id: "D1", journal_code: "OD", compte_numero: "34210002", date_ecriture: "2026-05-25", debit: 0, credit: m, reference_piece: ref },
+  ];
+  const conv = (n: string, o: any = {}) => ({ dossier_id: "D1", numero_piece: n, date_signature: "2026-05-18", signature_parties: true,
+    categorie_pcm: "convention_compensation", montant_ttc: 10000, fichier_original_url: "https://x/c.pdf", ...o });
+  const fake = (tables: Record<string, any[]>) => ({
+    from(t: string) {
+      const filtres: ((r: any) => boolean)[] = [];
+      const q: any = {
+        select() { return q; },
+        eq(c: string, v: any) { filtres.push((r) => String(r[c] ?? "") === String(v)); return q; },
+        like(c: string, motif: string) { const p = motif.replace(/%$/, ""); filtres.push((r) => String(r[c] ?? "").startsWith(p)); return q; },
+        then(res: any) { return Promise.resolve({ data: (tables[t] ?? []).filter((r) => filtres.every((f) => f(r))), error: null }).then(res); },
+      };
+      return q;
+    },
+  });
+  const tiers = (iceFourn: string) => ({
+    clients: [{ dossier_id: "D1", nom: "ATLAS", ice: "001234567000089", if_fiscal: "11", code_auxiliaire: "C0002" }],
+    fournisseurs: [{ dossier_id: "D1", nom: "ATLAS", ice: iceFourn, if_fiscal: "11", code_auxiliaire: "F0003" }],
+  });
+
+  it("retient la compensation recevable, datée de la SIGNATURE", async () => {
+    const sb = fake({ ecritures_comptables: od("COMP-CV-7", 5000), justificatifs: [conv("CV-7")], ...tiers("001234567000089") });
+    const r = await lireCompensations(sb, "D1");
+    expect(r.signatures.get("COMP-CV-7")).toBe("2026-05-18");
+    expect(r.lignes.every((l) => l.date_ecriture === "2026-05-18")).toBe(true);
+  });
+
+  it("refuse une compensation entre deux personnes juridiquement distinctes", async () => {
+    const sb = fake({ ecritures_comptables: od("COMP-CV-7", 5000), justificatifs: [conv("CV-7")], ...tiers("009999999000011") });
+    const r = await lireCompensations(sb, "D1");
+    expect(r.lignes).toEqual([]);
+    expect(r.refus.get("COMP-CV-7")?.join(" ")).toMatch(/juridiquement distinctes/);
+  });
+
+  it("refuse une convention non signée par les deux parties", async () => {
+    const sb = fake({ ecritures_comptables: od("COMP-CV-8", 900), justificatifs: [conv("CV-8", { signature_parties: false })], ...tiers("001234567000089") });
+    expect((await lireCompensations(sb, "D1")).lignes).toEqual([]);
+  });
+
+  it("ne retient rien si la lecture échoue (aucune preuve, aucune compensation)", async () => {
+    expect(await compensationsRecevables({ from() { throw new Error("réseau"); } }, "D1")).toEqual([]);
   });
 });
