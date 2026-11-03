@@ -38,6 +38,7 @@ function fakeSb(initial: Partial<Ecriture>[]) {
       let op: "select" | "update" | "delete" | "insert" = "select";
       let patch: any = null;
       let inserted: any[] = [];
+      let plage: [number, number] | null = null;
 
       const cibles = () => rows.filter((r) => filtres.every((f) => f(r)));
       const executer = () => {
@@ -50,7 +51,8 @@ function fakeSb(initial: Partial<Ecriture>[]) {
         const t = cibles();
         if (op === "update") { for (const r of t) Object.assign(r, patch); return { data: t, error: null, count: t.length }; }
         if (op === "delete") { for (const r of t) rows.splice(rows.indexOf(r), 1); return { data: null, error: null, count: t.length }; }
-        return { data: t.map((r) => ({ ...r })), error: null, count: t.length };
+        const page = plage ? t.slice(plage[0], plage[1] + 1) : t;
+        return { data: page.map((r) => ({ ...r })), error: null, count: t.length };
       };
 
       const q: any = {
@@ -63,6 +65,7 @@ function fakeSb(initial: Partial<Ecriture>[]) {
         is(c: string, v: any) { filtres.push((r: any) => (v === null ? r[c] == null : r[c] === v)); return q; },
         not(c: string, _o: string, _v: any) { filtres.push((r: any) => r[c] != null); return q; },
         order() { return q; },
+        range(de: number, a: number) { plage = [de, a]; return q; },
         then(res: any, rej: any) { try { return Promise.resolve(executer()).then(res, rej); } catch (e) { return Promise.reject(e).catch(rej); } },
       };
       return q;

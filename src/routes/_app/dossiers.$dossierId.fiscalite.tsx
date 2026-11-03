@@ -15,13 +15,13 @@ import { Download, Calculator, AlertCircle, CheckCircle, Clock, Settings2, Info,
 import { toast } from "sonner";
 import {
   baremeIS, CLASSES_TP, CLASSE_TP_DEFAUT, REGIME_TVA_LABEL, TAUX_CM_DROIT_COMMUN,
-  TAUX_IS_ETABLISSEMENT_CREDIT, TAUX_IS_SPECIFIQUE, agregatsFiscaux, calculerIS, calculerTP, imputerDeficits,
+  TAUX_IS_SPECIFIQUE, trancheEtablissementCredit, agregatsFiscaux, calculerIS, calculerTP, imputerDeficits,
   formatDateFr, lireAjustementsFiscaux, lireParametresFiscaux, normaliserRegimeIS, resultatFiscal,
   statutTva, type RegimeIS,
 } from "@/lib/fiscalite-ma";
 import {
   synthetiserTva, tvaRecuperableEnCours, periodesTva, bornesDuMois, echeanceSimplTva, classerDeductibiliteAchats,
-  calendrierTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva, reglementsParCompensation,
+  calendrierTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva, reglementsParCompensation, caTaxableTva,
   type PeriodiciteTva, type SituationTva,
 } from "@/lib/dashboard-fiscal";
 
@@ -295,9 +295,10 @@ function FiscalitePage() {
   // Échéances lues sur la PÉRIODICITÉ du dossier (paramètre, sinon CA N-1, art.
   // 108 CGI), les dates et l'état de déclaration au grand livre — jamais sur
   // l'existence de factures : une période sans opération se déclare aussi.
-  // Périodicité de CHAQUE année (art. 108) : CA taxable de l'année précédente lu
-  // au grand livre (711 + 712), situation du dossier, périodicité figée par année.
-  const caTaxable = (annee: number) => { const a = agregatsFiscaux(ecritures, annee); return a.nbEcritures > 0 ? a.ca : null; };
+  // Périodicité de CHAQUE année (art. 108) : CA TAXABLE de l'année précédente,
+  // déterminé par la nature fiscale des ventes (cf. caTaxableTva, justification
+  // reprise au motif), situation du dossier, périodicité figée par année.
+  const caTaxable = (annee: number) => caTaxableTva(ventes, annee);
   const periodiciteDe = (annee: number) => periodiciteTva(dossier, annee, caTaxable(annee - 1));
   const periodicite = periodiciteDe(anneeN);
   const etatsTva = etatsDeclarationsTva(ecritures, recepisses);
@@ -307,7 +308,7 @@ function FiscalitePage() {
     dateDebutActivite: parametres.dateDebutActivite,
   });
   const echeanceDue = prochaineEcheanceTva(calendrier);
-  const LIBELLE_STATUT_TVA = { en_cours: "En cours", a_declarer: "À déclarer", en_retard: "Non déposée — en retard", a_payer: "Déposée — à payer", reglee: "Déposée et réglée" } as const;
+  const LIBELLE_STATUT_TVA = { en_cours: "En cours", a_declarer: "À déclarer", en_retard: "Non déposée — en retard", a_payer: "Déposée — à payer", non_liquidee: "Déposée — liquidation absente", reglee: "Déposée et payée", credit: "Déposée — crédit reportable", neant: "Déposée — néant" } as const;
   const ajustementsN1 = lireAjustementsFiscaux(dossier, anneeN - 1);
   const imputationN = imputerDeficits(agrN, ajustements);
   const resultatFiscalN = imputationN.resultatFiscal;
@@ -707,7 +708,7 @@ function FiscalitePage() {
                 <Badge variant="outline" className="text-violet-700 border-violet-300">Statut spécifique — 20 % plafonné</Badge>
               )}
               {is.regime === "etablissement_credit" && (
-                <Badge variant="outline" className="text-violet-700 border-violet-300">Établissement de crédit / assurance — 40 %</Badge>
+                <Badge variant="outline" className="text-violet-700 border-violet-300">Établissement de crédit / assurance — {pourcent(trancheEtablissementCredit(anneeN).taux)}</Badge>
               )}
             </div>
             {/* Le résultat comptable n'est pas le résultat fiscal : sans ajustements
@@ -868,7 +869,7 @@ function FiscalitePage() {
                     <p key={t.label}>{t.label} → {pourcent(t.taux)}</p>
                   ))}
                   <p>Statut spécifique (export, ZAI, CFC…) → {pourcent(TAUX_IS_SPECIFIQUE)} plafonné</p>
-                  <p>Établissements de crédit, BAM, CDG, assurances → {pourcent(TAUX_IS_ETABLISSEMENT_CREDIT)}</p>
+                  <p>Établissements de crédit, BAM, CDG, assurances → {pourcent(trancheEtablissementCredit(anneeN).taux)}</p>
                   <p className="mt-1">
                     CM = {pourcent(TAUX_CM_DROIT_COMMUN)} du chiffre d'affaires, des autres produits d'exploitation,
                     des produits financiers et des subventions (art. 144 CGI), minimum 3 000 MAD. Reprises et
@@ -941,7 +942,7 @@ function FiscalitePage() {
               </p>
               {echeanceDue ? (
                 <p className={`text-xs mt-1 font-medium ${echeanceDue.statut === "en_retard" ? "text-red-600" : "text-orange-600"}`}>
-                  {echeanceDue.statut === "en_retard" ? "En retard" : echeanceDue.statut === "a_payer" ? "À payer" : "Prochaine échéance"} : {formatDateFr(echeanceDue.echeance)} (période {echeanceDue.periode})
+                  {echeanceDue.statut === "en_retard" ? "En retard" : echeanceDue.statut === "a_payer" ? "À payer" : echeanceDue.statut === "non_liquidee" ? "À liquider en comptabilité" : "Prochaine échéance"} : {formatDateFr(echeanceDue.echeance)} (période {echeanceDue.periode})
                   {echeanceDue.liquidee && !echeanceDue.deposee ? " — liquidée en comptabilité, mais aucun récépissé de dépôt enregistré" : ""}
                 </p>
               ) : (
@@ -951,8 +952,8 @@ function FiscalitePage() {
                 {calendrier.slice(-6).map((e) => (
                   <Badge key={e.periode} variant="outline" className={`text-[11px] ${
                     e.statut === "en_retard" ? "border-red-300 text-red-700"
-                    : e.statut === "reglee" ? "border-emerald-300 text-emerald-700"
-                    : e.statut === "a_declarer" || e.statut === "a_payer" ? "border-orange-300 text-orange-700" : "text-muted-foreground"}`}
+                    : e.statut === "reglee" || e.statut === "credit" || e.statut === "neant" ? "border-emerald-300 text-emerald-700"
+                    : e.statut === "a_declarer" || e.statut === "a_payer" || e.statut === "non_liquidee" ? "border-orange-300 text-orange-700" : "text-muted-foreground"}`}
                     title={e.recepisse ? `Récépissé : ${e.recepisse}` : e.liquidee ? "Liquidée, non déposée" : undefined}>
                     {e.periode} · {LIBELLE_STATUT_TVA[e.statut]}{e.liquidee && !e.deposee ? " (liquidée)" : ""}
                   </Badge>
@@ -1086,7 +1087,7 @@ function FiscalitePage() {
                 <SelectContent>
                   <SelectItem value="droit_commun">Droit commun — 20 % (&lt; 100 MDH) puis 35 %</SelectItem>
                   <SelectItem value="taux_specifique">Statut spécifique — 20 % plafonné (export, ZAI, CFC)</SelectItem>
-                  <SelectItem value="etablissement_credit">Établissement de crédit / assurance — 40 %</SelectItem>
+                  <SelectItem value="etablissement_credit">Établissement de crédit / assurance — 40 % (37,75 → 39,25 % en 2023-2025)</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">

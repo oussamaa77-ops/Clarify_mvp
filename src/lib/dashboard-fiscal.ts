@@ -813,6 +813,83 @@ export interface PeriodiciteAnnee {
   motif: string;
 }
 
+/** Vente vue par `caTaxableTva`. */
+export interface VenteCaTaxable {
+  id?: string | null;
+  numero?: string | null;
+  statut?: string | null;
+  type?: string | null;
+  date_facture?: string | null;
+  montant_ht?: number | null;
+  montant_tva?: number | null;
+}
+
+/** CA taxable d'une année et sa justification (art. 108 CGI). */
+export interface CaTaxableTva {
+  annee: number;
+  /** Montant retenu pour le seuil de 1 000 000 MAD. */
+  montant: number;
+  /** Factures soumises à TVA retenues (facture, acompte, solde). */
+  retenues: { nb: number; ht: number };
+  /** Avoirs soumis à TVA, déduits. */
+  avoirs: { nb: number; ht: number };
+  /**
+   * Ventes SANS TVA (exonérées, hors champ, ou taux non saisi) : écartées du
+   * seuil faute de pouvoir les qualifier. À vérifier — une exonération avec droit
+   * à déduction peut devoir être retenue.
+   */
+  sansTva: { nb: number; ht: number; numeros: string[] };
+  /** Pièces ignorées : proforma, rejetées, non datées. */
+  ignorees: number;
+  justification: string;
+}
+
+/**
+ * Chiffre d'affaires TAXABLE d'une année, au sens de l'art. 108 CGI (seuil de
+ * la déclaration mensuelle), déterminé par la NATURE FISCALE des ventes et non
+ * par les comptes 711 / 712 :
+ *   - retenues : factures, acomptes et soldes émis dans l'année et PORTANT de la
+ *     TVA (opérations imposables), pour leur montant HT ;
+ *   - déduits : avoirs portant de la TVA ;
+ *   - écartées et listées : ventes sans TVA (exonérées / hors champ / à
+ *     qualifier), proforma, factures rejetées.
+ * Les acomptes comptent : ce sont des opérations imposables (TVA exigible à
+ * l'encaissement), alors que le compte 711 ne les voit qu'à la facture de solde.
+ * `null` : aucune vente de l'année — le CA est inconnu, pas nul.
+ */
+export function caTaxableTva(ventes: VenteCaTaxable[], annee: number): CaTaxableTva | null {
+  const res: CaTaxableTva = {
+    annee, montant: 0, retenues: { nb: 0, ht: 0 }, avoirs: { nb: 0, ht: 0 },
+    sansTva: { nb: 0, ht: 0, numeros: [] }, ignorees: 0, justification: "",
+  };
+  let vues = 0;
+  for (const f of ventes ?? []) {
+    if (String(f.date_facture ?? "").slice(0, 4) !== String(annee)) continue;
+    vues++;
+    const type = String(f.type ?? "facture").trim().toLowerCase();
+    if (type === "proforma" || String(f.statut ?? "").trim().toLowerCase() === "rejetee") { res.ignorees++; continue; }
+    const ht = Math.abs(n(f.montant_ht));
+    if (Math.abs(n(f.montant_tva)) <= 0.005) {
+      res.sansTva.nb++;
+      res.sansTva.ht = round2(res.sansTva.ht + (type === "avoir" ? -ht : ht));
+      if (res.sansTva.numeros.length < 20) res.sansTva.numeros.push(String(f.numero ?? f.id ?? "?"));
+      continue;
+    }
+    if (type === "avoir") { res.avoirs.nb++; res.avoirs.ht = round2(res.avoirs.ht + ht); }
+    else { res.retenues.nb++; res.retenues.ht = round2(res.retenues.ht + ht); }
+  }
+  if (!vues) return null;
+  res.montant = round2(Math.max(0, res.retenues.ht - res.avoirs.ht));
+  const fmt = (x: number) => x.toLocaleString("fr-MA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  res.justification = `CA taxable ${annee} = ${fmt(res.retenues.ht)} HT (${res.retenues.nb} vente(s) soumise(s) à TVA)`
+    + (res.avoirs.nb ? ` − ${fmt(res.avoirs.ht)} HT d'avoirs (${res.avoirs.nb})` : "")
+    + ` = ${fmt(res.montant)} MAD`
+    + (res.sansTva.nb ? ` ; ${res.sansTva.nb} vente(s) sans TVA écartée(s) (${fmt(res.sansTva.ht)} HT) — exonérées ou hors champ à qualifier` : "")
+    + (res.ignorees ? ` ; ${res.ignorees} pièce(s) ignorée(s) (proforma, rejetées)` : "")
+    + ".";
+  return res;
+}
+
 /**
  * Périodicité déclarative d'une ANNÉE civile, selon l'art. 108 CGI :
  *   1. la périodicité RETENUE pour cette année, si elle a été enregistrée
@@ -829,8 +906,11 @@ export interface PeriodiciteAnnee {
 export function periodiciteTva(
   dossier: { periodicite_tva?: string | null; date_debut_activite?: string | null; ajustements_fiscaux?: unknown } | null | undefined,
   annee: number,
-  caTaxableAnneePrecedente?: number | null,
+  /** Montant, ou résultat de `caTaxableTva` (dont la justification est reprise au motif). */
+  caAnneePrecedente?: number | CaTaxableTva | null,
 ): PeriodiciteAnnee {
+  const caTaxableAnneePrecedente = typeof caAnneePrecedente === "number" ? caAnneePrecedente : caAnneePrecedente?.montant ?? null;
+  const justif = caAnneePrecedente && typeof caAnneePrecedente === "object" ? ` — ${caAnneePrecedente.justification}` : "";
   const historique = (((dossier?.ajustements_fiscaux ?? {}) as Record<string, any>)[String(annee)] ?? {}).periodicite_tva;
   if (historique === "mensuel" || historique === "trimestriel") {
     return { periodicite: historique, source: "historique", motif: `périodicité retenue pour ${annee}` };
@@ -846,8 +926,8 @@ export function periodiciteTva(
   }
   if (caTaxableAnneePrecedente != null && Number.isFinite(caTaxableAnneePrecedente) && caTaxableAnneePrecedente > 0) {
     return caTaxableAnneePrecedente >= SEUIL_TVA_MENSUELLE
-      ? { periodicite: "mensuel", source: "chiffre_affaires", motif: `CA taxable ${annee - 1} ≥ 1 000 000 MAD (art. 108)` }
-      : { periodicite: "trimestriel", source: "chiffre_affaires", motif: `CA taxable ${annee - 1} < 1 000 000 MAD (art. 108)` };
+      ? { periodicite: "mensuel", source: "chiffre_affaires", motif: `CA taxable ${annee - 1} ≥ 1 000 000 MAD (art. 108)${justif}` }
+      : { periodicite: "trimestriel", source: "chiffre_affaires", motif: `CA taxable ${annee - 1} < 1 000 000 MAD (art. 108)${justif}` };
   }
   return { periodicite: "trimestriel", source: "defaut", motif: `CA taxable ${annee - 1} inconnu : trimestrielle à confirmer dans les paramètres fiscaux` };
 }
@@ -872,34 +952,80 @@ export interface EtatDeclarationTva {
   recepisse?: string | null;
   /** TVA due par la liquidation (crédit 4456). 0 : crédit ou néant. */
   montantDu: number;
-  /** Paiements DGI rattachés (débit 4456, même référence). */
+  /**
+   * Paiements DGI PROUVÉS : débit 4456 de même référence, passé en BQ / CAI et
+   * contrepassé au crédit d'un compte de trésorerie (51) dans la même pièce.
+   * Un débit 4456 en OD n'est pas un paiement.
+   */
   montantPaye: number;
+  /** Crédit de TVA reportable constaté par la liquidation (débit net du 3456). */
+  creditReporte: number;
 }
 
 /**
  * État réel de chaque période, lu dans le grand livre et la liste des récépissés.
  * Une OD de liquidation ne vaut PAS dépôt : seule la preuve de dépôt (récépissé)
- * le fait. Le paiement se lit sur le 4456 de la même référence.
+ * le fait. Le PAIEMENT est contrôlé à part : un débit 4456 de même référence
+ * passé en BQ / CAI contre un compte 51 (cf. construireOdPaiementDgi). Une
+ * période en crédit ou à néant n'est jamais présentée comme payée.
  */
 export function etatsDeclarationsTva(
-  ecritures: { reference_piece?: string | null; compte_numero?: string | null; debit?: number | null; credit?: number | null }[],
+  ecritures: {
+    reference_piece?: string | null; compte_numero?: string | null; debit?: number | null; credit?: number | null;
+    journal_code?: string | null; date_ecriture?: string | null;
+  }[],
   recepisses: (string | null | undefined)[] = [],
 ): Map<string, EtatDeclarationTva> {
   const etats = new Map<string, EtatDeclarationTva>();
   const etat = (p: string) => {
     let e = etats.get(p);
-    if (!e) { e = { liquidee: false, deposee: false, recepisse: null, montantDu: 0, montantPaye: 0 }; etats.set(p, e); }
+    if (!e) { e = { liquidee: false, deposee: false, recepisse: null, montantDu: 0, montantPaye: 0, creditReporte: 0 }; etats.set(p, e); }
     return e;
   };
+  const journal = (l: { journal_code?: string | null }) => String(l.journal_code ?? "").trim().toUpperCase();
+  const estTresorerie = (l: { journal_code?: string | null }) => JOURNAUX_TRESORERIE.has(journal(l));
+  // Pièce = référence + journal + date. La trésorerie créditée dans la pièce est
+  // le plafond de ce qu'elle peut prouver comme paiement.
+  const cle = (l: { reference_piece?: string | null; journal_code?: string | null; date_ecriture?: string | null }) =>
+    `${String(l.reference_piece ?? "").trim().toUpperCase()}|${journal(l)}|${String(l.date_ecriture ?? "").slice(0, 10)}`;
+  const sortieTresorerie = new Map<string, number>();
+  for (const l of ecritures) {
+    if (estTresorerie(l) && String(l.compte_numero ?? "").trim().startsWith("51")) {
+      sortieTresorerie.set(cle(l), round2((sortieTresorerie.get(cle(l)) ?? 0) + n(l.credit) - n(l.debit)));
+    }
+  }
+  const paye = new Map<string, { periode: string; montant: number }>();
   for (const l of ecritures) {
     const m = /^DECL-TVA-(\d{4}-(?:\d{2}|T[1-4]))$/i.exec(String(l.reference_piece ?? "").trim());
     if (!m) continue;
-    const e = etat(m[1].toUpperCase());
-    e.liquidee = true;
-    if (String(l.compte_numero ?? "").startsWith(RACINES_PCM.TVA_DUE)) {
-      e.montantDu = round2(e.montantDu + n(l.credit));
-      e.montantPaye = round2(e.montantPaye + n(l.debit));
+    const periode = m[1].toUpperCase();
+    const e = etat(periode);
+    const c = String(l.compte_numero ?? "").trim();
+    if (estTresorerie(l)) {
+      // Règlement DGI : débit 4456 en BQ / CAI, retenu à hauteur de la
+      // trésorerie sortie dans la même pièce (cf. construireOdPaiementDgi).
+      if (c.startsWith(RACINES_PCM.TVA_DUE) && n(l.debit) > 0.005) {
+        const k = cle(l);
+        paye.set(k, { periode, montant: round2((paye.get(k)?.montant ?? 0) + n(l.debit)) });
+      }
+      continue;
     }
+    // Hors trésorerie : l'OD de LIQUIDATION. Elle constate la dette (crédit
+    // 4456) ou le crédit reportable (débit 3456). Un débit 4456 en OD n'est
+    // jamais un paiement.
+    e.liquidee = true;
+    // Seul le CRÉDIT du 4456 constitue la dette ; un débit hors trésorerie n'est
+    // ni un paiement ni une remise de dette.
+    if (c.startsWith(RACINES_PCM.TVA_DUE)) e.montantDu = round2(e.montantDu + n(l.credit));
+    else if (c.startsWith(RACINES_PCM.CREDIT_TVA)) e.creditReporte = round2(e.creditReporte + n(l.debit) - n(l.credit));
+  }
+  for (const [k, { periode, montant }] of paye) {
+    const e = etat(periode);
+    e.montantPaye = round2(e.montantPaye + Math.min(montant, Math.max(0, sortieTresorerie.get(k) ?? 0)));
+  }
+  for (const e of etats.values()) {
+    e.montantDu = Math.max(0, e.montantDu);
+    e.creditReporte = Math.max(0, e.creditReporte);
   }
   for (const nom of recepisses) {
     const m = /DECL-TVA-(\d{4}-(?:\d{2}|T[1-4]))/i.exec(String(nom ?? ""));
@@ -911,7 +1037,14 @@ export function etatsDeclarationsTva(
   return etats;
 }
 
-export type StatutEcheanceTva = "en_cours" | "a_declarer" | "en_retard" | "a_payer" | "reglee";
+/**
+ * `reglee` : déposée et PAYÉE (dette éteinte par une trésorerie prouvée) ;
+ * `credit` : déposée, crédit de TVA reportable — rien n'est payé ;
+ * `neant` : déposée, aucun montant à payer ni crédit ;
+ * `non_liquidee` : récépissé présent, mais aucune OD de liquidation — le
+ * montant déclaré est inconnu de la comptabilité.
+ */
+export type StatutEcheanceTva = "en_cours" | "a_declarer" | "en_retard" | "a_payer" | "non_liquidee" | "reglee" | "credit" | "neant";
 
 export interface EcheanceTva {
   /** « AAAA-MM » ou « AAAA-Tn ». */
@@ -938,7 +1071,10 @@ const isoLocalTva = (d: Date) =>
  *   a_declarer  close, non déposée, échéance pas encore passée ;
  *   en_retard   close, non déposée, échéance dépassée ;
  *   a_payer     déposée, TVA due non (entièrement) payée ;
- *   reglee      déposée, et payée — ou rien à payer (crédit, néant).
+ *   non_liquidee déposée (récépissé) sans OD de liquidation : montant inconnu ;
+ *   reglee      déposée et payée (règlement BQ / CAI prouvé) ;
+ *   credit      déposée, crédit de TVA reportable — rien n'a été payé ;
+ *   neant       déposée, ni dette ni crédit.
  * Une OD de liquidation seule laisse la période « à déclarer » : le rappel ne
  * disparaît pas parce qu'une écriture a été générée.
  */
@@ -969,7 +1105,11 @@ export function calendrierTva(p: {
       const e = p.etats.get(periode);
       const statut: StatutEcheanceTva = fin >= jour ? "en_cours"
         : !e?.deposee ? (echeance < jour ? "en_retard" : "a_declarer")
-        : (e.montantDu - e.montantPaye > 0.005 ? "a_payer" : "reglee");
+        : !e.liquidee ? "non_liquidee"
+        : e.montantDu - e.montantPaye > 0.005 ? "a_payer"
+        : e.montantDu > 0.005 ? "reglee"
+        : e.creditReporte > 0.005 ? "credit"
+        : "neant";
       out.push({ periode, debut, fin, echeance, statut, liquidee: !!e?.liquidee, deposee: !!e?.deposee, recepisse: e?.recepisse ?? null });
     }
   }
@@ -981,6 +1121,7 @@ export function prochaineEcheanceTva(calendrier: EcheanceTva[]): EcheanceTva | n
   return calendrier.find((e) => e.statut === "en_retard")
     ?? calendrier.find((e) => e.statut === "a_declarer")
     ?? calendrier.find((e) => e.statut === "a_payer")
+    ?? calendrier.find((e) => e.statut === "non_liquidee")
     ?? null;
 }
 

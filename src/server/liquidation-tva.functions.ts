@@ -38,6 +38,7 @@ import {
   type LiquidationTva,
 } from "@/lib/liquidation-tva";
 import { normaliserComptesLignes } from "@/lib/numero-compte";
+import { lireToutesPages } from "@/lib/exercice-comptable";
 import { proxyFetch } from "./proxy-fetch";
 
 // fetch serveur tolérant au proxy TLS du poste de dev : voir ./proxy-fetch.
@@ -79,14 +80,18 @@ export const MSG_MIGRATION_ABSENTE =
 async function lireEcritures(
   sb: any, dossierId: string,
 ): Promise<{ lignes: any[]; tracable: boolean; erreur: string | null }> {
-  const complet = await sb.from("ecritures_comptables").select(COLS_TRACE).eq("dossier_id", dossierId);
-  if (!complet.error) return { lignes: (complet.data ?? []) as any[], tracable: true, erreur: null };
-  if (!colonneAbsente(complet.error)) {
-    return { lignes: [], tracable: false, erreur: String(complet.error.message ?? complet.error) };
+  // PAGINÉ : une lecture unique plafonne à 1 000 lignes — la liquidation (donc
+  // l'OD DECL-TVA écrite au grand livre) serait calculée sur une partie du dossier.
+  const lire = (cols: string) => lireToutesPages((de, a) => sb.from("ecritures_comptables")
+    .select(cols).eq("dossier_id", dossierId).order("id").range(de, a));
+  const complet = await lire(COLS_TRACE);
+  if (!complet.erreur) return { lignes: complet.lignes, tracable: true, erreur: null };
+  if (!colonneAbsente(complet.erreur)) {
+    return { lignes: [], tracable: false, erreur: String(complet.erreur.message ?? complet.erreur) };
   }
-  const base = await sb.from("ecritures_comptables").select(COLS).eq("dossier_id", dossierId);
-  if (base.error) return { lignes: [], tracable: false, erreur: String(base.error.message ?? base.error) };
-  return { lignes: (base.data ?? []) as any[], tracable: false, erreur: null };
+  const base = await lire(COLS);
+  if (base.erreur) return { lignes: [], tracable: false, erreur: String(base.erreur.message ?? base.erreur) };
+  return { lignes: base.lignes, tracable: false, erreur: null };
 }
 
 /** Lignes du 4456 qui portent le cycle de CETTE période (déclaration + paiement). */

@@ -8,7 +8,7 @@ import { TrendingUp, Wallet, FileText, ShoppingCart, AlertCircle, CheckCircle, C
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, BarChart, Bar } from "recharts";
 import {
   synthetiserTva, tvaRecuperableEnCours, echeanceSimplTva, joursAvant, classerDeductibiliteAchats,
-  calendrierTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva,
+  calendrierTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva, reglementsParCompensation, caTaxableTva,
   ventilerChargesParCompte, ventilerVentesParCompte, balanceAgeeDashboard, calculerCashFlow,
 } from "@/lib/dashboard-fiscal";
 import { RepartitionDepensesPcm } from "@/components/RepartitionDepensesPcm";
@@ -24,7 +24,7 @@ import {
   soldeBancaireAffiche, type LigneGrandLivre,
 } from "@/lib/encours-grandlivre";
 import {
-  bornesExercice, dansExercice, exerciceCourant, exercicesDisponibles, lireDatesEcritures,
+  bornesExercice, dansExercice, exerciceCourant, exercicesDisponibles, lireDatesEcritures, lireToutesPages,
 } from "@/lib/exercice-comptable";
 import { sansANouveaux } from "@/lib/a-nouveaux";
 import { joursRetard } from "@/lib/factures-filtres";
@@ -76,7 +76,10 @@ function DashboardPage() {
   // Récépissés SIMPL-TVA : la preuve de dépôt d'une déclaration (bucket quittances-tva).
   const [recepissesTva, setRecepissesTva] = useState<string[]>([]);
   // CA taxable (711 + 712) des années précédentes : il fixe la périodicité TVA (art. 108).
-  const [caParAnnee, setCaParAnnee] = useState<Map<number, number>>(new Map());
+  // Mêmes entrées que l'écran Fiscalité : règlements datés et conventions de
+  // compensation signées. Sans eux, la carte TVA ne pouvait pas égaler la synthèse.
+  const [paiementsTva, setPaiementsTva] = useState<any[]>([]);
+  const [signaturesCompensation, setSignaturesCompensation] = useState<Map<string, string>>(new Map());
   const [factures, setFactures] = useState<any[]>([]);
   const [ff, setFf] = useState<any[]>([]);
   const [alertes, setAlertes] = useState<any[]>([]);
@@ -121,7 +124,7 @@ function DashboardPage() {
         // `*` : périodicité TVA et début d'activité (colonnes ajoutées par migration).
         supabase.from("dossiers").select("*").eq("id", dossierId).single(),
         // Ajouter montant_paye et montant_restant pour calculs corrects + tiers pour les alertes
-        supabase.from("factures").select("numero,statut,statut_paiement,montant_ht,montant_ttc,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,clients(nom)").eq("dossier_id", dossierId),
+        supabase.from("factures").select("id,numero,statut,statut_paiement,montant_ht,montant_ttc,montant_tva,montant_paye,montant_restant,type,date_facture,date_echeance,clients(nom)").eq("dossier_id", dossierId),
         // montant_ht / montant_tva servent au suivi TVA (régime de l'encaissement)
         // et au cash-flow, qui raisonnent tous deux hors taxes.
         supabase.from("factures_fournisseurs").select("*").eq("dossier_id", dossierId),
@@ -154,11 +157,20 @@ function DashboardPage() {
         //
         // STOCK : borné à la seule CLÔTURE. Un poste ouvert de 2024 fait bien
         // partie de l'encours au 31/12/2026 tant qu'il n'est pas lettré.
-        supabase.from("ecritures_comptables")
-          .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
+        //
+        // PAGINÉ : au-delà de 1 000 lignes, PostgREST tronquait la réponse — la
+        // TVA posée en banque, l'encours et l'état des déclarations étaient
+        // calculés sur une partie du grand livre. Une page en échec vide la
+        // carte plutôt que d'afficher un montant partiel.
+        lireToutesPages((de, a) => supabase.from("ecritures_comptables")
+          .select("id,journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
           .eq("dossier_id", dossierId)
           .or("compte_numero.like.34%,compte_numero.like.44%,compte_numero.like.51%")
-          .lte("date_ecriture", bornes.fin),
+          .lte("date_ecriture", bornes.fin)
+          .order("id").range(de, a) as any).then((r) => {
+            if (r.erreur) toast.error(`Grand livre illisible : ${r.erreur.message ?? r.erreur}`);
+            return { data: r.erreur ? [] : r.lignes };
+          }),
         // Millésimes réellement portés par le dossier, pour le sélecteur.
         lireDatesEcritures(supabase, dossierId).then((data) => ({ data })),
       ]);
@@ -180,16 +192,19 @@ function DashboardPage() {
         setRecepissesTva(((rec ?? []) as any[]).map((x) => x.name));
       } catch { setRecepissesTva([]); }
       try {
-        const depuis = `${new Date().getFullYear() - 2}-01-01`;
-        const { data: ca } = await supabase.from("ecritures_comptables").select("compte_numero,debit,credit,date_ecriture,journal_code")
-          .eq("dossier_id", dossierId).or("compte_numero.like.711%,compte_numero.like.712%").gte("date_ecriture", depuis).neq("journal_code", "AN");
-        const m = new Map<number, number>();
-        for (const l of (ca ?? []) as any[]) {
-          const a = Number(String(l.date_ecriture).slice(0, 4));
-          m.set(a, (m.get(a) ?? 0) + Number(l.credit || 0) - Number(l.debit || 0));
-        }
-        setCaParAnnee(m);
-      } catch { setCaParAnnee(new Map()); }
+        const [{ data: p, error: eP }, { data: conv, error: eConv }] = await Promise.all([
+          supabase.from("paiements")
+            .select("facture_id,facture_fournisseur_id,montant,date_paiement,origine,reference")
+            .eq("dossier_id", dossierId),
+          supabase.from("justificatifs")
+            .select("numero_piece,date_signature,signature_parties")
+            .eq("dossier_id", dossierId).eq("categorie_pcm", "convention_compensation"),
+        ]);
+        setPaiementsTva(eP ? [] : (p ?? []));
+        setSignaturesCompensation(new Map(eConv ? [] : (conv ?? [])
+          .filter((c) => c.date_signature && c.signature_parties === true)
+          .map((c) => [String(c.numero_piece ?? "").trim(), String(c.date_signature).slice(0, 10)])));
+      } catch { setPaiementsTva([]); setSignaturesCompensation(new Map()); }
       setExercicesDispo(exercicesDisponibles(((millesimes ?? []) as any[]).map((x) => x.date_ecriture)));
       setLoading(false);
     })();
@@ -323,7 +338,6 @@ function DashboardPage() {
   // Même source que l'écran Fiscalité : TVA posée en banque sans facture comprise,
   // TVA non récupérable (achat sans 3458 au grand livre) exclue.
   const achatsExclusTva = classerDeductibiliteAchats(ff as any[], ecrTiers as any[]).exclus;
-  const syntheseTva = synthetiserTva(factures, ff, { ecritures: ecrTiers as any[], achatsExclus: achatsExclusTva });
   const tvaEnCours = tvaRecuperableEnCours(ff.filter((x: any) => !achatsExclusTva.has(String(x.id))));
 
   // Échéance SIMPL-TVA : lue sur le CALENDRIER déclaratif du dossier (périodicité
@@ -332,7 +346,7 @@ function DashboardPage() {
   // Périodicité de chaque année (art. 108) et état RÉEL des périodes : une OD de
   // liquidation sans récépissé de dépôt laisse la période « à déclarer ».
   const calendrierDossier = calendrierTva({
-    periodicite: (annee) => periodiciteTva(dossier as any, annee, caParAnnee.get(annee - 1) ?? null).periodicite, aujourdhui: today,
+    periodicite: (annee) => periodiciteTva(dossier as any, annee, caTaxableTva(factures, annee - 1)).periodicite, aujourdhui: today,
     etats: etatsDeclarationsTva(ecrTiers as any[], recepissesTva),
     dateDebutActivite: (dossier as any)?.date_debut_activite ?? null,
   });
@@ -340,6 +354,24 @@ function DashboardPage() {
   const periodeSimpl = echeanceDue?.periode ?? null;
   const echeanceSimpl = echeanceDue ? echeanceSimplTva(echeanceDue.periode) : null;
   const joursSimpl = echeanceSimpl ? joursAvant(echeanceSimpl, today) : null;
+
+  // Synthèse de la période AFFICHÉE (celle de l'échéance), calculée exactement
+  // comme l'écran Fiscalité : ventes hors rejetées, règlements datés +
+  // compensations, TVA posée en trésorerie, achats non déductibles exclus.
+  // Cumulée sur tout l'historique, elle ne correspondait à aucune déclaration —
+  // et c'est pourtant ce montant que le rappel envoyait pour `periodeSimpl`.
+  const ventesTva = factures.filter((f: any) => f.statut !== "rejetee");
+  const paiementsTvaComplets = [
+    ...paiementsTva,
+    ...reglementsParCompensation(ecrTiers as any[], ventesTva, "client", signaturesCompensation),
+    ...reglementsParCompensation(ecrTiers as any[], ff as any[], "fournisseur", signaturesCompensation),
+  ];
+  // Sans échéance en attente : la dernière période CLOSE du calendrier.
+  const periodeCarte = echeanceDue ?? [...calendrierDossier].reverse().find((e) => e.statut !== "en_cours") ?? null;
+  const syntheseTva = synthetiserTva(ventesTva, ff, {
+    ...(periodeCarte ? { debut: periodeCarte.debut, fin: periodeCarte.fin } : {}),
+    paiements: paiementsTvaComplets, ecritures: ecrTiers as any[], achatsExclus: achatsExclusTva,
+  });
 
   // ── Graphiques : ventilation PCM + balance âgée ─────────────────────────────
   // Les intitulés viennent du référentiel `pcm_reference` — la même source que le
@@ -551,7 +583,7 @@ function DashboardPage() {
                 <div className="rounded-lg border p-3">
                   <p className="text-xs text-muted-foreground">TVA collectée</p>
                   <p className="text-xl font-bold text-purple-600 mt-1">{fmt(syntheseTva.collectee)}</p>
-                  <p className="text-[10px] text-muted-foreground mt-1">Sur ventes réellement encaissées</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">Sur ventes réellement encaissées{periodeCarte ? ` — période ${periodeCarte.periode}` : ""}</p>
                 </div>
                 <div className="rounded-lg border p-3">
                   <p className="text-xs text-muted-foreground">TVA déductible</p>

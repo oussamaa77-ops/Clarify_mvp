@@ -39,6 +39,7 @@ function fakeSb(
       let patch: any = null;
       let colonnes = "";
       let unique = false;
+      let plage: [number, number] | null = null;
 
       const absente = { data: null, error: { code: "42703", message: 'column "pointe" does not exist' } };
       const executer = () => {
@@ -52,7 +53,8 @@ function fakeSb(
           for (const r of vises) Object.assign(r, patch);
           return { data: vises, error: null };
         }
-        return unique ? { data: vises[0] ?? null, error: null } : { data: vises, error: null };
+        const page = plage ? vises.slice(plage[0], plage[1] + 1) : vises;
+        return unique ? { data: vises[0] ?? null, error: null } : { data: page, error: null };
       };
 
       const q: any = {
@@ -66,6 +68,8 @@ function fakeSb(
           return q;
         },
         maybeSingle() { unique = true; return q; },
+        order() { return q; },
+        range(de: number, a: number) { plage = [de, a]; return q; },
         then(res: any, rej: any) { return Promise.resolve(executer()).then(res, rej); },
       };
       return q;

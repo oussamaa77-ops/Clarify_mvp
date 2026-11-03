@@ -293,6 +293,16 @@ describe("régime IS des établissements de crédit", () => {
     const r = calculerIS({ exercice: 2026, resultatFiscal: 1_000_000, baseCotisationMinimale: 0, regime: "etablissement_credit" });
     expect(r.isTheorique).toBe(400_000);
   });
+  it("applique les paliers transitoires 37,75 / 38,50 / 39,25 % (NC DGI 733) avant 2026", () => {
+    expect([2023, 2024, 2025, 2026].map((a) => trancheIS(1_000_000, "etablissement_credit", a).taux))
+      .toEqual([0.3775, 0.385, 0.3925, 0.40]);
+    expect(calculerIS({ exercice: 2024, resultatFiscal: 1_000_000, baseCotisationMinimale: 0, regime: "etablissement_credit" }).isTheorique).toBe(385_000);
+  });
+  it("barème de droit commun 2023-2025 conforme au tableau de la NC DGI 733", () => {
+    const taux = (a: number, bn: number) => trancheIS(bn, "droit_commun", a).taux;
+    expect([2023, 2024, 2025].map((a) => [taux(a, 200_000), taux(a, 500_000), taux(a, 5_000_000), taux(a, 150_000_000)]))
+      .toEqual([[0.125, 0.2, 0.2825, 0.32], [0.15, 0.2, 0.255, 0.33], [0.175, 0.2, 0.2275, 0.34]]);
+  });
   it("est lu depuis le dossier, une valeur inconnue retombant sur le droit commun", () => {
     expect(lireParametresFiscaux({ regime_is: "etablissement_credit" }).regimeIS).toBe("etablissement_credit");
     expect(normaliserRegimeIS("autre")).toBe("droit_commun");

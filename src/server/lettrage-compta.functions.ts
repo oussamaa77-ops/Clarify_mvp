@@ -111,34 +111,74 @@ export async function compensationsRecevables(sb: any, dossierId: string): Promi
   return (await lireCompensations(sb, dossierId)).lignes;
 }
 
+/** Délai maximal d'une page de lecture du grand livre de trésorerie. */
+export const DELAI_LECTURE_PREUVE_MS = 15_000;
+const TAILLE_PAGE_PREUVE = 1000;
+
+/**
+ * Lignes BQ / CAI du dossier, TOUTES pages lues (PostgREST plafonne une réponse
+ * à 1 000 lignes : sans pagination, la preuve d'un règlement ancien serait
+ * ignorée sur un gros dossier). Toute anomalie rend `{ erreur }` — jamais une
+ * liste partielle ou vide qui passerait pour « aucun règlement ».
+ */
+export async function lireTresoreriePreuve(
+  sb: any, dossierId: string, delaiMs: number = DELAI_LECTURE_PREUVE_MS,
+): Promise<{ lignes: LigneTresoreriePreuve[] } | { erreur: string }> {
+  const lignes: LigneTresoreriePreuve[] = [];
+  try {
+    for (let de = 0; ; de += TAILLE_PAGE_PREUVE) {
+      let minuteur: ReturnType<typeof setTimeout> | undefined;
+      const delai = new Promise<never>((_, rej) => {
+        minuteur = setTimeout(() => rej(new Error(`délai de ${delaiMs} ms dépassé`)), delaiMs);
+      });
+      const requete = sb.from("ecritures_comptables")
+        .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
+        .eq("dossier_id", dossierId)
+        .in("journal_code", [...JOURNAUX_REGLEMENT])
+        .order("id")
+        .range(de, de + TAILLE_PAGE_PREUVE - 1);
+      let rep: { data: any; error: any };
+      try {
+        rep = await Promise.race([requete, delai]);
+      } finally {
+        clearTimeout(minuteur);
+      }
+      if (rep?.error) return { erreur: `lecture du grand livre en échec : ${rep.error.message ?? rep.error}` };
+      if (!Array.isArray(rep?.data)) return { erreur: "lecture du grand livre sans données" };
+      lignes.push(...(rep.data as LigneTresoreriePreuve[]));
+      if (rep.data.length < TAILLE_PAGE_PREUVE) return { lignes };
+    }
+  } catch (e: any) {
+    return { erreur: `lecture du grand livre impossible : ${e?.message ?? e}` };
+  }
+}
+
 export async function insererPiece(
   sb: any,
   dossierId: string,
   lignes: { journal_code: string; compte_numero: string; date_ecriture: string; libelle: string;
     debit: number; credit: number; reference_piece: string | null;
     facture_id?: string | null; paiement_id?: string | null }[],
-  opts: { lettrageCode?: string | null; origine?: string } = {},
+  opts: { lettrageCode?: string | null; origine?: string; delaiLectureMs?: number } = {},
 ): Promise<{ error: string | null }> {
   // ── VERROU 7 : une bascule de TVA exige un règlement CONSTATÉ ─────────────
   // (trésorerie BQ / CAI, ou compensation recevable — cf. lireCompensations).
   // Le contrôle a besoin du grand livre, qu'une fonction pure ne peut pas
   // connaître : c'est ICI, seul passage obligé vers la base, qu'on le lit.
   //
-  // Une requête en ÉCHEC ne prouve rien et n'infirme rien. On n'arme donc le
-  // verrou que sur une lecture réussie — sinon une panne de lecture refuserait
-  // des bascules parfaitement régulières, et le régime des encaissements
-  // s'arrêterait sur un incident réseau.
+  // Le verrou est FERMÉ PAR DÉFAUT : une lecture en échec (erreur Supabase,
+  // délai dépassé, réponse sans données, exception) ne prouve aucun règlement,
+  // donc la bascule est REFUSÉE. Le règlement qui la déclenche, lui, est déjà
+  // enregistré par l'appelant : seule la TVA attend, et la bascule sera rejouée
+  // (passe des règlements, lettrage) une fois la lecture rétablie.
   let tresorerie: LigneTresoreriePreuve[] | undefined;
   if (estBasculeTva(lignes)) {
-    try {
-      const { data, error } = await sb.from("ecritures_comptables")
-        .select("journal_code,compte_numero,date_ecriture,debit,credit,reference_piece,lettrage_code,facture_id")
-        .eq("dossier_id", dossierId)
-        .in("journal_code", [...JOURNAUX_REGLEMENT]);
-      if (!error) tresorerie = (data ?? []) as LigneTresoreriePreuve[];
-    } catch {
-      // Client sans `select` (bouchons de test) : verrou non armé, à dessein.
+    const lu = await lireTresoreriePreuve(sb, dossierId, opts.delaiLectureMs);
+    if ("erreur" in lu) {
+      return { error: `Bascule de TVA refusée : preuve de règlement invérifiable (${lu.erreur}). `
+        + `Le règlement est conservé ; la TVA reste en attente et sera basculée à la prochaine passe.` };
     }
+    tresorerie = lu.lignes;
   }
 
   // Compensation de créances réciproques : un règlement SANS mouvement d'argent,

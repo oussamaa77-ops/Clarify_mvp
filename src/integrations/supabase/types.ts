@@ -581,6 +581,7 @@ export type Database = {
           compte_caisse: string | null
           compte_banque: string | null
           patente: string | null
+          periodicite_tva: "option_mensuelle" | "saisonniere" | "non_resident" | null
         }
         Insert: {
           id?: string
@@ -607,6 +608,7 @@ export type Database = {
           compte_caisse?: string | null
           compte_banque?: string | null
           patente?: string | null
+          periodicite_tva?: "option_mensuelle" | "saisonniere" | "non_resident" | null
         }
         Update: {
           id?: string
@@ -633,6 +635,7 @@ export type Database = {
           compte_caisse?: string | null
           compte_banque?: string | null
           patente?: string | null
+          periodicite_tva?: "option_mensuelle" | "saisonniere" | "non_resident" | null
         }
         Relationships: [
         {
@@ -1152,6 +1155,7 @@ export type Database = {
           ice_acheteur: string | null
           if_acheteur: string | null
           dgi_status: string
+          type: "facture" | "avoir" | null
         }
         Insert: {
           id?: string
@@ -1186,6 +1190,7 @@ export type Database = {
           ice_acheteur?: string | null
           if_acheteur?: string | null
           dgi_status?: string
+          type?: "facture" | "avoir" | null
         }
         Update: {
           id?: string
@@ -1220,6 +1225,7 @@ export type Database = {
           ice_acheteur?: string | null
           if_acheteur?: string | null
           dgi_status?: string
+          type?: "facture" | "avoir" | null
         }
         Relationships: [
         {
@@ -1524,6 +1530,8 @@ export type Database = {
           fichier_original_url: string | null
           fichier_original_nom: string | null
           fichier_original_type: string | null
+          date_signature: string | null
+          signature_parties: boolean
         }
         Insert: {
           id?: string
@@ -1551,6 +1559,8 @@ export type Database = {
           fichier_original_url?: string | null
           fichier_original_nom?: string | null
           fichier_original_type?: string | null
+          date_signature?: string | null
+          signature_parties?: boolean
         }
         Update: {
           id?: string
@@ -1578,6 +1588,8 @@ export type Database = {
           fichier_original_url?: string | null
           fichier_original_nom?: string | null
           fichier_original_type?: string | null
+          date_signature?: string | null
+          signature_parties?: boolean
         }
         Relationships: [
         {
@@ -1689,6 +1701,7 @@ export type Database = {
           transaction_id: string | null
           reference: string | null
           created_at: string
+          ventilation_id: string | null
         }
         Insert: {
           id?: string
@@ -1702,6 +1715,7 @@ export type Database = {
           transaction_id?: string | null
           reference?: string | null
           created_at?: string
+          ventilation_id?: string | null
         }
         Update: {
           id?: string
@@ -1715,6 +1729,7 @@ export type Database = {
           transaction_id?: string | null
           reference?: string | null
           created_at?: string
+          ventilation_id?: string | null
         }
         Relationships: [
         {
@@ -2458,6 +2473,65 @@ export type Database = {
           columns: ["compte_id"]
           isOneToOne: false
           referencedRelation: "comptes_bancaires"
+          referencedColumns: ["id"]
+        },
+      ]
+      }
+      "ventilations_transaction": {
+        Row: {
+          id: string
+          dossier_id: string
+          transaction_id: string
+          facture_id: string | null
+          facture_fournisseur_id: string | null
+          montant: number
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          dossier_id: string
+          transaction_id: string
+          facture_id?: string | null
+          facture_fournisseur_id?: string | null
+          montant: number
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          dossier_id?: string
+          transaction_id?: string
+          facture_id?: string | null
+          facture_fournisseur_id?: string | null
+          montant?: number
+          created_at?: string
+        }
+        Relationships: [
+        {
+          foreignKeyName: "ventilations_transaction_dossier_id_fkey"
+          columns: ["dossier_id"]
+          isOneToOne: false
+          referencedRelation: "dossiers"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "ventilations_transaction_transaction_id_fkey"
+          columns: ["transaction_id"]
+          isOneToOne: false
+          referencedRelation: "transactions_bancaires"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "ventilations_transaction_facture_id_fkey"
+          columns: ["facture_id"]
+          isOneToOne: false
+          referencedRelation: "factures"
+          referencedColumns: ["id"]
+        },
+        {
+          foreignKeyName: "ventilations_transaction_facture_fournisseur_id_fkey"
+          columns: ["facture_fournisseur_id"]
+          isOneToOne: false
+          referencedRelation: "factures_fournisseurs"
           referencedColumns: ["id"]
         },
       ]

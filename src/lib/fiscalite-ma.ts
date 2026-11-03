@@ -136,8 +136,11 @@ export const BAREME_IS: TrancheIS[] = [
  * 20 % au lieu de 15 % sur un bénéfice de 200 000 MAD en 2024, par exemple.
  *
  * Paliers vérifiés : ≤ 300 000 → 12,5 / 15 / 17,5 % ; 300 000 – 1 MDH → 20 % ;
- * 1 MDH – 100 MDH → 28,25 / 25,5 / 22,75 %. Palier ≥ 100 MDH (32 / 33 / 34 %) :
- * 32 % pour 2023 cité par la note circulaire DGI n° 733 ; suite à confirmer.
+ * 1 MDH – 100 MDH → 28,25 / 25,5 / 22,75 % ; ≥ 100 MDH → 32 / 33 / 34 %.
+ * Source : note circulaire DGI n° 733 (LF 2023), tableau des taux 2023-2026.
+ * Une société dont le bénéfice a atteint 100 MDH sur l'un de ces exercices ne
+ * peut plus bénéficier d'un taux inférieur (art. 247-XXXVII-A, dernier alinéa) :
+ * non géré ici, à vérifier sur la liasse.
  */
 const BAREMES_TRANSITOIRES_IS: Record<number, TrancheIS[]> = Object.fromEntries(
   ([[2023, 0.125, 0.2825, 0.32], [2024, 0.15, 0.255, 0.33], [2025, 0.175, 0.2275, 0.34]] as const)
@@ -177,13 +180,28 @@ export const TRANCHE_IS_SPECIFIQUE: TrancheIS = {
   label: "Taux spécifique 20 % (statut particulier)",
 };
 
-/** Taux des établissements de crédit et des assurances (art. 19-I-C CGI). */
+/** Taux CIBLE des établissements de crédit et des assurances (art. 19-I-C CGI), 2026 et suivants. */
 export const TAUX_IS_ETABLISSEMENT_CREDIT = 0.40;
 
 export const TRANCHE_IS_ETABLISSEMENT_CREDIT: TrancheIS = {
   plancher: 0, taux: TAUX_IS_ETABLISSEMENT_CREDIT,
   label: "Établissements de crédit et assurances — 40 %",
 };
+
+/**
+ * Paliers transitoires des établissements de crédit et organismes assimilés,
+ * Bank Al-Maghrib, CDG, assurances et réassurance (art. 247-XXXVII-A CGI) :
+ * 37 % en 2022 majoré à 37,75 / 38,50 / 39,25 % puis 40 % en 2026 (NC DGI n° 733).
+ */
+const TAUX_TRANSITOIRES_ETABLISSEMENT_CREDIT: Record<number, number> = { 2023: 0.3775, 2024: 0.385, 2025: 0.3925 };
+
+/** Tranche des établissements de crédit applicable à l'exercice. */
+export function trancheEtablissementCredit(exercice?: number | null): TrancheIS {
+  const a = Number(exercice);
+  if (!Number.isFinite(a) || a >= 2026) return TRANCHE_IS_ETABLISSEMENT_CREDIT;
+  const taux = TAUX_TRANSITOIRES_ETABLISSEMENT_CREDIT[Math.max(2023, a)];
+  return { plancher: 0, taux, label: `Établissements de crédit et assurances — ${(taux * 100).toFixed(2).replace(".", ",")} % (barème transitoire ${Math.max(2023, a)})` };
+}
 
 const REGIMES_IS: readonly RegimeIS[] = ["droit_commun", "taux_specifique", "etablissement_credit"];
 
@@ -207,7 +225,7 @@ export function trancheIS(
   resultatFiscal: number, regime: RegimeIS = "droit_commun", exercice?: number | null,
 ): TrancheIS {
   if (regime === "taux_specifique") return TRANCHE_IS_SPECIFIQUE;
-  if (regime === "etablissement_credit") return TRANCHE_IS_ETABLISSEMENT_CREDIT;
+  if (regime === "etablissement_credit") return trancheEtablissementCredit(exercice);
   const base = Math.max(0, n(resultatFiscal));
   const bareme = baremeIS(exercice);
   let retenue = bareme[0];

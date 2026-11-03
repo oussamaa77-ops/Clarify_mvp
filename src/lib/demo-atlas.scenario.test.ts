@@ -38,6 +38,7 @@ function fakeSb() {
       const filtres: ((r: any) => boolean)[] = [];
       let op: "select" | "update" | "delete" | "insert" = "select";
       let patch: any = null; let inserted: any[] = []; let unique = false;
+      let plage: [number, number] | null = null;
       const cibles = () => rows.filter((r) => filtres.every((f) => f(r)));
       const executer = () => {
         if (op === "insert") {
@@ -48,7 +49,7 @@ function fakeSb() {
         const t = cibles();
         if (op === "update") { for (const r of t) Object.assign(r, patch); return { data: t, error: null, count: t.length }; }
         if (op === "delete") { for (const r of t) rows.splice(rows.indexOf(r), 1); return { data: null, error: null, count: t.length }; }
-        const data = t.map((r) => ({ ...r }));
+        const data = (plage ? t.slice(plage[0], plage[1] + 1) : t).map((r) => ({ ...r }));
         return { data: unique ? (data[0] ?? null) : data, error: null, count: t.length };
       };
       const q: any = {
@@ -62,6 +63,7 @@ function fakeSb() {
         is(c: string, v: any) { filtres.push((r) => (v === null ? r[c] == null : r[c] === v)); return q; },
         not(c: string) { filtres.push((r) => r[c] != null); return q; },
         order() { return q; },
+        range(de: number, a: number) { plage = [de, a]; return q; },
         maybeSingle() { unique = true; return q; },
         then(res: any, rej: any) { try { return Promise.resolve(executer()).then(res, rej); } catch (e) { return Promise.reject(e).catch(rej); } },
       };

@@ -4,7 +4,7 @@ import {
   synthetiserTva,
   tvaRecuperableEnCours,
   echeanceSimplTva, tvaHorsFactures, classerDeductibiliteAchats,
-  calendrierTva, periodiciteTva, periodesDeclareesTva, prochaineEcheanceTva, etatsDeclarationsTva,
+  calendrierTva, periodiciteTva, periodesDeclareesTva, prochaineEcheanceTva, etatsDeclarationsTva, caTaxableTva,
   reglementsParCompensation,
   joursAvant,
   ventilerChargesParCompte,
@@ -652,9 +652,17 @@ describe("périodicité TVA — art. 108, année par année", () => {
 describe("calendrier TVA — état réel des déclarations", () => {
   const auj = new Date(2026, 10, 3); // 3 novembre 2026
   const odLiquidation = (p: string, du: number) => [
-    { reference_piece: `DECL-TVA-${p}`, compte_numero: "44551", debit: du, credit: 0 },
-    { reference_piece: `DECL-TVA-${p}`, compte_numero: "4456", debit: 0, credit: du },
+    { reference_piece: `DECL-TVA-${p}`, journal_code: "OD", date_ecriture: "2026-09-30", compte_numero: "44551", debit: du, credit: 0 },
+    { reference_piece: `DECL-TVA-${p}`, journal_code: "OD", date_ecriture: "2026-09-30", compte_numero: "4456", debit: 0, credit: du },
   ];
+  /** Règlement DGI tel que l'écrit construireOdPaiementDgi : BQ, D 4456 / C 5141. */
+  const paiementDgi = (p: string, m: number, date = "2026-10-25") => [
+    { reference_piece: `DECL-TVA-${p}`, journal_code: "BQ", date_ecriture: date, compte_numero: "44560000", debit: m, credit: 0 },
+    { reference_piece: `DECL-TVA-${p}`, journal_code: "BQ", date_ecriture: date, compte_numero: "51410000", debit: 0, credit: m },
+  ];
+  const statut = (ecr: any[], recepisses: string[], p: string) =>
+    calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats: etatsDeclarationsTva(ecr, recepisses) })
+      .find((e) => e.periode === p)?.statut;
 
   it("une OD de liquidation SANS récépissé laisse la période non déposée", () => {
     const etats = etatsDeclarationsTva(odLiquidation("2026-09", 500), []);
@@ -667,15 +675,51 @@ describe("calendrier TVA — état réel des déclarations", () => {
     const ecr = [...odLiquidation("2026-09", 500)];
     expect(calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats: etatsDeclarationsTva(ecr, ["DECL-TVA-2026-09.pdf"]) })
       .find((e) => e.periode === "2026-09")?.statut).toBe("a_payer");
-    ecr.push({ reference_piece: "DECL-TVA-2026-09", compte_numero: "4456", debit: 500, credit: 0 });
+    ecr.push(...paiementDgi("2026-09", 500));
     expect(calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats: etatsDeclarationsTva(ecr, ["DECL-TVA-2026-09.pdf"]) })
       .find((e) => e.periode === "2026-09")?.statut).toBe("reglee");
   });
 
-  it("une période en crédit déposée est réglée sans paiement", () => {
-    const ecr = [{ reference_piece: "DECL-TVA-2026-10", compte_numero: "3456", debit: 300, credit: 0 }];
-    const etats = etatsDeclarationsTva(ecr, ["DECL-TVA-2026-10.pdf"]);
-    expect(calendrierTva({ periodicite: "mensuel", aujourdhui: auj, etats }).find((e) => e.periode === "2026-10")?.statut).toBe("reglee");
+  it("un débit 4456 en OD (sans trésorerie) n'est PAS un paiement", () => {
+    const ecr = [...odLiquidation("2026-09", 500),
+      { reference_piece: "DECL-TVA-2026-09", journal_code: "OD", date_ecriture: "2026-10-25", compte_numero: "4456", debit: 500, credit: 0 },
+      { reference_piece: "DECL-TVA-2026-09", journal_code: "OD", date_ecriture: "2026-10-25", compte_numero: "4411", debit: 0, credit: 500 }];
+    expect(statut(ecr, ["DECL-TVA-2026-09.pdf"], "2026-09")).toBe("a_payer");
+    expect(etatsDeclarationsTva(ecr, []).get("2026-09")).toMatchObject({ montantDu: 500, montantPaye: 0 });
+  });
+
+  it("un paiement BQ sans contrepartie 51 n'est pas retenu ; un paiement partiel laisse « à payer »", () => {
+    const sansBanque = [...odLiquidation("2026-09", 500),
+      { reference_piece: "DECL-TVA-2026-09", journal_code: "BQ", date_ecriture: "2026-10-25", compte_numero: "4456", debit: 500, credit: 0 },
+      { reference_piece: "DECL-TVA-2026-09", journal_code: "BQ", date_ecriture: "2026-10-25", compte_numero: "4411", debit: 0, credit: 500 }];
+    expect(statut(sansBanque, ["DECL-TVA-2026-09.pdf"], "2026-09")).toBe("a_payer");
+    const partiel = [...odLiquidation("2026-09", 500), ...paiementDgi("2026-09", 200)];
+    expect(statut(partiel, ["DECL-TVA-2026-09.pdf"], "2026-09")).toBe("a_payer");
+    expect(etatsDeclarationsTva(partiel, []).get("2026-09")).toMatchObject({ montantDu: 500, montantPaye: 200 });
+  });
+
+  it("le paiement n'établit PAS le dépôt : payée sans récépissé reste non déposée", () => {
+    const ecr = [...odLiquidation("2026-09", 500), ...paiementDgi("2026-09", 500)];
+    expect(statut(ecr, [], "2026-09")).toBe("en_retard");
+  });
+
+  it("une période en CRÉDIT déposée est « crédit », jamais « payée »", () => {
+    const ecr = [
+      { reference_piece: "DECL-TVA-2026-10", journal_code: "OD", date_ecriture: "2026-10-31", compte_numero: "34560000", debit: 300, credit: 0 },
+      { reference_piece: "DECL-TVA-2026-10", journal_code: "OD", date_ecriture: "2026-10-31", compte_numero: "34552000", debit: 0, credit: 300 },
+    ];
+    expect(statut(ecr, ["DECL-TVA-2026-10.pdf"], "2026-10")).toBe("credit");
+    expect(etatsDeclarationsTva(ecr, []).get("2026-10")).toMatchObject({ creditReporte: 300, montantDu: 0, montantPaye: 0 });
+  });
+
+  it("une période sans dette ni crédit déposée est « néant » ; déposée sans OD : « non liquidée »", () => {
+    // Dette entièrement couverte par un crédit antérieur : C 3456 / D 44551, aucun 4456.
+    const couverte = [
+      { reference_piece: "DECL-TVA-2026-10", journal_code: "OD", date_ecriture: "2026-10-31", compte_numero: "44551000", debit: 120, credit: 0 },
+      { reference_piece: "DECL-TVA-2026-10", journal_code: "OD", date_ecriture: "2026-10-31", compte_numero: "34560000", debit: 0, credit: 120 },
+    ];
+    expect(statut(couverte, ["DECL-TVA-2026-10.pdf"], "2026-10")).toBe("neant");
+    expect(statut([], ["DECL-TVA-2026-10.pdf"], "2026-10")).toBe("non_liquidee");
   });
 
   it("applique à chaque année SA périodicité, et le début d'activité", () => {
@@ -706,5 +750,40 @@ describe("reglementsParCompensation — règlements datés de la signature", () 
   it("retient la part compensée, datée de la signature et non de l'OD", () => {
     const p = reglementsParCompensation(ecr, [{ id: "ff1" }], "fournisseur", new Map([["CV-7", "2026-05-20"]]));
     expect(p).toEqual([{ facture_fournisseur_id: "ff1", montant: 4000, date_paiement: "2026-05-20", origine: "compensation", reference: "COMP-CV-7" }]);
+  });
+});
+
+describe("caTaxableTva — CA taxable de l'art. 108, par nature fiscale", () => {
+  const v = (o: any) => ({ statut: "conforme", type: "facture", date_facture: "2025-06-01", montant_ht: 0, montant_tva: 0, ...o });
+
+  it("retient les ventes soumises à TVA (acomptes compris), déduit les avoirs, écarte les ventes sans TVA", () => {
+    const ca = caTaxableTva([
+      v({ numero: "F1", montant_ht: 900_000, montant_tva: 180_000 }),
+      v({ numero: "AC1", type: "acompte", montant_ht: 150_000, montant_tva: 30_000 }),
+      v({ numero: "AV1", type: "avoir", montant_ht: -40_000, montant_tva: -8_000 }),
+      v({ numero: "EXO1", montant_ht: 300_000, montant_tva: 0 }),
+      v({ numero: "PF1", type: "proforma", montant_ht: 999_999, montant_tva: 199_999 }),
+      v({ numero: "R1", statut: "rejetee", montant_ht: 500_000, montant_tva: 100_000 }),
+      v({ numero: "F2024", date_facture: "2024-12-31", montant_ht: 5_000_000, montant_tva: 1_000_000 }),
+    ], 2025)!;
+    expect(ca.montant).toBe(1_010_000);
+    expect(ca.retenues).toEqual({ nb: 2, ht: 1_050_000 });
+    expect(ca.avoirs).toEqual({ nb: 1, ht: 40_000 });
+    expect(ca.sansTva).toMatchObject({ nb: 1, ht: 300_000, numeros: ["EXO1"] });
+    expect(ca.ignorees).toBe(2);
+    expect(ca.justification).toContain("1 vente(s) sans TVA écartée(s)");
+  });
+
+  it("sans vente dans l'année : CA INCONNU (null), pas nul", () => {
+    expect(caTaxableTva([v({ date_facture: "2024-05-01", montant_ht: 10, montant_tva: 2 })], 2025)).toBeNull();
+  });
+
+  it("une vente exonérée ne fait pas basculer en mensuel ; la justification figure au motif", () => {
+    const ventes = [v({ montant_ht: 800_000, montant_tva: 160_000 }), v({ montant_ht: 400_000, montant_tva: 0 })];
+    const p = periodiciteTva({}, 2026, caTaxableTva(ventes, 2025));
+    expect(p).toMatchObject({ periodicite: "trimestriel", source: "chiffre_affaires" });
+    expect(p.motif).toContain(caTaxableTva(ventes, 2025)!.justification);
+    expect(caTaxableTva(ventes, 2025)!.montant).toBe(800_000);
+    expect(periodiciteTva({}, 2026, caTaxableTva([v({ montant_ht: 1_000_000, montant_tva: 200_000 })], 2025)).periodicite).toBe("mensuel");
   });
 });

@@ -103,6 +103,29 @@ export function filtrerExercice<T extends Record<string, any>>(
   return (lignes ?? []).filter((l) => dansExercice(l?.[champ], bornes));
 }
 
+/** Plafond d'une réponse PostgREST. */
+export const TAILLE_PAGE_POSTGREST = 1000;
+
+/**
+ * Lit TOUTES les pages d'une requête PostgREST. `page(de, a)` construit la
+ * requête de la page (filtres + `.order(...)` stable + `.range(de, a)`).
+ * Une page en erreur interrompt la lecture et rend `erreur` : jamais une liste
+ * partielle présentée comme complète.
+ */
+export async function lireToutesPages<T = any>(
+  page: (de: number, a: number) => PromiseLike<{ data: T[] | null; error: any }>,
+  taille: number = TAILLE_PAGE_POSTGREST,
+): Promise<{ lignes: T[]; erreur: any | null }> {
+  const lignes: T[] = [];
+  for (let de = 0; ; de += taille) {
+    const { data, error } = await page(de, de + taille - 1);
+    if (error) return { lignes, erreur: error };
+    const rows = data ?? [];
+    lignes.push(...rows);
+    if (rows.length < taille) return { lignes, erreur: null };
+  }
+}
+
 /**
  * Toutes les dates d'écriture d'un dossier, lues PAR PAGES de 1 000.
  *

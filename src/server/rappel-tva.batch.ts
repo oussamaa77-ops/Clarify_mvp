@@ -22,8 +22,9 @@ import { rappelEcheanceTVA } from "./email.templates";
 import { COMPTES_TVA } from "../services/lettrage";
 import { proxyFetch } from "./proxy-fetch";
 import {
-  calendrierTva, echeanceSimplTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva,
+  calendrierTva, echeanceSimplTva, etatsDeclarationsTva, periodiciteTva, prochaineEcheanceTva, caTaxableTva,
 } from "../lib/dashboard-fiscal";
+import { lireToutesPages } from "../lib/exercice-comptable";
 import { PREFIXE_DECLARATION_TVA } from "../lib/liquidation-tva";
 
 
@@ -123,22 +124,20 @@ export async function executerRappelsTVAJ3(
     // période. Une OD de liquidation sans récépissé de dépôt ne fait PAS
     // disparaître le rappel ; une période sans opération ou en crédit se déclare aussi.
     const { data: decl } = await (sb as any).from("ecritures_comptables")
-      .select("reference_piece,compte_numero,debit,credit").eq("dossier_id", d.id).like("reference_piece", `${PREFIXE_DECLARATION_TVA}%`);
+      // journal + date : un paiement n'est retenu que s'il passe en BQ / CAI
+      // contre un compte 51 (cf. etatsDeclarationsTva).
+      .select("reference_piece,compte_numero,debit,credit,journal_code,date_ecriture").eq("dossier_id", d.id).like("reference_piece", `${PREFIXE_DECLARATION_TVA}%`);
     let recepisses: string[] = [];
     try {
       const { data: rec } = await (sb as any).storage.from("quittances-tva").list(d.id, { limit: 1000 });
       recepisses = ((rec ?? []) as any[]).map((x) => x.name);
     } catch { /* sans bucket : aucune déclaration n'est réputée déposée */ }
-    const { data: caRows } = await (sb as any).from("ecritures_comptables")
-      .select("compte_numero,debit,credit,date_ecriture,journal_code").eq("dossier_id", d.id)
-      .or("compte_numero.like.711%,compte_numero.like.712%").gte("date_ecriture", `${today.getFullYear() - 2}-01-01`).neq("journal_code", "AN");
-    const caParAnnee = new Map<number, number>();
-    for (const l of (caRows ?? []) as any[]) {
-      const a = Number(String(l.date_ecriture).slice(0, 4));
-      caParAnnee.set(a, (caParAnnee.get(a) ?? 0) + Number(l.credit || 0) - Number(l.debit || 0));
-    }
+    // CA taxable (art. 108) : même calcul que le tableau de bord et Fiscalité.
+    const { lignes: ventesCa } = await lireToutesPages((de, a) => (sb as any).from("factures")
+      .select("id,numero,statut,type,date_facture,montant_ht,montant_tva").eq("dossier_id", d.id)
+      .gte("date_facture", `${today.getFullYear() - 2}-01-01`).order("id").range(de, a));
     const due = prochaineEcheanceTva(calendrierTva({
-      periodicite: (annee) => periodiciteTva(d, annee, caParAnnee.get(annee - 1) ?? null).periodicite, aujourdhui: today,
+      periodicite: (annee) => periodiciteTva(d, annee, caTaxableTva(ventesCa, annee - 1)).periodicite, aujourdhui: today,
       etats: etatsDeclarationsTva((decl ?? []) as any[], recepisses),
       dateDebutActivite: d.date_debut_activite ?? null,
     }));

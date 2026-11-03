@@ -268,9 +268,18 @@ describe("insererPiece — la frontière d'écriture", () => {
     const rows: any[] = [];
     return {
       rows,
-      from: () => ({
-        insert: async (r: any[]) => { rows.push(...r); return { error: null }; },
-      }),
+      // La pièce de test est une bascule de TVA : le verrou 7 (fermé par défaut)
+      // lit le grand livre, qui porte ici le règlement de FA-1.
+      from: () => {
+        const q: any = {
+          insert: async (r: any[]) => { rows.push(...r); return { error: null }; },
+          select: () => q, eq: () => q, in: () => q, order: () => q, range: () => q,
+          then: (res: any, rej: any) => Promise.resolve({ data: [{
+            journal_code: "BQ", compte_numero: "34210001", date_ecriture: "2026-03-20",
+            debit: 0, credit: 1440, reference_piece: "FA-1" }], error: null }).then(res, rej),
+        };
+        return q;
+      },
     };
   };
 
@@ -342,14 +351,17 @@ describe("insererPiece — verrou 7, bascule sans règlement constaté", () => {
       from() {
         let op: "select" | "insert" = "select";
         let payload: any[] = [];
+        let plage: [number, number] | null = null;
         const q: any = {
           select() { op = "select"; return q; },
           insert(p: any) { op = "insert"; payload = Array.isArray(p) ? p : [p]; return q; },
           eq() { return q; },
           in() { return q; },
+          order() { return q; },
+          range(de: number, a: number) { plage = [de, a]; return q; },
           then(res: any, rej: any) {
             if (op === "insert") { rows.push(...payload); return Promise.resolve({ error: null }).then(res, rej); }
-            return Promise.resolve({ data: tresorerie, error: null }).then(res, rej);
+            return Promise.resolve({ data: plage ? tresorerie.slice(plage[0], plage[1] + 1) : tresorerie, error: null }).then(res, rej);
           },
         };
         return q;
@@ -417,14 +429,90 @@ describe("insererPiece — verrou 7, bascule sans règlement constaté", () => {
     expect(sb.rows).toHaveLength(2);
   });
 
-  it("un client sans `select` laisse le verrou DÉSARMÉ, jamais bloquant", async () => {
-    // Choix délibéré : une lecture impossible ne prouve rien et n'infirme rien.
-    // Refuser par défaut arrêterait le régime des encaissements sur un incident.
+  // ── Verrou FERMÉ par défaut : une lecture qui échoue ne prouve rien ──────
+  /** Faux Supabase dont la lecture du grand livre rend `reponse` (ou la promesse). */
+  const sbLecture = (reponse: () => Promise<any>) => {
+    const rows: any[] = [];
+    return {
+      rows,
+      from() {
+        let op: "select" | "insert" = "select";
+        let payload: any[] = [];
+        const q: any = {
+          select() { op = "select"; return q; },
+          insert(p: any) { op = "insert"; payload = Array.isArray(p) ? p : [p]; return q; },
+          eq() { return q; }, in() { return q; }, order() { return q; }, range() { return q; },
+          then(res: any, rej: any) {
+            if (op === "insert") { rows.push(...payload); return Promise.resolve({ error: null }).then(res, rej); }
+            return reponse().then(res, rej);
+          },
+        };
+        return q;
+      },
+    };
+  };
+
+  it("REFUSE la bascule sur une ERREUR Supabase — rien n'est inséré", async () => {
+    const sb = sbLecture(async () => ({ data: null, error: { message: "permission denied" } }));
+    const { error } = await insererPiece(sb, D, basculeVente());
+    expect(error).toMatch(/preuve de règlement invérifiable/);
+    expect(error).toMatch(/permission denied/);
+    expect(sb.rows).toHaveLength(0);
+  });
+
+  it("REFUSE la bascule sur un DÉLAI dépassé", async () => {
+    const sb = sbLecture(() => new Promise(() => {})); // ne répond jamais
+    const { error } = await insererPiece(sb, D, basculeVente(), { delaiLectureMs: 20 });
+    expect(error).toMatch(/délai de 20 ms dépassé/);
+    expect(sb.rows).toHaveLength(0);
+  });
+
+  it("REFUSE la bascule sur une réponse SANS DONNÉES (data null, pas d'erreur)", async () => {
+    const sb = sbLecture(async () => ({ data: null, error: null }));
+    const { error } = await insererPiece(sb, D, basculeVente());
+    expect(error).toMatch(/sans données/);
+    expect(sb.rows).toHaveLength(0);
+  });
+
+  it("REFUSE la bascule sur une EXCEPTION réseau", async () => {
+    const sb = sbLecture(async () => { throw new Error("fetch failed"); });
+    const { error } = await insererPiece(sb, D, basculeVente());
+    expect(error).toMatch(/fetch failed/);
+    expect(sb.rows).toHaveLength(0);
+  });
+
+  it("un client sans `select` ne désarme plus le verrou : la bascule est refusée", async () => {
     const rows: any[] = [];
     const sbMuet: any = { from: () => ({ insert: async (r: any[]) => { rows.push(...r); return { error: null }; } }) };
     const { error } = await insererPiece(sbMuet, D, basculeVente());
+    expect(error).toMatch(/preuve de règlement invérifiable/);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("trouve la preuve au-delà de 1 000 lignes de trésorerie (pagination)", async () => {
+    const bruit = Array.from({ length: 1500 }, (_, i) => ({
+      journal_code: "BQ", compte_numero: "51410000", date_ecriture: "2026-04-01",
+      debit: 10, credit: 0, reference_piece: `AUTRE-${i}`,
+    }));
+    const sb = sbAvecGrandLivre([...bruit, {
+      journal_code: "BQ", compte_numero: "34210002", date_ecriture: "2026-05-06",
+      debit: 0, credit: 3468, reference_piece: "FA-2024-0892",
+    }]);
+    const { error } = await insererPiece(sb, D, basculeVente());
     expect(error).toBeNull();
-    expect(rows).toHaveLength(2);
+    expect(sb.rows).toHaveLength(2);
+  });
+
+  it("une pièce qui n'est PAS une bascule s'insère même si la lecture échouerait", async () => {
+    const sb = sbLecture(async () => ({ data: null, error: { message: "panne" } }));
+    const { error } = await insererPiece(sb, D, [
+      { journal_code: "OD", compte_numero: "44551", date_ecriture: "2026-07-31",
+        libelle: "Déclaration TVA", debit: 1880, credit: 0, reference_piece: "DECL-TVA-2026-07" },
+      { journal_code: "OD", compte_numero: "4456", date_ecriture: "2026-07-31",
+        libelle: "TVA due", debit: 0, credit: 1880, reference_piece: "DECL-TVA-2026-07" },
+    ]);
+    expect(error).toBeNull();
+    expect(sb.rows).toHaveLength(2);
   });
 });
 

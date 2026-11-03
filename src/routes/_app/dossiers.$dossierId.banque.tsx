@@ -1592,7 +1592,7 @@ function BanquePage() {
       const frais = hasDoc ? null : _detailFraisBancaires(tx, txExtraites as FraisLot[], pcm.tva);
       const r2e=(x:any)=>Math.round(Number(x||0)*100)/100;
       const document:DocumentEdi = facFourn
-        ? { nature:"facture_fournisseur", id:facFourn.id, ht:r2e(facFourn.montant_ht), tva:r2e(facFourn.montant_tva), ttc:r2e(facFourn.montant_ttc), type:(facFourn as any).type }
+        ? { nature:"facture_fournisseur", id:facFourn.id, ht:r2e(facFourn.montant_ht), tva:r2e(facFourn.montant_tva), ttc:r2e(facFourn.montant_ttc), type:facFourn.type }
         : facClient ? { nature:"facture_client" }
         : justi ? { nature:"justificatif", ht:r2e(justi.montant_ht), tva:r2e(Number(justi.montant_ttc)-Number(justi.montant_ht)), ttc:r2e(justi.montant_ttc), eligible_edi:justi.eligible_edi }
         : null;
@@ -1732,7 +1732,7 @@ function BanquePage() {
     // Une liaison saisie ici REMPLACE toute répartition antérieure de la ligne :
     // sans cela, synchroniser_paiements_dossier continuerait de lire l'ancienne
     // ventilation et ignorerait le document qu'on vient de choisir.
-    await (supabase.from("ventilations_transaction" as any) as any).delete().eq("transaction_id", liaisonTx.id);
+    await supabase.from("ventilations_transaction").delete().eq("transaction_id", liaisonTx.id);
     await (supabase.from("transactions_bancaires") as any)
       .update(txUpd)
       .eq("id", liaisonTx.id);

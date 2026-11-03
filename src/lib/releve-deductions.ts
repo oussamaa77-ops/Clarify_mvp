@@ -80,6 +80,8 @@ export interface AchatDeduction extends FactureFiscale {
   date_paiement?: string | null;
   /** Lignes de détail issues de l'OCR — source de la désignation. */
   lignes?: unknown;
+  /** factures_fournisseurs.type : « avoir » pour un avoir fournisseur. */
+  type?: "facture" | "avoir" | null;
 }
 
 /** Fournisseur : porte l'identité fiscale exigée par la DGI (IF et ICE). */
@@ -396,7 +398,7 @@ export function construireReleveDeductions(opts: OptionsReleveDeductions): Ligne
     if (f.id && opts.achatsExclus?.has(String(f.id))) continue;   // TVA non récupérable
     // Un AVOIR fournisseur ne fonde aucune déduction : il reprend une TVA déjà
     // déduite, ce que porte l'OD de reprise au lettrage, pas le relevé.
-    if (String((f as any).type ?? "").trim().toLowerCase() === "avoir") continue;
+    if (String(f.type ?? "").trim().toLowerCase() === "avoir") continue;
 
     const identite = resoudreIdentiteFiscale(f, opts.fournisseurs ?? []);
     const mode = (f.id ? opts.modes?.get(f.id) : undefined) ?? normaliserMode(f.mode_reglement);
